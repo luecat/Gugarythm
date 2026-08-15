@@ -116,6 +116,8 @@ namespace Gugarythm
         RectTransform simLineLayer;
         RectTransform noteLayer;
         RectTransform menuPanel;
+        RectTransform pauseOverlay;
+        RectTransform pauseMenuContent;
         RectTransform resultPanel;
         Text accuracyLabel;
         Text comboLabel;
@@ -123,12 +125,16 @@ namespace Gugarythm
         Text loadStatus;
         Text resultText;
         Text speedLabel;
+        Text resumeCountdownLabel;
         Button startButton;
+        Button pauseButton;
         Slider speedSlider;
         Material laneMaterial;
         bool running;
         bool loading;
         bool paused;
+        bool showingReady;
+        Coroutine resumeCoroutine;
         Rect appliedSafeArea = new(-1, -1, -1, -1);
         double scheduledDsp;
         double pauseDsp;
@@ -194,6 +200,11 @@ namespace Gugarythm
             var events = judgmentEngine.Process(songTime, inputBatch, contacts);
             foreach (var judgment in events) OnJudgment(judgment);
             UpdateVisuals(songTime + visualOffsetSeconds);
+            if (showingReady && noteViews.Count > 0)
+            {
+                showingReady = false;
+                ShowJudgment("", Color.white);
+            }
             RefreshHud();
             if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => !note.Judged || note.Grade != JudgmentGrade.Pending)) FinishGame();
         }
@@ -310,17 +321,96 @@ namespace Gugarythm
         void StartGame()
         {
             if (loading || chart == null || music.clip == null) return;
+            CancelResumeCountdown();
             ResetRuntime();
             menuPanel.gameObject.SetActive(false);
             resultPanel.gameObject.SetActive(false);
+            pauseOverlay.gameObject.SetActive(false);
+            pauseButton.gameObject.SetActive(true);
             running = true;
             paused = false;
             accumulatedPause = 0;
+            effects.UnPause();
             scheduledDsp = AudioSettings.dspTime + .25;
             music.time = 0;
             music.PlayScheduled(scheduledDsp);
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
+            showingReady = true;
             ShowJudgment("READY", Color.white);
+        }
+
+        void PauseGame()
+        {
+            if (!running || paused) return;
+            paused = true;
+            pauseDsp = AudioSettings.dspTime;
+            music.Pause();
+            effects.Pause();
+            touches.Clear();
+            pauseButton.gameObject.SetActive(false);
+            pauseMenuContent.gameObject.SetActive(true);
+            resumeCountdownLabel.gameObject.SetActive(false);
+            pauseOverlay.gameObject.SetActive(true);
+        }
+
+        void ContinueGame()
+        {
+            if (!running || !paused || resumeCoroutine != null) return;
+            resumeCoroutine = StartCoroutine(ResumeAfterCountdown());
+        }
+
+        IEnumerator ResumeAfterCountdown()
+        {
+            pauseMenuContent.gameObject.SetActive(false);
+            resumeCountdownLabel.gameObject.SetActive(true);
+            for (var count = 3; count >= 1; count--)
+            {
+                resumeCountdownLabel.text = count.ToString();
+                yield return new WaitForSecondsRealtime(1);
+            }
+
+            accumulatedPause += AudioSettings.dspTime - pauseDsp;
+            touches.Clear();
+            music.UnPause();
+            effects.UnPause();
+            paused = false;
+            pauseOverlay.gameObject.SetActive(false);
+            pauseButton.gameObject.SetActive(true);
+            resumeCoroutine = null;
+        }
+
+        void RestartGame()
+        {
+            if (!running) return;
+            CancelResumeCountdown();
+            music.Stop();
+            effects.Stop();
+            StartGame();
+        }
+
+        void ExitToMenu()
+        {
+            CancelResumeCountdown();
+            running = false;
+            paused = false;
+            showingReady = false;
+            music.Stop();
+            effects.Stop();
+            touches.Clear();
+            ReleaseAllViews();
+            pauseOverlay.gameObject.SetActive(false);
+            pauseButton.gameObject.SetActive(false);
+            resultPanel.gameObject.SetActive(false);
+            menuPanel.gameObject.SetActive(true);
+            RefreshHud();
+            ShowJudgment("", Color.white);
+        }
+
+        void CancelResumeCountdown()
+        {
+            if (resumeCoroutine == null) return;
+            StopCoroutine(resumeCoroutine);
+            resumeCoroutine = null;
         }
 
         void ResetRuntime()
@@ -449,6 +539,7 @@ namespace Gugarythm
 
         void OnJudgment(JudgmentEvent judgment)
         {
+            showingReady = false;
             var color = judgment.Grade switch
             {
                 JudgmentGrade.Perfect => new Color(.65f, 1f, 1f),
@@ -848,9 +939,15 @@ namespace Gugarythm
 
         void FinishGame()
         {
+            CancelResumeCountdown();
             running = false;
+            paused = false;
+            showingReady = false;
             music.Stop();
+            pauseOverlay.gameObject.SetActive(false);
+            pauseButton.gameObject.SetActive(false);
             ReleaseAllViews();
+            RefreshHud();
             resultPanel.gameObject.SetActive(true);
             resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}";
         }
@@ -956,6 +1053,7 @@ namespace Gugarythm
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot);
             BuildMenu(safeAreaRoot);
+            BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
         }
@@ -966,10 +1064,14 @@ namespace Gugarythm
             PinToAnchor(accuracy, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -24));
             Outline(accuracy.gameObject, new Color(.55f, .75f, 1f, .75f), 2);
             accuracyLabel = Label("ACCURACY  0.0000%", accuracy, 22); Fill(accuracyLabel.rectTransform);
-            comboLabel = Label("COMBO\n0", root, 38); comboLabel.rectTransform.sizeDelta = new Vector2(300, 130);
-            PinToAnchor(comboLabel.rectTransform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
+            comboLabel = Label("COMBO\n0", root, 52); comboLabel.rectTransform.sizeDelta = new Vector2(360, 170);
+            PinToAnchor(comboLabel.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-324, 80));
+            comboLabel.gameObject.SetActive(false);
             judgmentLabel = Label("", root, 48); judgmentLabel.rectTransform.sizeDelta = new Vector2(620, 80);
             PinToAnchor(judgmentLabel.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), new Vector2(0, -30));
+            pauseButton = MakeButton("暫停", root, new Vector2(-24, -24), PauseGame, new Vector2(150, 64));
+            PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
+            pauseButton.gameObject.SetActive(false);
         }
 
         void UpdateSafeAreaLayout(bool force = false)
@@ -988,6 +1090,7 @@ namespace Gugarythm
                 ReferenceWidth * safe.width / Screen.width,
                 CanvasHeight * safe.height / Screen.height);
             FitOverlayPanel(menuPanel, new Vector2(760, 570), logicalSafeSize);
+            FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
         }
 
@@ -1036,6 +1139,24 @@ namespace Gugarythm
             resultText = Label("", resultPanel, 27); resultText.rectTransform.sizeDelta = new Vector2(540, 440); resultText.rectTransform.anchoredPosition = new Vector2(0, 25);
             MakeButton("返回曲庫", resultPanel, new Vector2(0, -270), () => { resultPanel.gameObject.SetActive(false); menuPanel.gameObject.SetActive(true); });
             resultPanel.gameObject.SetActive(false);
+        }
+
+        void BuildPauseOverlay(RectTransform root)
+        {
+            pauseOverlay = Panel("Pause Overlay", root, new Color(0, 0, 0, .72f), Vector2.zero, Vector2.zero, true);
+            pauseOverlay.GetComponent<Image>().raycastTarget = true;
+            pauseMenuContent = Panel("Pause Menu", pauseOverlay, new Color(.04f, .06f, .14f, .98f), new Vector2(620, 520), Vector2.zero);
+            Outline(pauseMenuContent.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
+            var title = Label("暫停", pauseMenuContent, 42);
+            title.rectTransform.sizeDelta = new Vector2(560, 80);
+            title.rectTransform.anchoredPosition = new Vector2(0, 190);
+            MakeButton("繼續", pauseMenuContent, new Vector2(0, 80), ContinueGame, new Vector2(360, 82));
+            MakeButton("重新開始", pauseMenuContent, new Vector2(0, -30), RestartGame, new Vector2(360, 82));
+            MakeButton("退出", pauseMenuContent, new Vector2(0, -140), ExitToMenu, new Vector2(360, 82));
+            resumeCountdownLabel = Label("3", pauseOverlay, 128);
+            Fill(resumeCountdownLabel.rectTransform);
+            resumeCountdownLabel.gameObject.SetActive(false);
+            pauseOverlay.gameObject.SetActive(false);
         }
 
         void RequestImport()
@@ -1316,7 +1437,12 @@ namespace Gugarythm
             Destroy(particleRoot.gameObject);
         }
 
-        void RefreshHud() { accuracyLabel.text = $"ACCURACY  {scoreState.AccuracyPercent(chart?.PlayableCount ?? 0):F4}%"; comboLabel.text = "COMBO\n" + scoreState.Combo; }
+        void RefreshHud()
+        {
+            accuracyLabel.text = $"ACCURACY  {scoreState.AccuracyPercent(chart?.PlayableCount ?? 0):F4}%";
+            comboLabel.text = "COMBO\n" + scoreState.Combo;
+            comboLabel.gameObject.SetActive(running && scoreState.Combo > 0);
+        }
         void SetStatus(string message) { if (loadStatus != null) loadStatus.text = message; }
         void ShowJudgment(string value, Color color) { judgmentLabel.text = value; judgmentLabel.color = color; }
 
