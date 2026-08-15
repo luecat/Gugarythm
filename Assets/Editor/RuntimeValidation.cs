@@ -30,7 +30,8 @@ public static class RuntimeValidation
         var chart = result.Chart;
         // Hidden and attached slide-control entities belong to connector geometry,
         // not the playable/judged note set.
-        Require(chart.PlayableCount == 2063, $"Expected 2063 playable notes, got {chart.PlayableCount}");
+        Require(chart.Notes.Any(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto && !note.Visible),
+            "Imported Holds must add invisible eighth-note checkpoints");
         Require(chart.Connectors.Count == 1175, $"Expected 1175 connectors, got {chart.Connectors.Count}");
         Require(chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "8"),
             "Hold connector geometry must stop at its first particle/control point");
@@ -76,7 +77,7 @@ public static class RuntimeValidation
                 $"Official Trace diamond is missing: {tone}");
         Require(Resources.Load<Texture2D>("Gugarhythm/package/particles/pixel-atlas") != null,
             "SCP-derived Pixel judgment atlas is missing");
-        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "stage" })
+        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "hold", "stage" })
             Require(Resources.Load<AudioClip>($"Gugarhythm/package/audio/{sound}") != null,
                 $"SCP-derived judgment sound is missing: {sound}");
         Require(Resources.Load<AudioClip>("Gugarhythm/package/audio/flick") != null,
@@ -87,10 +88,12 @@ public static class RuntimeValidation
         Require(flicks.Length == 243, $"Expected 243 flick notes, got {flicks.Length}");
         Require(flicks.Count(note => note.Direction < 0) == 117 && flicks.Count(note => note.Direction == 0) == 21 && flicks.Count(note => note.Direction > 0) == 105,
             "Flick left/center/right directions were not preserved");
-        Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).Contains("TraceSlideEnd") && note.Kind == RuntimeNoteKind.Sustain) == 143,
-            "Trace Hold tails must complete from sustained coverage without a separate release input");
-        Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).Contains("SlideEndFlick") && note.Kind == RuntimeNoteKind.Flick) == 37,
-            "Flick Hold tails must retain flick input");
+        var holdTerminalNotes = chart.Connectors.Select(connector => connector.End)
+            .Where(note => !chart.Connectors.Any(connector => ReferenceEquals(connector.Start, note)))
+            .Distinct()
+            .ToArray();
+        Require(holdTerminalNotes.Length > 0 && holdTerminalNotes.Where(note => note.HoldCheckpointSource != HoldCheckpointSource.Mid).All(note => !note.Judged),
+            "Normal Hold tails must be visual endpoints without sustained, Flick, or release judgment");
         Require(chart.Guides.Any(guide => guide.TailOpacity < guide.HeadOpacity) && chart.Guides.Min(guide => guide.TailOpacity) <= .081f,
             "Guide chains must fade continuously toward their ending");
         Require(chart.Guides.Any(guide => guide.Start.Lane - guide.Start.Size < -6 || guide.Start.Lane + guide.Start.Size > 6 ||
@@ -101,10 +104,23 @@ public static class RuntimeValidation
         Require(chart.BgmBytes?.Length > 0, "Default SCP BGM was not extracted");
         Require(chart.Notes.SequenceEqual(chart.Notes.OrderBy(note => note.Time).ThenBy(note => note.Index)), "Notes are not time sorted");
 
+        ValidateJudgedVisualMasking();
         ValidateJudgmentRules();
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateJudgedVisualMasking()
+    {
+        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1f),
+            "A successful note must remain visible until it reaches the lower edge of the judgment strip");
+        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Miss, 1.01f),
+            "A missed note must remain visible while travelling through the judgment strip");
+        Require(SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1.02f),
+            "A successful note must disappear after reaching the lower edge of the judgment strip");
+        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Pending, 1.1f),
+            "An unresolved note must not be hidden by the judgment mask");
     }
 
     static void ValidateJudgmentRules()
@@ -198,9 +214,54 @@ public static class RuntimeValidation
         recoveryB.Kind = RuntimeNoteKind.Sustain;
         engine = new JudgmentEngine(new[] { recoveryA, recoveryB }, new ScoreState());
         engine.Process(7.12, Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
-        engine.Process(7.2, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 6.9) });
+        engine.Process(7.2, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 7.2) });
         Require(recoveryA.Grade == JudgmentGrade.Miss && recoveryB.Grade == JudgmentGrade.Perfect,
-            "A missed Hold checkpoint must not prevent a later checkpoint from recovering");
+            "A newly pressed contact must recover a later Hold checkpoint after an earlier miss");
+
+        var holdChart = new RuntimeChart();
+        var holdHead = Note(30, 0, -1);
+        holdHead.Beat = 0;
+        var holdMid = Note(31, 1, 0);
+        holdMid.Beat = 1;
+        holdMid.Kind = RuntimeNoteKind.Sustain;
+        holdMid.Archetype = "SlideTickNote";
+        var holdTail = Note(32, 2, 1);
+        holdTail.Beat = 2;
+        holdTail.Kind = RuntimeNoteKind.Release;
+        holdChart.Notes.AddRange(new[] { holdHead, holdMid, holdTail });
+        holdChart.Connectors.Add(new RuntimeConnector { Start = holdHead, End = holdMid });
+        holdChart.Connectors.Add(new RuntimeConnector { Start = holdMid, End = holdTail });
+        HoldCheckpointBuilder.Apply(holdChart, beat => beat);
+        var autoCheckpoints = holdChart.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).OrderBy(note => note.Beat).ToArray();
+        Require(autoCheckpoints.Length == 3 && autoCheckpoints.Select(note => note.Beat).SequenceEqual(new[] { .5, 1d, 1.5 }),
+            "Every Hold must create one invisible Auto checkpoint per eighth note before its tail");
+        Require(holdMid.HoldCheckpointSource == HoldCheckpointSource.Mid && holdMid.Judged,
+            "Each authored Hold mid must remain an independent judged checkpoint");
+        Require(SonolusLandscapePrototype.UsesHoldJudgmentSound(holdMid) && SonolusLandscapePrototype.UsesHoldJudgmentSound(autoCheckpoints[0]) &&
+                !SonolusLandscapePrototype.UsesHoldJudgmentSound(holdHead),
+            "Only Hold checkpoints must select the Hold judgment sound");
+        Require(!holdTail.Judged,
+            "Hold tails must not create a judgment checkpoint");
+
+        var tailMidChart = new RuntimeChart();
+        var tailMidHead = Note(33, 0, 0);
+        tailMidHead.Beat = 0;
+        var tailMid = Note(34, 1, 1);
+        tailMid.Beat = 1;
+        tailMid.Kind = RuntimeNoteKind.Sustain;
+        tailMid.Archetype = "SlideTickNote";
+        tailMidChart.Notes.AddRange(new[] { tailMidHead, tailMid });
+        tailMidChart.Connectors.Add(new RuntimeConnector { Start = tailMidHead, End = tailMid });
+        HoldCheckpointBuilder.Apply(tailMidChart, beat => beat);
+        Require(tailMid.Judged && tailMid.HoldCheckpointSource == HoldCheckpointSource.Mid,
+            "An authored mid at a Hold tail must remain an independent judged checkpoint");
+
+        engine = new JudgmentEngine(holdChart.Notes, new ScoreState());
+        engine.Process(.5, Array.Empty<InputToken>(), new[] { new ActiveContact(1, -.5f, .5) });
+        engine.Process(1, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, .8) });
+        Require(autoCheckpoints[0].Grade == JudgmentGrade.Perfect && autoCheckpoints[1].Grade == JudgmentGrade.Perfect &&
+                holdMid.Grade == JudgmentGrade.Perfect && holdHead.Grade == JudgmentGrade.Miss,
+            "A middle press must independently hit auto and authored-mid Hold checkpoints after a missed head");
 
         var flickTail = Note(11, 8, 0);
         flickTail.Kind = RuntimeNoteKind.Flick;
