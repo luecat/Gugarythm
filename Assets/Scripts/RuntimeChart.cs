@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Gugarythm
 {
     public enum RuntimeNoteKind { Tap, Flick, Sustain, Release }
     public enum JudgmentGrade { Pending, Perfect, Great, Good, Miss }
+    public enum HoldCheckpointSource { None, Mid, Auto }
 
     [Serializable]
     public sealed class RuntimeNote
@@ -23,6 +25,7 @@ namespace Gugarythm
         public JudgmentGrade Grade;
         public bool Visible = true;
         public bool Judged = true;
+        public HoldCheckpointSource HoldCheckpointSource;
     }
 
     public sealed class RuntimeTimeScaleGroup
@@ -178,6 +181,96 @@ namespace Gugarythm
             var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
             return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.PositionAt(time) : time;
         }
+    }
+
+    /// <summary>
+    /// Adds runtime-only eighth-note checkpoints to connected Hold paths. Authored
+    /// Sustain mids remain separate checkpoints; terminal nodes are visual only.
+    /// </summary>
+    public static class HoldCheckpointBuilder
+    {
+        public const double EighthNoteBeats = .5;
+
+        public static void Apply(RuntimeChart chart, Func<double, double> timeAtBeat)
+        {
+            if (chart == null || timeAtBeat == null) return;
+
+            var outgoing = chart.Connectors
+                .Where(connector => connector?.Start != null && connector.End != null)
+                .GroupBy(connector => connector.Start)
+                .ToDictionary(group => group.Key, group => group.Select(connector => connector.End).Distinct().ToList());
+            var incoming = new HashSet<RuntimeNote>(chart.Connectors
+                .Where(connector => connector?.Start != null && connector.End != null)
+                .Select(connector => connector.End));
+            var nextIndex = chart.Notes.Count == 0 ? 0 : chart.Notes.Max(note => note.Index) + 1;
+
+            foreach (var head in outgoing.Keys.Where(note => !incoming.Contains(note)).ToArray())
+            {
+                var path = CollectPath(head, outgoing);
+                if (path.Count < 2) continue;
+                var tail = path[^1];
+                if (tail.Beat <= head.Beat + 1e-9) continue;
+
+                foreach (var mid in path.Skip(1).Where(IsAuthoredMid))
+                    mid.HoldCheckpointSource = HoldCheckpointSource.Mid;
+                // A normal Hold tail is visual only. An authored SlideTick at
+                // the tail remains a real Mid checkpoint and is still judged.
+                if (tail.HoldCheckpointSource != HoldCheckpointSource.Mid)
+                    tail.Judged = false;
+
+                for (var beat = head.Beat + EighthNoteBeats; beat < tail.Beat - 1e-9; beat += EighthNoteBeats)
+                {
+                    var segment = SegmentAt(path, beat);
+                    if (segment == null) continue;
+                    var start = segment.Value.start;
+                    var end = segment.Value.end;
+                    var progress = (float)((beat - start.Beat) / (end.Beat - start.Beat));
+                    chart.Notes.Add(new RuntimeNote
+                    {
+                        Index = nextIndex++,
+                        SourceId = $"hold:auto:{head.SourceId}:{beat:R}",
+                        Archetype = "RuntimeHoldAutoCheckpoint",
+                        Beat = beat,
+                        Time = timeAtBeat(beat),
+                        Lane = start.Lane + (end.Lane - start.Lane) * progress,
+                        Size = start.Size + (end.Size - start.Size) * progress,
+                        Kind = RuntimeNoteKind.Sustain,
+                        Critical = head.Critical,
+                        TimeScaleGroup = head.TimeScaleGroup,
+                        Visible = false,
+                        Judged = true,
+                        HoldCheckpointSource = HoldCheckpointSource.Auto,
+                    });
+                }
+            }
+        }
+
+        static List<RuntimeNote> CollectPath(RuntimeNote head, IReadOnlyDictionary<RuntimeNote, List<RuntimeNote>> outgoing)
+        {
+            var path = new List<RuntimeNote> { head };
+            var seen = new HashSet<RuntimeNote> { head };
+            var current = head;
+            while (outgoing.TryGetValue(current, out var next) && next.Count > 0)
+            {
+                var candidate = next.OrderBy(note => note.Beat).ThenBy(note => note.Index).First();
+                if (!seen.Add(candidate)) break;
+                path.Add(candidate);
+                current = candidate;
+            }
+            return path;
+        }
+
+        static (RuntimeNote start, RuntimeNote end)? SegmentAt(IReadOnlyList<RuntimeNote> path, double beat)
+        {
+            for (var index = 0; index < path.Count - 1; index++)
+                if (beat >= path[index].Beat - 1e-9 && beat <= path[index + 1].Beat + 1e-9 &&
+                    path[index + 1].Beat > path[index].Beat + 1e-9)
+                    return (path[index], path[index + 1]);
+            return null;
+        }
+
+        static bool IsAuthoredMid(RuntimeNote note) => note.Judged && note.Kind == RuntimeNoteKind.Sustain &&
+            (note.Archetype ?? string.Empty).Contains("SlideTick", StringComparison.OrdinalIgnoreCase);
     }
 
     public sealed class ImportResult
