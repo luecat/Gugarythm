@@ -26,6 +26,7 @@ namespace Gugarythm
         const float LaneTextureHeight = 732f;
         const float LaneTextureCenterX = 638.8049f;
         const float HitSourceY = 500f;
+        const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
         const float PerspectiveDepthRatio = 3.2f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
@@ -106,6 +107,7 @@ namespace Gugarythm
         AudioClip perfectSound;
         AudioClip greatSound;
         AudioClip goodSound;
+        AudioClip holdSound;
         AudioClip flickSound;
         AudioClip criticalFlickSound;
         AudioClip stageSound;
@@ -154,6 +156,9 @@ namespace Gugarythm
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
+        // HitSourceY is the centre of the 45px judgment strip. Notes and
+        // gameplay connectors leave only after reaching its lower edge.
+        static float JudgmentBottomApproach => 1f + (JudgmentStripSourceHeight * .5f / HitSourceY) / PerspectiveDepthRatio;
 
         // Speed controls the time spent approaching the judgment edge. Screen Y,
         // lane position, and width are all derived from the same perspective
@@ -581,7 +586,9 @@ namespace Gugarythm
         void PlayJudgmentSound(JudgmentEvent judgment)
         {
             if (judgment.Grade == JudgmentGrade.Miss || effects == null) return;
-            var clip = judgment.Note.Kind == RuntimeNoteKind.Flick
+            var clip = UsesHoldJudgmentSound(judgment.Note) && holdSound != null
+                ? holdSound
+                : judgment.Note.Kind == RuntimeNoteKind.Flick
                 ? judgment.Note.Critical && criticalFlickSound != null ? criticalFlickSound : flickSound
                 : judgment.Grade switch
             {
@@ -592,6 +599,9 @@ namespace Gugarythm
             };
             if (clip != null) effects.PlayOneShot(clip, .78f);
         }
+
+        public static bool UsesHoldJudgmentSound(RuntimeNote note) =>
+            note != null && note.HoldCheckpointSource is HoldCheckpointSource.Auto or HoldCheckpointSource.Mid;
 
         void UpdateVisuals(double visualTime)
         {
@@ -663,7 +673,8 @@ namespace Gugarythm
                 var approachProgress = ApproachProgress(note, visualTime);
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
-                var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY;
+                var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY &&
+                    !ShouldHideJudgedVisual(note.Grade, approachProgress);
                 if (!visible)
                 {
                     if (noteViews.TryGetValue(note.Index, out var oldView)) ReleaseNoteView(note.Index, oldView);
@@ -729,7 +740,8 @@ namespace Gugarythm
                 var endScreen = PerspectiveProgress(endApproach);
                 var startY = ScreenY(startScreen);
                 var endY = ScreenY(endScreen);
-                var show = endY >= NoteExitY && startY <= TopY + 8;
+                var clipJudgedSection = IsJudged(connector.Start) || IsJudged(connector.End);
+                var show = startY <= TopY + 8 && (clipJudgedSection ? endApproach < JudgmentBottomApproach : endY >= NoteExitY);
                 if (!show)
                 {
                     if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
@@ -745,7 +757,7 @@ namespace Gugarythm
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
                     line.color = new Color(1, 1, 1, .62f);
                 }
-                SetConnectorPath(line, connector, visualTime, startApproach, endApproach);
+                SetConnectorPath(line, connector, visualTime, startApproach, endApproach, clipJudgedSection);
             }
         }
 
@@ -820,7 +832,8 @@ namespace Gugarythm
             _ => new Color(115 / 255f, 214 / 255f, 157 / 255f, .32f),
         };
 
-        void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, double visualTime, float startApproach, float endApproach)
+        void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, double visualTime, float startApproach, float endApproach,
+            bool clipJudgedSection)
         {
             var approachSpan = startApproach - endApproach;
             if (approachSpan <= 1e-5f)
@@ -832,10 +845,8 @@ namespace Gugarythm
                 return;
             }
 
-            // Clip in approach space, then interpolate the lane at the clipped
-            // time. The near clip is the extended off-screen track edge, so an
-            // active Hold continues through the judgment line alongside notes.
-            var nearT = FindConnectorProgress(connector, visualTime, NearTrackApproach, startApproach, endApproach);
+            var nearApproach = clipJudgedSection ? JudgmentBottomApproach : NearTrackApproach;
+            var nearT = FindConnectorProgress(connector, visualTime, nearApproach, startApproach, endApproach);
             var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
             line.BeginPath(sampleCount);
@@ -925,6 +936,9 @@ namespace Gugarythm
 
         static float ScreenY(float screenProgress) => Mathf.LerpUnclamped(TopY, HitY, screenProgress);
         public static bool HasVisibleDecorationSegment(float leadingApproach, float trailingApproach) => trailingApproach < 1f;
+        public static bool ShouldHideJudgedVisual(JudgmentGrade grade, float approachProgress) =>
+            approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
+        static bool IsJudged(RuntimeNote note) => note.Grade != JudgmentGrade.Pending;
         static float X(float lane, float screenProgress)
         {
             var sourceY = (TopY - ScreenY(screenProgress)) * LaneTextureHeight / CanvasHeight;
@@ -1040,6 +1054,7 @@ namespace Gugarythm
             perfectSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/perfect");
             greatSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/great");
             goodSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/good");
+            holdSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/hold");
             flickSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/flick");
             criticalFlickSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/critical-flick");
             stageSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/stage");

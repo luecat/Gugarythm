@@ -240,6 +240,8 @@ namespace Gugarythm
                     candidate.Color == guide.Color && SameGuidePoint(guide.Tail, candidate.Head));
             AssignGuideOpacities(chart.Guides);
 
+            HoldCheckpointBuilder.Apply(chart, tempo.SecondsAt);
+
             chart.Notes.Sort((a, b) =>
             {
                 var time = a.Time.CompareTo(b.Time);
