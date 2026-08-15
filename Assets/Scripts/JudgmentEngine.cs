@@ -95,7 +95,7 @@ namespace Gugarythm
 
         public JudgmentEngine(IEnumerable<RuntimeNote> notes, ScoreState score)
         {
-            this.notes = notes.OrderBy(note => note.Time).ThenBy(note => note.Index).ToList();
+            this.notes = notes.Where(note => note.Judged).OrderBy(note => note.Time).ThenBy(note => note.Index).ToList();
             this.score = score;
         }
 

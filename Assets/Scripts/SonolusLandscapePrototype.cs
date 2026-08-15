@@ -58,10 +58,13 @@ namespace Gugarythm
         const float NoteCapRatio = 93f / 354f;
         const float NoteTextureHeight = 186f;
         const int MouseContactId = int.MinValue;
+        // Keep judged notes alive until their whole sprite has travelled beyond
+        // the near edge. This makes hits feel like they continue through the
+        // judgment line instead of being deleted on contact.
+        const float NoteExitMargin = 140f;
 
         readonly Dictionary<string, Texture2D> buttonTextures = new(StringComparer.Ordinal);
         readonly Dictionary<string, Texture2D> traceTextures = new(StringComparer.Ordinal);
-        readonly List<Texture2D> particleTextures = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> noteViews = new();
         readonly Dictionary<RuntimeConnector, TaperedConnectorGraphic> connectorViews = new();
         readonly Dictionary<RuntimeSimLine, SimLineGraphic> simLineViews = new();
@@ -96,10 +99,18 @@ namespace Gugarythm
         Texture2D traceDiamondMintTexture;
         Texture2D traceDiamondPinkTexture;
         Texture2D traceDiamondYellowTexture;
+        Texture2D pixelParticleAtlas;
+        AudioClip perfectSound;
+        AudioClip greatSound;
+        AudioClip goodSound;
+        AudioClip alternativeSound;
+        AudioClip stageSound;
         RuntimeChart chart;
         JudgmentEngine judgmentEngine;
         AudioSource music;
+        AudioSource effects;
         RectTransform stage;
+        RectTransform safeAreaRoot;
         RectTransform guideLayer;
         RectTransform connectorLayer;
         RectTransform simLineLayer;
@@ -118,6 +129,7 @@ namespace Gugarythm
         bool running;
         bool loading;
         bool paused;
+        Rect appliedSafeArea = new(-1, -1, -1, -1);
         double scheduledDsp;
         double pauseDsp;
         double accumulatedPause;
@@ -128,6 +140,9 @@ namespace Gugarythm
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
         static float TopY => CanvasHeight * .5f;
         static float HitY => TopY - HitSourceY / LaneTextureHeight * CanvasHeight;
+        static float NoteExitY => -TopY - NoteExitMargin;
+        static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
+        static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
 
         // Speed controls the time spent approaching the judgment edge. Screen Y,
         // lane position, and width are all derived from the same perspective
@@ -171,6 +186,7 @@ namespace Gugarythm
             EnsureDesktopMouseAvailable();
 #endif
             PollNativeImport();
+            UpdateSafeAreaLayout();
             UpdateDesktopSpeedControls();
             if (!running || paused || chart == null || judgmentEngine == null) return;
             var songTime = CurrentSongTime();
@@ -179,7 +195,7 @@ namespace Gugarythm
             foreach (var judgment in events) OnJudgment(judgment);
             UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
-            if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => note.Grade != JudgmentGrade.Pending)) FinishGame();
+            if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => !note.Judged || note.Grade != JudgmentGrade.Pending)) FinishGame();
         }
 
         IEnumerator LoadDefaultChart()
@@ -278,7 +294,13 @@ namespace Gugarythm
             var hash = LocalChartLibrary.Sha256(bytes);
             var path = Path.Combine(cache, hash + (string.IsNullOrEmpty(extension) ? ".mp3" : extension));
             if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
-            var type = extension?.ToLowerInvariant() switch { ".ogg" => AudioType.OGGVORBIS, ".wav" => AudioType.WAV, _ => AudioType.MPEG };
+            var type = extension?.ToLowerInvariant() switch
+            {
+                ".ogg" => AudioType.OGGVORBIS,
+                ".wav" => AudioType.WAV,
+                ".m4a" or ".aac" => AudioType.ACC,
+                _ => AudioType.MPEG,
+            };
             using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, type);
             yield return request.SendWebRequest();
             if (request.result != UnityWebRequest.Result.Success) { SetStatus("音樂解碼失敗：" + request.error); yield break; }
@@ -297,6 +319,7 @@ namespace Gugarythm
             scheduledDsp = AudioSettings.dspTime + .25;
             music.time = 0;
             music.PlayScheduled(scheduledDsp);
+            if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
             ShowJudgment("READY", Color.white);
         }
 
@@ -426,7 +449,6 @@ namespace Gugarythm
 
         void OnJudgment(JudgmentEvent judgment)
         {
-            if (noteViews.TryGetValue(judgment.Note.Index, out var view)) ReleaseNoteView(judgment.Note.Index, view);
             var color = judgment.Grade switch
             {
                 JudgmentGrade.Perfect => new Color(.65f, 1f, 1f),
@@ -436,17 +458,31 @@ namespace Gugarythm
             };
             var timing = judgment.Grade == JudgmentGrade.Miss || Math.Abs(judgment.Delta) < .01 ? "" : judgment.Delta < 0 ? "  EARLY" : "  LATE";
             ShowJudgment(judgment.Grade.ToString().ToUpperInvariant() + timing, color);
+            PlayJudgmentSound(judgment);
             if (judgment.Grade != JudgmentGrade.Miss)
                 SpawnHitParticle(X(judgment.Note.Lane, 1f), judgment.Note.Critical ? "yellow" : IsTrace(judgment.Note) || judgment.Note.Kind == RuntimeNoteKind.Sustain ? "green" : judgment.Note.Kind == RuntimeNoteKind.Flick ? "pink" : "blue");
+        }
+
+        void PlayJudgmentSound(JudgmentEvent judgment)
+        {
+            if (judgment.Grade == JudgmentGrade.Miss || effects == null) return;
+            var clip = judgment.Note.Kind == RuntimeNoteKind.Flick ? alternativeSound : judgment.Grade switch
+            {
+                JudgmentGrade.Perfect => perfectSound,
+                JudgmentGrade.Great => greatSound,
+                JudgmentGrade.Good => goodSound,
+                _ => null,
+            };
+            if (clip != null) effects.PlayOneShot(clip, .78f);
         }
 
         void UpdateVisuals(double visualTime)
         {
             foreach (var guide in chart.Guides)
             {
-                var headApproach = ApproachProgress(guide.Head.Time, visualTime, chart.DefaultTimeScaleGroup);
-                var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, chart.DefaultTimeScaleGroup);
-                var show = ScreenY(PerspectiveProgress(tailApproach)) >= HitY - 90 &&
+                var headApproach = ApproachProgress(guide.Head.Time, visualTime, guide.Head.TimeScaleGroup);
+                var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, guide.Tail.TimeScaleGroup);
+                var show = ScreenY(PerspectiveProgress(tailApproach)) >= NoteExitY &&
                     ScreenY(PerspectiveProgress(headApproach)) <= TopY + 8;
                 if (!show)
                 {
@@ -459,7 +495,7 @@ namespace Gugarythm
                     guideViews[guide] = guideLine;
                     guideLine.color = GuideColor(guide.Color);
                 }
-                SetGuidePath(guideLine, guide, headApproach, tailApproach);
+                SetGuidePath(guideLine, guide, visualTime, headApproach, tailApproach);
             }
 
             foreach (var simLine in chart.SimLines)
@@ -470,7 +506,7 @@ namespace Gugarythm
                 var bScreen = PerspectiveProgress(bApproach);
                 var aY = ScreenY(aScreen);
                 var bY = ScreenY(bScreen);
-                var visible = Mathf.Max(aY, bY) >= HitY - 90 && Mathf.Min(aY, bY) <= TopY + 8;
+                var visible = Mathf.Max(aY, bY) >= NoteExitY && Mathf.Min(aY, bY) <= TopY + 8;
                 if (!visible)
                 {
                     if (simLineViews.TryGetValue(simLine, out var oldLine)) ReleaseSimLine(simLine, oldLine);
@@ -493,7 +529,10 @@ namespace Gugarythm
                 var approachProgress = ApproachProgress(note, visualTime);
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
-                var visible = note.Grade == JudgmentGrade.Pending && y <= TopY + 8 && y >= HitY - 90;
+                // Judgment changes score/input state only. The visual keeps
+                // following the same projective path until it is fully outside
+                // the viewport, including misses and early/late judgments.
+                var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY;
                 if (!visible)
                 {
                     if (noteViews.TryGetValue(note.Index, out var oldView)) ReleaseNoteView(note.Index, oldView);
@@ -555,7 +594,7 @@ namespace Gugarythm
                 var endApproach = ApproachProgress(connector.End, visualTime);
                 var startScreen = PerspectiveProgress(startApproach);
                 var endScreen = PerspectiveProgress(endApproach);
-                var show = ScreenY(endScreen) >= HitY - 90 && ScreenY(startScreen) <= TopY + 8;
+                var show = ScreenY(endScreen) >= NoteExitY && ScreenY(startScreen) <= TopY + 8;
                 if (!show)
                 {
                     if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
@@ -575,11 +614,11 @@ namespace Gugarythm
             }
         }
 
-        void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, float headApproach, float tailApproach)
+        void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, double visualTime, float headApproach, float tailApproach)
         {
             var approachSpan = headApproach - tailApproach;
-            var nearT = approachSpan <= 1e-5f ? 0 : Mathf.Clamp01((headApproach - 1f) / approachSpan);
-            var farT = approachSpan <= 1e-5f ? 1 : Mathf.Clamp01(headApproach / approachSpan);
+            var nearT = approachSpan <= 1e-5f ? 0 : FindGuideProgress(guide, visualTime, NearTrackApproach, headApproach, tailApproach);
+            var farT = approachSpan <= 1e-5f ? 1 : FindGuideProgress(guide, visualTime, 0f, headApproach, tailApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
             line.BeginPath(sampleCount);
             for (var index = 0; index < sampleCount; index++)
@@ -587,12 +626,35 @@ namespace Gugarythm
                 var t = connectorPathSamples[index];
                 var lane = InterpolateGuide(guide, t, point => point.Lane);
                 var size = Mathf.Max(.01f, InterpolateGuide(guide, t, point => point.Size));
-                var approach = Mathf.Lerp(headApproach, tailApproach, t);
-                var screenProgress = Mathf.Clamp01(PerspectiveProgress(approach));
+                var approach = GuideApproach(guide, visualTime, t);
+                var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
                 var alpha = Mathf.Lerp(guide.HeadOpacity, guide.TailOpacity, t);
                 line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), LaneWidth(lane, size, screenProgress), alpha);
             }
             line.EndPath();
+        }
+
+        float FindGuideProgress(RuntimeGuide guide, double visualTime, float target, float headApproach, float tailApproach)
+        {
+            if (target >= headApproach) return 0;
+            if (target <= tailApproach) return 1;
+            var low = 0f;
+            var high = 1f;
+            for (var iteration = 0; iteration < 20; iteration++)
+            {
+                var middle = (low + high) * .5f;
+                if (GuideApproach(guide, visualTime, middle) > target) low = middle;
+                else high = middle;
+            }
+            return (low + high) * .5f;
+        }
+
+        float GuideApproach(RuntimeGuide guide, double visualTime, float progress)
+        {
+            var time = guide.Head.Time + (guide.Tail.Time - guide.Head.Time) * progress;
+            var group = string.IsNullOrEmpty(guide.Head.TimeScaleGroup)
+                ? guide.Tail.TimeScaleGroup : guide.Head.TimeScaleGroup;
+            return ApproachProgress(time, visualTime, group);
         }
 
         static float InterpolateGuide(RuntimeGuide guide, float progress, Func<RuntimeGuidePoint, float> value)
@@ -616,7 +678,10 @@ namespace Gugarythm
         {
             4 => new Color(214 / 255f, 179 / 255f, 98 / 255f, .32f),
             3 => new Color(214 / 255f, 115 / 255f, 123 / 255f, .32f),
+            2 => new Color(115 / 255f, 165 / 255f, 214 / 255f, .32f),
             1 => new Color(214 / 255f, 115 / 255f, 205 / 255f, .32f),
+            5 => new Color(115 / 255f, 214 / 255f, 205 / 255f, .32f),
+            6 => new Color(28 / 255f, 34 / 255f, 48 / 255f, .32f),
             _ => new Color(115 / 255f, 214 / 255f, 157 / 255f, .32f),
         };
 
@@ -633,9 +698,9 @@ namespace Gugarythm
             }
 
             // Clip in approach space, then interpolate the lane at the clipped
-            // time. This keeps an active hold attached to the judgment edge
-            // instead of leaving it at the already-passed start lane.
-            var nearT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
+            // time. The near clip is the extended off-screen track edge, so an
+            // active Hold continues through the judgment line alongside notes.
+            var nearT = FindConnectorProgress(connector, visualTime, NearTrackApproach, startApproach, endApproach);
             var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
             line.BeginPath(sampleCount);
@@ -691,7 +756,7 @@ namespace Gugarythm
             var laneProgress = EaseConnector(timeProgress, connector.Ease);
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
-            var screenProgress = Mathf.Clamp01(PerspectiveProgress(approachProgress));
+            var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
             // The official connector sprite expands its target quad by 1.275,
             // while its baked transparent shoulders bring the visible fill
             // back to the note's exact left/right edges.
@@ -702,6 +767,7 @@ namespace Gugarythm
         {
             1 => 1f - Mathf.Cos(progress * Mathf.PI * .5f),
             2 => Mathf.Sin(progress * Mathf.PI * .5f),
+            3 => progress < .5f ? 2 * progress * progress : 1 - Mathf.Pow(-2 * progress + 2, 2) * .5f,
             _ => progress,
         };
 
@@ -805,11 +871,6 @@ namespace Gugarythm
                     Resources.Load<Texture2D>("Gugarhythm/traces/trace-" + name);
                 if (texture != null) traceTextures[name] = texture;
             }
-            foreach (var name in new[] { "blue", "green", "pink", "yellow" })
-            {
-                var texture = Resources.Load<Texture2D>("Gugarhythm/particles/spark-" + name);
-                if (texture != null) particleTextures.Add(texture);
-            }
             damageTexture = Resources.Load<Texture2D>("Gugarhythm/official/damage/damage-purple") ??
                 Resources.Load<Texture2D>("Gugarhythm/damage/damage-purple");
             for (var index = 0; index < 6; index++)
@@ -829,6 +890,12 @@ namespace Gugarythm
             traceDiamondMintTexture = Resources.Load<Texture2D>("Gugarhythm/official/particles/trace-diamond-mint");
             traceDiamondPinkTexture = Resources.Load<Texture2D>("Gugarhythm/official/particles/trace-diamond-pink");
             traceDiamondYellowTexture = Resources.Load<Texture2D>("Gugarhythm/official/particles/trace-diamond-yellow");
+            pixelParticleAtlas = Resources.Load<Texture2D>("Gugarhythm/package/particles/pixel-atlas");
+            perfectSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/perfect");
+            greatSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/great");
+            goodSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/good");
+            alternativeSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/alternative");
+            stageSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/stage");
         }
 
         void BuildInterface()
@@ -846,6 +913,8 @@ namespace Gugarythm
             gameCamera.cullingMask = ~0;
             music = gameObject.AddComponent<AudioSource>();
             music.playOnAwake = false; music.spatialBlend = 0;
+            effects = gameObject.AddComponent<AudioSource>();
+            effects.playOnAwake = false; effects.spatialBlend = 0;
             var canvasObject = new GameObject("Rhythm Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var eventSystemObject = new GameObject("Event System", typeof(EventSystem));
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -870,9 +939,9 @@ namespace Gugarythm
             var trackGraphic = trackObject.GetComponent<TaperedConnectorGraphic>(); trackGraphic.raycastTarget = false; trackGraphic.color = new Color(0, 0, .035f, .72f);
             trackGraphic.SetGeometry(
                 new Vector2((X(-CentralHalfLanes, 0) + X(CentralHalfLanes, 0)) * .5f, TopY),
-                new Vector2((X(-CentralHalfLanes, 1) + X(CentralHalfLanes, 1)) * .5f, HitY),
+                new Vector2((X(-CentralHalfLanes, NearTrackProgress) + X(CentralHalfLanes, NearTrackProgress)) * .5f, NoteExitY),
                 X(CentralHalfLanes, 0) - X(-CentralHalfLanes, 0),
-                X(CentralHalfLanes, 1) - X(-CentralHalfLanes, 1));
+                X(CentralHalfLanes, NearTrackProgress) - X(-CentralHalfLanes, NearTrackProgress));
             var lane = RawPanel("Perspective Lane", stage, laneTexture, new Color(1, 1, 1, .92f), Vector2.zero, Vector2.zero, true);
             var laneShader = Shader.Find("Gugarythm/Black Transparent UI");
             if (laneShader != null)
@@ -884,17 +953,63 @@ namespace Gugarythm
             connectorLayer = Layer("Hold Connectors", stage);
             simLineLayer = Layer("Synchronization Lines", stage);
             noteLayer = Layer("Notes", stage);
-            BuildHud(root);
-            BuildMenu(root);
-            BuildResult(root);
+            safeAreaRoot = Layer("Safe Area UI", root);
+            BuildHud(safeAreaRoot);
+            BuildMenu(safeAreaRoot);
+            BuildResult(safeAreaRoot);
+            UpdateSafeAreaLayout(true);
         }
 
         void BuildHud(RectTransform root)
         {
-            var accuracy = Panel("Accuracy", root, new Color(.04f, .08f, .20f, .72f), new Vector2(280, 72), new Vector2(-790, 480)); Outline(accuracy.gameObject, new Color(.55f, .75f, 1f, .75f), 2);
+            var accuracy = Panel("Accuracy", root, new Color(.04f, .08f, .20f, .72f), new Vector2(280, 72), Vector2.zero);
+            PinToAnchor(accuracy, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -24));
+            Outline(accuracy.gameObject, new Color(.55f, .75f, 1f, .75f), 2);
             accuracyLabel = Label("ACCURACY  0.0000%", accuracy, 22); Fill(accuracyLabel.rectTransform);
-            comboLabel = Label("COMBO\n0", root, 38); comboLabel.rectTransform.sizeDelta = new Vector2(300, 130); comboLabel.rectTransform.anchoredPosition = new Vector2(650, 125);
-            judgmentLabel = Label("", root, 48); judgmentLabel.rectTransform.sizeDelta = new Vector2(620, 80); judgmentLabel.rectTransform.anchoredPosition = new Vector2(0, -30);
+            comboLabel = Label("COMBO\n0", root, 38); comboLabel.rectTransform.sizeDelta = new Vector2(300, 130);
+            PinToAnchor(comboLabel.rectTransform, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
+            judgmentLabel = Label("", root, 48); judgmentLabel.rectTransform.sizeDelta = new Vector2(620, 80);
+            PinToAnchor(judgmentLabel.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), new Vector2(0, -30));
+        }
+
+        void UpdateSafeAreaLayout(bool force = false)
+        {
+            if (safeAreaRoot == null || Screen.width <= 0 || Screen.height <= 0) return;
+            var safe = Screen.safeArea;
+            if (!force && safe == appliedSafeArea) return;
+            appliedSafeArea = safe;
+
+            safeAreaRoot.anchorMin = new Vector2(safe.xMin / Screen.width, safe.yMin / Screen.height);
+            safeAreaRoot.anchorMax = new Vector2(safe.xMax / Screen.width, safe.yMax / Screen.height);
+            safeAreaRoot.offsetMin = Vector2.zero;
+            safeAreaRoot.offsetMax = Vector2.zero;
+
+            var logicalSafeSize = new Vector2(
+                ReferenceWidth * safe.width / Screen.width,
+                CanvasHeight * safe.height / Screen.height);
+            FitOverlayPanel(menuPanel, new Vector2(760, 570), logicalSafeSize);
+            FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
+        }
+
+        static void FitOverlayPanel(RectTransform panel, Vector2 designSize, Vector2 available)
+        {
+            if (panel == null) return;
+            const float safePadding = 32f;
+            var scale = Mathf.Min(1f,
+                Mathf.Max(.1f, (available.x - safePadding) / designSize.x),
+                Mathf.Max(.1f, (available.y - safePadding) / designSize.y));
+            panel.anchorMin = panel.anchorMax = new Vector2(.5f, .5f);
+            panel.pivot = new Vector2(.5f, .5f);
+            panel.sizeDelta = designSize;
+            panel.anchoredPosition = Vector2.zero;
+            panel.localScale = Vector3.one * scale;
+        }
+
+        static void PinToAnchor(RectTransform rect, Vector2 anchor, Vector2 pivot, Vector2 position)
+        {
+            rect.anchorMin = rect.anchorMax = anchor;
+            rect.pivot = pivot;
+            rect.anchoredPosition = position;
         }
 
         void BuildMenu(RectTransform root)
@@ -911,8 +1026,7 @@ namespace Gugarythm
             MakeButton("−", menuPanel, new Vector2(-320, 42), () => AdjustScrollSpeed(-.1f), new Vector2(88, 58));
             MakeButton("＋", menuPanel, new Vector2(320, 42), () => AdjustScrollSpeed(.1f), new Vector2(88, 58));
             startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -62), StartGame); startButton.interactable = false;
-            MakeButton("匯入檔案／ZIP", menuPanel, new Vector2(-175, -168), RequestImport);
-            MakeButton("匯入資料夾", menuPanel, new Vector2(175, -168), RequestImportFolder);
+            MakeButton("匯入 ZIP／SCP", menuPanel, new Vector2(0, -168), RequestImport);
         }
 
         void BuildResult(RectTransform root)
@@ -927,11 +1041,11 @@ namespace Gugarythm
         void RequestImport()
         {
 #if UNITY_EDITOR
-            var path = UnityEditor.EditorUtility.OpenFilePanel("匯入譜面", "", "scp,sus,usc,json,gz,zip");
+            var path = UnityEditor.EditorUtility.OpenFilePanel("匯入 ZIP／SCP", "", "zip,scp");
             if (!string.IsNullOrEmpty(path)) StartCoroutine(ImportPath(path));
 #elif UNITY_ANDROID
             NativeChartPicker.OpenFile();
-            SetStatus("請在系統檔案選擇器選取譜面或 ZIP…");
+            SetStatus("請在系統檔案選擇器選取 ZIP 或 SCP…");
 #else
             SetStatus("目前請將譜面放入 StreamingAssets，或使用 Android 匯入。");
 #endif
@@ -954,6 +1068,16 @@ namespace Gugarythm
         {
             if (path.StartsWith("ERROR:", StringComparison.Ordinal)) { SetStatus("匯入失敗：" + path[6..]); yield break; }
             if (!File.Exists(path) && !Directory.Exists(path)) { SetStatus("匯入檔案不存在。"); yield break; }
+            if (File.Exists(path))
+            {
+                var extension = Path.GetExtension(path);
+                if (!extension.Equals(".zip", StringComparison.OrdinalIgnoreCase) &&
+                    !extension.Equals(".scp", StringComparison.OrdinalIgnoreCase))
+                {
+                    SetStatus("請選擇內含 USC 與 BGM 的 ZIP，或 SCP 檔案。");
+                    yield break;
+                }
+            }
             byte[] bytes;
             IReadOnlyDictionary<string, byte[]> companions = null;
             if (Directory.Exists(path))
@@ -1126,13 +1250,6 @@ namespace Gugarythm
                 "green" => new Color(.12f, 1f, .58f, .84f),
                 _ => new Color(.28f, .82f, 1f, .84f),
             };
-            var texture = color switch
-            {
-                "yellow" => holdMidYellowTexture,
-                "pink" => traceDiamondPinkTexture,
-                _ => holdMidMintTexture,
-            } ?? particleTextures.FirstOrDefault();
-
             var flashObject = new GameObject("Judgment Lane Flash", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var flashRect = flashObject.GetComponent<RectTransform>(); flashRect.SetParent(stage, false); Fill(flashRect);
             flashRect.SetSiblingIndex(Mathf.Max(0, noteLayer.GetSiblingIndex()));
@@ -1144,36 +1261,59 @@ namespace Gugarythm
             flash.SetPathPoint(1, new Vector2(x, -TopY - 20), hitWidth * 1.85f, .34f);
             flash.EndPath();
 
-            var burstObject = new GameObject("Judgment Diamond Burst", typeof(RectTransform), typeof(CanvasRenderer), typeof(HitBurstGraphic));
-            var burstRect = burstObject.GetComponent<RectTransform>(); burstRect.SetParent(stage, false); burstRect.sizeDelta = new Vector2(520, 330); burstRect.anchoredPosition = new Vector2(x, HitY);
-            var burst = burstObject.GetComponent<HitBurstGraphic>(); burst.raycastTarget = false; burst.color = tint;
-            RawImage particle = null;
-            if (texture != null)
+            var particleRoot = new GameObject("Pixel Judgment Burst", typeof(RectTransform)).GetComponent<RectTransform>();
+            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(240, 240); particleRoot.anchoredPosition = new Vector2(x, HitY);
+            particleRoot.SetAsLastSibling();
+            RawImage core = null;
+            RawImage ring = null;
+            if (pixelParticleAtlas != null)
             {
-                particle = RawPanel("Judgment Core", burstRect, texture, Color.white, new Vector2(58, 58), Vector2.zero).GetComponent<RawImage>();
-                particle.raycastTarget = false;
+                var sprite = color switch { "yellow" => 4, "pink" => 5, "green" => 2, _ => 3 };
+                core = RawPanel("Pixel Core", particleRoot, pixelParticleAtlas, Color.white, new Vector2(52, 52), Vector2.zero).GetComponent<RawImage>();
+                ring = RawPanel("Pixel Ring", particleRoot, pixelParticleAtlas, Color.white, new Vector2(62, 62), Vector2.zero).GetComponent<RawImage>();
+                core.uvRect = PixelParticleUv(sprite);
+                ring.uvRect = PixelParticleUv(sprite + 7);
+                core.raycastTarget = false;
+                ring.raycastTarget = false;
             }
-            StartCoroutine(AnimateHitEffect(burst, flash, particle, tint));
+            StartCoroutine(AnimateHitEffect(flash, particleRoot, core, ring, tint));
         }
 
-        IEnumerator AnimateHitEffect(HitBurstGraphic burst, TaperedConnectorGraphic flash, RawImage particle, Color tint)
+        static Rect PixelParticleUv(int sprite)
         {
-            const float Duration = .42f;
+            var position = sprite switch
+            {
+                0 => new Vector2(391, 261), 1 => new Vector2(1, 1), 2 => new Vector2(131, 1),
+                3 => new Vector2(261, 261), 4 => new Vector2(1, 521), 5 => new Vector2(651, 1),
+                6 => new Vector2(521, 131), 7 => new Vector2(1, 261), 8 => new Vector2(261, 391),
+                9 => new Vector2(131, 521), 10 => new Vector2(1, 651), 11 => new Vector2(1, 131),
+                12 => new Vector2(261, 1), 13 => new Vector2(131, 131), _ => Vector2.zero,
+            };
+            const float atlasSize = 1024f;
+            const float spriteSize = 128f;
+            return new Rect(position.x / atlasSize, (atlasSize - position.y - spriteSize) / atlasSize,
+                spriteSize / atlasSize, spriteSize / atlasSize);
+        }
+
+        IEnumerator AnimateHitEffect(TaperedConnectorGraphic flash, RectTransform particleRoot, RawImage core, RawImage ring, Color tint)
+        {
+            const float Duration = .38f;
             for (var elapsed = 0f; elapsed < Duration; elapsed += Time.unscaledDeltaTime)
             {
                 var t = elapsed / Duration;
-                burst.SetProgress(t);
                 var fade = 1 - Mathf.SmoothStep(0, 1, t);
                 flash.color = new Color(tint.r, tint.g, tint.b, .2f * fade);
-                if (particle != null)
+                if (core != null)
                 {
-                    particle.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(44, 92, t);
-                    particle.color = new Color(1, 1, 1, fade);
+                    core.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(48, 108, t);
+                    core.color = new Color(1, 1, 1, fade);
+                    ring.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(56, 196, Mathf.SmoothStep(0, 1, t));
+                    ring.color = new Color(1, 1, 1, fade * .9f);
                 }
                 yield return null;
             }
             Destroy(flash.gameObject);
-            Destroy(burst.gameObject);
+            Destroy(particleRoot.gameObject);
         }
 
         void RefreshHud() { accuracyLabel.text = $"ACCURACY  {scoreState.AccuracyPercent(chart?.PlayableCount ?? 0):F4}%"; comboLabel.text = "COMBO\n" + scoreState.Combo; }

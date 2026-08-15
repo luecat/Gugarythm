@@ -65,6 +65,11 @@ public static class RuntimeValidation
         foreach (var tone in new[] { "mint", "pink", "yellow" })
             Require(Resources.Load<Texture2D>($"Gugarhythm/official/particles/trace-diamond-{tone}") != null,
                 $"Official Trace diamond is missing: {tone}");
+        Require(Resources.Load<Texture2D>("Gugarhythm/package/particles/pixel-atlas") != null,
+            "SCP-derived Pixel judgment atlas is missing");
+        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "stage" })
+            Require(Resources.Load<AudioClip>($"Gugarhythm/package/audio/{sound}") != null,
+                $"SCP-derived judgment sound is missing: {sound}");
         var flicks = chart.Notes.Where(note => note.Kind == RuntimeNoteKind.Flick).ToArray();
         Require(flicks.Length == 243, $"Expected 243 flick notes, got {flicks.Length}");
         Require(flicks.Count(note => note.Direction < 0) == 117 && flicks.Count(note => note.Direction == 0) == 21 && flicks.Count(note => note.Direction > 0) == 105,
