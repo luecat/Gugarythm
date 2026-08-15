@@ -10,7 +10,7 @@ public final class GugaFilePickerFragment extends Fragment {
         intent.addCategory(Intent.CATEGORY_OPENABLE);
         intent.setType("*/*");
         intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-            "application/zip", "application/json", "application/octet-stream", "text/plain"
+            "application/zip", "application/octet-stream"
         });
         startActivityForResult(intent, GugaFilePicker.REQUEST_FILE);
     }

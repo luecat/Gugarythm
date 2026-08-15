@@ -22,6 +22,7 @@ namespace Gugarythm
         public string TimeScaleGroup;
         public JudgmentGrade Grade;
         public bool Visible = true;
+        public bool Judged = true;
     }
 
     public sealed class RuntimeTimeScaleGroup
@@ -102,6 +103,7 @@ namespace Gugarythm
         public double Beat;
         public float Lane;
         public float Size;
+        public string TimeScaleGroup;
     }
 
     [Serializable]
@@ -151,8 +153,25 @@ namespace Gugarythm
         public string DefaultTimeScaleGroup;
         public readonly List<string> Warnings = new();
 
-        public int PlayableCount => Notes.Count;
-        public double LastNoteTime => Notes.Count == 0 ? 0 : Notes[^1].Time;
+        public int PlayableCount
+        {
+            get
+            {
+                var count = 0;
+                foreach (var note in Notes) if (note.Judged) count++;
+                return count;
+            }
+        }
+
+        public double LastNoteTime
+        {
+            get
+            {
+                var last = 0d;
+                foreach (var note in Notes) if (note.Judged && note.Time > last) last = note.Time;
+                return last;
+            }
+        }
 
         public double VisualPosition(double time, string group)
         {
