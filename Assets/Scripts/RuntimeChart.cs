@@ -19,8 +19,71 @@ namespace Gugarythm
         public int Direction;
         public RuntimeNoteKind Kind;
         public bool Critical;
+        public string TimeScaleGroup;
         public JudgmentGrade Grade;
         public bool Visible = true;
+    }
+
+    public sealed class RuntimeTimeScaleGroup
+    {
+        readonly List<Point> points = new();
+
+        public string SourceId { get; }
+
+        public RuntimeTimeScaleGroup(string sourceId, IEnumerable<(double time, double scale)> source)
+        {
+            SourceId = sourceId ?? string.Empty;
+            var ordered = new List<(double time, double scale)>();
+            foreach (var value in source)
+                if (double.IsFinite(value.time) && double.IsFinite(value.scale)) ordered.Add(value);
+            ordered.Sort((a, b) => a.time.CompareTo(b.time));
+
+            var unique = new List<(double time, double scale)>();
+            foreach (var value in ordered)
+            {
+                if (unique.Count > 0 && Math.Abs(unique[^1].time - value.time) < 1e-9) unique[^1] = value;
+                else unique.Add(value);
+            }
+            if (unique.Count == 0) unique.Add((0, 1));
+            if (!unique.Exists(value => Math.Abs(value.time) < 1e-9))
+            {
+                var scaleAtZero = unique[0].scale;
+                foreach (var value in unique)
+                {
+                    if (value.time > 0) break;
+                    scaleAtZero = value.scale;
+                }
+                unique.Add((0, scaleAtZero));
+                unique.Sort((a, b) => a.time.CompareTo(b.time));
+            }
+
+            var zero = unique.FindIndex(value => Math.Abs(value.time) < 1e-9);
+            var positions = new double[unique.Count];
+            for (var i = zero + 1; i < unique.Count; i++)
+                positions[i] = positions[i - 1] + (unique[i].time - unique[i - 1].time) * unique[i - 1].scale;
+            for (var i = zero - 1; i >= 0; i--)
+                positions[i] = positions[i + 1] - (unique[i + 1].time - unique[i].time) * unique[i].scale;
+            for (var i = 0; i < unique.Count; i++) points.Add(new Point(unique[i].time, unique[i].scale, positions[i]));
+        }
+
+        public double PositionAt(double time)
+        {
+            var point = points[0];
+            foreach (var candidate in points)
+            {
+                if (candidate.Time > time) break;
+                point = candidate;
+            }
+            return point.Position + (time - point.Time) * point.Scale;
+        }
+
+        readonly struct Point
+        {
+            public readonly double Time;
+            public readonly double Scale;
+            public readonly double Position;
+            public Point(double time, double scale, double position) { Time = time; Scale = scale; Position = position; }
+        }
     }
 
     [Serializable]
@@ -84,10 +147,18 @@ namespace Gugarythm
         // Engine guides are visual-only ribbons. They may extend beyond the
         // playable lane range and must never be judged as slide connectors.
         public readonly List<RuntimeGuide> Guides = new();
+        public readonly Dictionary<string, RuntimeTimeScaleGroup> TimeScaleGroups = new(StringComparer.Ordinal);
+        public string DefaultTimeScaleGroup;
         public readonly List<string> Warnings = new();
 
         public int PlayableCount => Notes.Count;
         public double LastNoteTime => Notes.Count == 0 ? 0 : Notes[^1].Time;
+
+        public double VisualPosition(double time, string group)
+        {
+            var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
+            return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.PositionAt(time) : time;
+        }
     }
 
     public sealed class ImportResult

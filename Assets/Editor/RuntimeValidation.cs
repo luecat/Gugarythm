@@ -31,6 +31,15 @@ public static class RuntimeValidation
         // not the playable/judged note set.
         Require(chart.PlayableCount == 2063, $"Expected 2063 playable notes, got {chart.PlayableCount}");
         Require(chart.Connectors.Count == 1175, $"Expected 1175 connectors, got {chart.Connectors.Count}");
+        Require(chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "8"),
+            "Hold connector geometry must stop at its first particle/control point");
+        Require(!chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "7"),
+            "Hold connector geometry must not skip particles and flatten logical start/end into one ribbon");
+        Require(chart.TimeScaleGroups.Count == 3, $"Expected 3 time-scale layers, got {chart.TimeScaleGroups.Count}");
+        Require(chart.Notes.Any(note => note.TimeScaleGroup == "tsg:1") && chart.Notes.Any(note => note.TimeScaleGroup == "tsg:2"),
+            "Notes from secondary time-scale layers were not preserved");
+        Require(chart.TimeScaleGroups.Values.Select(value => value.PositionAt(100)).Distinct().Count() > 1,
+            "Independent time-scale layers must produce distinct visual positions");
         Require(chart.SimLines.Count == 579, $"Expected 579 synchronization lines, got {chart.SimLines.Count}");
         Require(chart.Guides.Count == 154, $"Expected 154 decoration guides, got {chart.Guides.Count}");
         Require(chart.Guides.Count(guide => guide.FadeOut) == 39,

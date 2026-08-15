@@ -142,6 +142,7 @@ namespace Gugarythm
             var tempo = TempoMap.FromEntities(entities);
             foreach (var entity in entities) entity.Time = tempo.SecondsAt(entity.Beat);
             var byName = entities.Where(entity => !string.IsNullOrEmpty(entity.Name)).GroupBy(entity => entity.Name).ToDictionary(group => group.Key, group => group.First(), StringComparer.Ordinal);
+            BuildTimeScaleGroups(chart, entities, byName, tempo);
 
             var runtimeByEntity = new Dictionary<int, RuntimeNote>();
             foreach (var entity in entities)
@@ -171,6 +172,7 @@ namespace Gugarythm
                     Direction = Math.Clamp((int)Math.Round(entity.Direction), -1, 1),
                     Kind = Classify(entity.Archetype),
                     Critical = entity.Archetype.StartsWith("Critical", StringComparison.Ordinal),
+                    TimeScaleGroup = entity.Refs.TryGetValue("timeScaleGroup", out var groupName) ? groupName : chart.DefaultTimeScaleGroup,
                 };
                 runtimeByEntity[entity.Index] = note;
                 if (playable) chart.Notes.Add(note);
@@ -179,12 +181,17 @@ namespace Gugarythm
             foreach (var connector in entities.Where(entity => entity.Archetype.EndsWith("Connector", StringComparison.Ordinal)))
             {
                 if (!connector.Refs.TryGetValue("start", out var startName) || !connector.Refs.TryGetValue("end", out var endName)) continue;
-                if (!byName.TryGetValue(startName, out var startEntity) || !byName.TryGetValue(endName, out var endEntity)) continue;
-                if (!runtimeByEntity.TryGetValue(startEntity.Index, out var start) || !runtimeByEntity.TryGetValue(endEntity.Index, out var end)) continue;
+                // start/end identify the logical Hold, while head/tail identify
+                // this connector's actual geometry segment. Slide particles and
+                // hidden ticks are represented by those intermediate endpoints.
+                var headName = connector.Refs.TryGetValue("head", out var headReference) ? headReference : startName;
+                var tailName = connector.Refs.TryGetValue("tail", out var tailReference) ? tailReference : endName;
+                if (!byName.TryGetValue(headName, out var headEntity) || !byName.TryGetValue(tailName, out var tailEntity)) continue;
+                if (!runtimeByEntity.TryGetValue(headEntity.Index, out var head) || !runtimeByEntity.TryGetValue(tailEntity.Index, out var tail)) continue;
                 chart.Connectors.Add(new RuntimeConnector
                 {
-                    Start = start,
-                    End = end,
+                    Start = head,
+                    End = tail,
                     Critical = connector.Archetype.StartsWith("Critical", StringComparison.Ordinal),
                     Ease = (int)(Number(connector.Values, "ease", 0)),
                 });
@@ -235,6 +242,25 @@ namespace Gugarythm
                 return time != 0 ? time : a.Index.CompareTo(b.Index);
             });
             return chart;
+        }
+
+        static void BuildTimeScaleGroups(RuntimeChart chart, IReadOnlyList<Entity> entities,
+            IReadOnlyDictionary<string, Entity> byName, TempoMap tempo)
+        {
+            foreach (var group in entities.Where(entity => entity.Archetype == "TimeScaleGroup" && !string.IsNullOrEmpty(entity.Name)))
+            {
+                var changes = new List<(double time, double scale)>();
+                var visited = new HashSet<string>(StringComparer.Ordinal);
+                var currentName = group.Refs.TryGetValue("first", out var first) ? first : null;
+                while (!string.IsNullOrEmpty(currentName) && visited.Add(currentName) &&
+                    byName.TryGetValue(currentName, out var change) && change.Archetype == "TimeScaleChange")
+                {
+                    changes.Add((tempo.SecondsAt(change.Beat), Number(change.Values, "timeScale", 1)));
+                    currentName = change.Refs.TryGetValue("next", out var next) ? next : null;
+                }
+                chart.TimeScaleGroups[group.Name] = new RuntimeTimeScaleGroup(group.Name, changes);
+                chart.DefaultTimeScaleGroup ??= group.Name;
+            }
         }
 
         static bool TryGuidePoint(Entity entity, string prefix, TempoMap tempo, out RuntimeGuidePoint point)
