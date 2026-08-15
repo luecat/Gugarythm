@@ -38,6 +38,26 @@ namespace Gugarythm
         }
     }
 
+    public readonly struct ContactPathSegment
+    {
+        public readonly int FingerId;
+        public readonly double StartTime;
+        public readonly double EndTime;
+        public readonly float StartLane;
+        public readonly float EndLane;
+        public readonly bool Ended;
+
+        public ContactPathSegment(int fingerId, double startTime, double endTime, float startLane, float endLane, bool ended)
+        {
+            FingerId = fingerId;
+            StartTime = startTime;
+            EndTime = endTime;
+            StartLane = startLane;
+            EndLane = endLane;
+            Ended = ended;
+        }
+    }
+
     public readonly struct JudgmentEvent
     {
         public readonly RuntimeNote Note;
@@ -100,10 +120,14 @@ namespace Gugarythm
         }
 
         public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts)
+            => Process(songTime, inputBatch, contacts, Array.Empty<ContactPathSegment>());
+
+        public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
+            IReadOnlyList<ContactPathSegment> contactPaths)
         {
             var output = new List<JudgmentEvent>();
             MatchDiscreteInputs(inputBatch, output);
-            ResolveSustains(songTime, contacts, output);
+            ResolveContactNotes(songTime, contacts, contactPaths, output);
             CommitMisses(songTime, output);
             return output;
         }
@@ -117,7 +141,7 @@ namespace Gugarythm
                 var input = inputs[inputIndex];
                 foreach (var note in notes)
                 {
-                    if (note.Grade != JudgmentGrade.Pending || note.Kind == RuntimeNoteKind.Sustain || note.Kind != input.Kind) continue;
+                    if (note.Grade != JudgmentGrade.Pending || IsContactNote(note) || note.Kind != input.Kind) continue;
                     if (input.Kind != RuntimeNoteKind.Flick && !LaneMatches(note, input.Lane)) continue;
                     var eventTime = input.Kind == RuntimeNoteKind.Flick ? FlickIntersectionTime(input, note) : input.Time;
                     if (!eventTime.HasValue) continue;
@@ -176,13 +200,16 @@ namespace Gugarythm
             return a.Note.Index.CompareTo(b.Note.Index);
         }
 
-        void ResolveSustains(double songTime, IReadOnlyList<ActiveContact> contacts, List<JudgmentEvent> output)
+        void ResolveContactNotes(double songTime, IReadOnlyList<ActiveContact> contacts, IReadOnlyList<ContactPathSegment> contactPaths,
+            List<JudgmentEvent> output)
         {
             foreach (var note in notes)
             {
-                if (note.Grade != JudgmentGrade.Pending || note.Kind != RuntimeNoteKind.Sustain || songTime < note.Time) continue;
+                if (note.Grade != JudgmentGrade.Pending || !IsContactNote(note) || songTime < note.Time) continue;
                 var covered = contacts != null && contacts.Any(contact => LaneMatches(note, contact.Lane) && contact.StartTime <= songTime);
-                if (covered && songTime - note.Time <= SustainLateWindow)
+                var crossed = contactPaths != null && contactPaths.Any(path =>
+                    FirstIntersectionTime(path, note, note.Time, note.Time + SustainLateWindow).HasValue);
+                if ((covered || crossed) && songTime - note.Time <= SustainLateWindow)
                     Register(note, JudgmentGrade.Perfect, songTime - note.Time, output);
             }
         }
@@ -192,10 +219,39 @@ namespace Gugarythm
             foreach (var note in notes)
             {
                 if (note.Grade != JudgmentGrade.Pending) continue;
-                var late = note.Kind == RuntimeNoteKind.Sustain ? SustainLateWindow : OuterLateWindow(note);
+                var late = IsContactNote(note) ? SustainLateWindow : OuterLateWindow(note);
                 if (songTime - note.Time > late + CommitGrace)
                     Register(note, JudgmentGrade.Miss, songTime - note.Time, output);
             }
+        }
+
+        static bool IsContactNote(RuntimeNote note) => note.Kind is RuntimeNoteKind.Sustain or RuntimeNoteKind.Release;
+
+        static double? FirstIntersectionTime(ContactPathSegment path, RuntimeNote note, double earliestTime, double latestTime)
+        {
+            var startTime = Math.Max(path.StartTime, earliestTime);
+            var endTime = Math.Min(path.EndTime, latestTime);
+            if (endTime < startTime) return null;
+
+            var startLane = LaneAt(path, startTime);
+            var endLane = LaneAt(path, endTime);
+            var minimum = note.Lane - note.Size - LaneForgiveness;
+            var maximum = note.Lane + note.Size + LaneForgiveness;
+            if (startLane >= minimum && startLane <= maximum) return startTime;
+
+            var laneDelta = endLane - startLane;
+            if (Math.Abs(laneDelta) < .0001f) return null;
+            var entryLane = laneDelta > 0 ? minimum : maximum;
+            var progress = (entryLane - startLane) / laneDelta;
+            if (progress < 0 || progress > 1) return null;
+            return startTime + (endTime - startTime) * progress;
+        }
+
+        static float LaneAt(ContactPathSegment path, double time)
+        {
+            if (path.EndTime <= path.StartTime) return path.EndLane;
+            var progress = Math.Clamp((time - path.StartTime) / (path.EndTime - path.StartTime), 0, 1);
+            return path.StartLane + (path.EndLane - path.StartLane) * (float)progress;
         }
 
         static double? FlickIntersectionTime(InputToken input, RuntimeNote note)

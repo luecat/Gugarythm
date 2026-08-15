@@ -20,7 +20,7 @@ public static class DisableTouchSimulation
     [MenuItem("Gugarythm/Disable Touch Simulation")]
     public static void Apply()
     {
-        EnableBothInputBackends();
+        EnableInputSystemBackend();
 
         // This is the same project-local option exposed by Input Debugger as
         // "Simulate Touch Input From Mouse or Pen". It is internal in the
@@ -38,13 +38,12 @@ public static class DisableTouchSimulation
         var mouse = Mouse.current;
         var flagsField = typeof(InputDevice).GetField("m_DeviceFlags", BindingFlags.NonPublic | BindingFlags.Instance);
         var flags = mouse == null ? "none" : flagsField?.GetValue(mouse)?.ToString() ?? "unknown";
-        var legacyPressed = UnityEngine.Input.GetMouseButton(0);
         Debug.Log($"GUGARYTHM_MOUSE_READY enabled={mouse?.enabled ?? false} added={mouse?.added ?? false} " +
                   $"native={mouse?.native ?? false} flags={flags} touchSimulation={TouchSimulation.instance?.enabled ?? false} " +
-                  $"legacyPresent={UnityEngine.Input.mousePresent} legacyPressed={legacyPressed} legacyPosition={UnityEngine.Input.mousePosition}");
+                  $"position={mouse?.position.ReadValue() ?? Vector2.zero}");
     }
 
-    static void EnableBothInputBackends()
+    static void EnableInputSystemBackend()
     {
         // Mirror the Input System package's Unity 6 PlayerSettings lookup so
         // Unity's in-memory settings and ProjectSettings.asset stay in sync.
@@ -52,24 +51,24 @@ public static class DisableTouchSimulation
         var globalSettingsField = buildProfileType.GetField("s_GlobalPlayerSettings", BindingFlags.Static | BindingFlags.NonPublic);
         var globalSettings = globalSettingsField?.GetValue(null) as PlayerSettings;
         if (globalSettings == null) throw new InvalidOperationException("Unable to locate Unity global PlayerSettings.");
-        SetBoth(globalSettings);
+        SetInputSystem(globalSettings);
 
         var activeProfile = BuildProfile.GetActiveBuildProfile();
         if (activeProfile != null)
         {
             var overrideField = buildProfileType.GetField("m_PlayerSettings", BindingFlags.Instance | BindingFlags.NonPublic);
             var profileSettings = overrideField?.GetValue(activeProfile) as PlayerSettings;
-            if (profileSettings != null) SetBoth(profileSettings);
+            if (profileSettings != null) SetInputSystem(profileSettings);
         }
     }
 
-    static void SetBoth(PlayerSettings playerSettings)
+    static void SetInputSystem(PlayerSettings playerSettings)
     {
         var serializedSettings = new SerializedObject(playerSettings);
         var activeInputHandler = serializedSettings.FindProperty("activeInputHandler");
         if (activeInputHandler == null) throw new InvalidOperationException("Unable to locate activeInputHandler.");
-        if (activeInputHandler.intValue == 2) return;
-        activeInputHandler.intValue = 2; // Both: Input Manager + Input System.
+        if (activeInputHandler.intValue == 1) return;
+        activeInputHandler.intValue = 1; // Input System Package (New).
         serializedSettings.ApplyModifiedProperties();
     }
 }
