@@ -18,7 +18,7 @@ namespace Gugarythm
         const int MaxEntries = 512;
         const long MaxEntryBytes = 64L * 1024 * 1024;
         const long MaxPackageBytes = 256L * 1024 * 1024;
-        static readonly string[] PreferredExtensions = { ".scp", ".sus", ".usc", ".json", ".gz" };
+        static readonly string[] PreferredExtensions = { ".usc" };
 
         public static ChartPackage ReadZip(byte[] bytes)
         {
@@ -67,7 +67,7 @@ namespace Gugarythm
         {
             var chartName = PreferredExtensions.SelectMany(extension => files.Keys.Where(path => Path.GetExtension(path).Equals(extension, StringComparison.OrdinalIgnoreCase)))
                 .OrderBy(path => path.Count(character => character == '/')).ThenBy(path => path, StringComparer.OrdinalIgnoreCase).FirstOrDefault();
-            if (chartName == null) throw new InvalidDataException("ZIP 中找不到 SCP、SUS、USC 或 Sonolus LevelData。");
+            if (chartName == null) throw new InvalidDataException("ZIP 中找不到 USC 譜面。");
             return new ChartPackage { ChartName = chartName, ChartBytes = files[chartName], Files = files };
         }
 

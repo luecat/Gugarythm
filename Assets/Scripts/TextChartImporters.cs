@@ -58,7 +58,7 @@ namespace Gugarythm
         static bool IsAudio(string path)
         {
             var extension = Path.GetExtension(path).ToLowerInvariant();
-            return extension is ".mp3" or ".ogg" or ".wav";
+            return extension is ".mp3" or ".ogg" or ".wav" or ".m4a" or ".aac";
         }
     }
 
@@ -82,12 +82,16 @@ namespace Gugarythm
                     Title = Path.GetFileNameWithoutExtension(fileName),
                     BgmOffset = (double?)usc["offset"] ?? 0,
                 };
+                BuildTimeScaleGroups(chart, objects, tempo);
+                if ((int?)root["version"] is int version && version != 2)
+                    chart.Warnings.Add($"USC version {version} 不是目前完整支援的 version 2。");
                 var index = 0;
                 foreach (var item in objects.OfType<JObject>())
                 {
                     var type = (string)item["type"];
                     if (type is "single" or "damage") AddSingle(chart, item, tempo, ref index);
                     else if (type == "slide" && item["connections"] is JArray connections) AddSlide(chart, item, connections, tempo, ref index);
+                    else if (type == "guide" && item["midpoints"] is JArray midpoints) AddGuide(chart, item, midpoints, tempo);
                 }
                 chart.Notes.Sort((a, b) => a.Time != b.Time ? a.Time.CompareTo(b.Time) : a.Index.CompareTo(b.Index));
                 LevelDataImporter.AttachCompanionAudio(chart, companionFiles);
@@ -100,38 +104,176 @@ namespace Gugarythm
         {
             var trace = (bool?)item["trace"] == true;
             var flick = item["direction"] != null;
+            var damage = string.Equals((string)item["type"], "damage", StringComparison.Ordinal);
             var beat = (double?)item["beat"] ?? 0;
             chart.Notes.Add(new RuntimeNote
             {
-                Index = index++, SourceId = "usc:" + index, Archetype = trace && flick ? "USC TraceFlick" : trace ? "USC Trace" : flick ? "USC Flick" : "USC Tap",
+                Index = index++, SourceId = "usc:" + index,
+                Archetype = damage ? "USC Damage" : trace && flick ? "USC TraceFlick" : trace ? "USC Trace" : flick ? "USC Flick" : "USC Tap",
                 Beat = beat, Time = tempo.SecondsAt(beat), Lane = (float?)item["lane"] ?? 0, Size = Math.Max(.25f, (float?)item["size"] ?? 1),
                 Direction = FlickDirection(item["direction"]),
                 Critical = (bool?)item["critical"] == true, Kind = flick ? RuntimeNoteKind.Flick : trace ? RuntimeNoteKind.Sustain : RuntimeNoteKind.Tap,
+                TimeScaleGroup = TimeScaleGroupKey(chart, item["timeScaleGroup"]),
             });
         }
 
         static void AddSlide(RuntimeChart chart, JObject slide, JArray connections, BeatTimeMap tempo, ref int index)
         {
             RuntimeNote previousPoint = null;
+            var previousEase = 0;
             foreach (var connection in connections.OfType<JObject>())
             {
                 var beat = (double?)connection["beat"] ?? 0;
                 var judgeType = (string)connection["judgeType"] ?? "none";
                 var connectionType = (string)connection["type"] ?? "tick";
                 var flick = connection["direction"] != null;
+                var trace = judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase);
+                var judged = !judgeType.Equals("none", StringComparison.OrdinalIgnoreCase) || flick;
+                var visibleMidpoint = (connectionType is "tick" or "attach") && connection["critical"] != null;
+                var archetype = trace ? "USC Trace Slide " + connectionType :
+                    (connectionType is "tick" or "attach") ? "USC SlideTickNote" : "USC Slide " + connectionType;
+                if (flick) archetype += " Flick";
                 var point = new RuntimeNote
                 {
-                    Index = index++, SourceId = "usc-slide:" + index, Archetype = "USC Slide " + connectionType,
+                    Index = index++, SourceId = "usc-slide:" + index, Archetype = archetype,
                     Beat = beat, Time = tempo.SecondsAt(beat), Lane = (float?)connection["lane"] ?? 0,
                     Size = Math.Max(.25f, (float?)connection["size"] ?? 1), Critical = (bool?)connection["critical"] ?? (bool?)slide["critical"] ?? false,
                     Direction = FlickDirection(connection["direction"]),
-                    Kind = flick ? RuntimeNoteKind.Flick : connectionType == "start" && judgeType == "normal" ? RuntimeNoteKind.Tap : RuntimeNoteKind.Sustain,
-                    Visible = judgeType != "none" || connectionType == "attach",
+                    Kind = flick ? RuntimeNoteKind.Flick : trace ? RuntimeNoteKind.Sustain :
+                        judgeType == "normal" ? connectionType == "end" ? RuntimeNoteKind.Release : RuntimeNoteKind.Tap : RuntimeNoteKind.Sustain,
+                    Visible = judged || visibleMidpoint,
+                    Judged = judged,
+                    TimeScaleGroup = TimeScaleGroupKey(chart, connection["timeScaleGroup"]),
                 };
-                if (judgeType != "none" || flick) chart.Notes.Add(point);
-                if (previousPoint != null) chart.Connectors.Add(new RuntimeConnector { Start = previousPoint, End = point, Critical = point.Critical });
+                if (point.Visible) chart.Notes.Add(point);
+                if (previousPoint != null) chart.Connectors.Add(new RuntimeConnector
+                {
+                    Start = previousPoint,
+                    End = point,
+                    Critical = point.Critical,
+                    Ease = previousEase,
+                });
                 previousPoint = point;
+                previousEase = EaseType(connection["ease"]);
             }
+        }
+
+        static void BuildTimeScaleGroups(RuntimeChart chart, JArray objects, BeatTimeMap tempo)
+        {
+            var groups = objects.OfType<JObject>().Where(item => (string)item["type"] == "timeScaleGroup").ToArray();
+            if (groups.Length == 0)
+            {
+                const string fallback = "usc:tsg:0";
+                chart.TimeScaleGroups[fallback] = new RuntimeTimeScaleGroup(fallback, new[] { (0d, 1d) });
+                chart.DefaultTimeScaleGroup = fallback;
+                chart.Warnings.Add("USC 未提供 timeScaleGroup，已使用 1.0 倍速。");
+                return;
+            }
+
+            for (var groupIndex = 0; groupIndex < groups.Length; groupIndex++)
+            {
+                var key = "usc:tsg:" + groupIndex.ToString(CultureInfo.InvariantCulture);
+                var changes = groups[groupIndex]["changes"] is JArray source
+                    ? source.OfType<JObject>()
+                        .Select((change, order) => new
+                        {
+                            Beat = (double?)change["beat"] ?? 0,
+                            Scale = (double?)change["timeScale"] ?? 1,
+                            Order = order,
+                        })
+                        .GroupBy(change => change.Beat)
+                        .Select(group => group.OrderBy(change => change.Order).Last())
+                        .OrderBy(change => change.Beat)
+                        .Select(change => (tempo.SecondsAt(change.Beat), change.Scale))
+                        .ToArray()
+                    : Array.Empty<(double, double)>();
+                chart.TimeScaleGroups[key] = new RuntimeTimeScaleGroup(key, changes);
+                chart.DefaultTimeScaleGroup ??= key;
+            }
+        }
+
+        static void AddGuide(RuntimeChart chart, JObject guide, JArray midpoints, BeatTimeMap tempo)
+        {
+            var source = midpoints.OfType<JObject>().ToArray();
+            if (source.Length < 2)
+            {
+                chart.Warnings.Add("USC Guide 至少需要兩個 midpoint。");
+                return;
+            }
+
+            var points = source.Select(point => new RuntimeGuidePoint
+            {
+                Beat = (double?)point["beat"] ?? 0,
+                Time = tempo.SecondsAt((double?)point["beat"] ?? 0),
+                Lane = (float?)point["lane"] ?? 0,
+                Size = Math.Max(.01f, (float?)point["size"] ?? 1),
+                TimeScaleGroup = TimeScaleGroupKey(chart, point["timeScaleGroup"]),
+            }).ToArray();
+            var color = GuideColor((string)guide["color"]);
+            var fade = GuideFade((string)guide["fade"]);
+            var firstBeat = points[0].Beat;
+            var duration = Math.Max(1e-7, points[^1].Beat - firstBeat);
+            for (var pointIndex = 0; pointIndex < points.Length - 1; pointIndex++)
+            {
+                var headProgress = (points[pointIndex].Beat - firstBeat) / duration;
+                var tailProgress = (points[pointIndex + 1].Beat - firstBeat) / duration;
+                chart.Guides.Add(new RuntimeGuide
+                {
+                    Start = points[Math.Max(0, pointIndex - 1)],
+                    Head = points[pointIndex],
+                    Tail = points[pointIndex + 1],
+                    End = points[Math.Min(points.Length - 1, pointIndex + 2)],
+                    Color = color,
+                    Fade = fade,
+                    Ease = EaseType(source[pointIndex]["ease"]),
+                    FadeOut = fade == 2,
+                    HeadOpacity = GuideOpacity(fade, headProgress),
+                    TailOpacity = GuideOpacity(fade, tailProgress),
+                });
+            }
+        }
+
+        static string TimeScaleGroupKey(RuntimeChart chart, JToken token)
+        {
+            var index = (int?)token ?? 0;
+            var key = "usc:tsg:" + index.ToString(CultureInfo.InvariantCulture);
+            if (chart.TimeScaleGroups.ContainsKey(key)) return key;
+            var warning = $"USC 引用了不存在的 timeScaleGroup {index}，已改用預設群組。";
+            if (!chart.Warnings.Contains(warning)) chart.Warnings.Add(warning);
+            return chart.DefaultTimeScaleGroup;
+        }
+
+        static int EaseType(JToken token)
+        {
+            var value = token?.ToString();
+            if (string.Equals(value, "in", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (string.Equals(value, "out", StringComparison.OrdinalIgnoreCase)) return 2;
+            if (string.Equals(value, "inout", StringComparison.OrdinalIgnoreCase)) return 3;
+            return 0;
+        }
+
+        static int GuideColor(string value) => value?.ToLowerInvariant() switch
+        {
+            "purple" => 1,
+            "blue" => 2,
+            "red" => 3,
+            "yellow" => 4,
+            "cyan" => 5,
+            "black" => 6,
+            _ => 0,
+        };
+
+        static int GuideFade(string value) => value?.ToLowerInvariant() switch
+        {
+            "in" => 1,
+            "out" => 2,
+            _ => 0,
+        };
+
+        static float GuideOpacity(int fade, double progress)
+        {
+            var clamped = (float)Math.Clamp(progress, 0, 1);
+            return fade switch { 1 => clamped, 2 => 1 - clamped, _ => 1 };
         }
 
         static int FlickDirection(JToken token)
@@ -141,6 +283,7 @@ namespace Gugarythm
             var direction = token.ToString();
             if (direction.Equals("left", StringComparison.OrdinalIgnoreCase)) return -1;
             if (direction.Equals("right", StringComparison.OrdinalIgnoreCase)) return 1;
+            if (direction.Equals("up", StringComparison.OrdinalIgnoreCase) || direction.Equals("none", StringComparison.OrdinalIgnoreCase)) return 0;
             return 0;
         }
     }
