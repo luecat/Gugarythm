@@ -173,6 +173,10 @@ namespace Gugarythm
                     Kind = Classify(entity.Archetype),
                     Critical = entity.Archetype.StartsWith("Critical", StringComparison.Ordinal),
                     TimeScaleGroup = entity.Refs.TryGetValue("timeScaleGroup", out var groupName) ? groupName : chart.DefaultTimeScaleGroup,
+                    // Connector control points need geometry, but they are not
+                    // playable notes and must never enter Hold checkpoint state.
+                    Visible = playable,
+                    Judged = playable,
                 };
                 runtimeByEntity[entity.Index] = note;
                 if (playable) chart.Notes.Add(note);

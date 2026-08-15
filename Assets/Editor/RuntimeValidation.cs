@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Gugarythm;
@@ -44,6 +45,14 @@ public static class RuntimeValidation
         Require(chart.Guides.Count == 154, $"Expected 154 decoration guides, got {chart.Guides.Count}");
         Require(chart.Guides.Count(guide => guide.FadeOut) == 39,
             $"Expected 39 decoration guide chain endings, got {chart.Guides.Count(guide => guide.FadeOut)}");
+        var chartNotes = new HashSet<RuntimeNote>(chart.Notes);
+        var connectorOnlyNodes = chart.Connectors
+            .SelectMany(connector => new[] { connector.Start, connector.End })
+            .Where(note => !chartNotes.Contains(note))
+            .Distinct()
+            .ToArray();
+        Require(connectorOnlyNodes.Length > 0 && connectorOnlyNodes.All(note => !note.Judged && !note.Visible),
+            "Connector-only geometry nodes must not be classified as playable Hold checkpoints or visible notes");
         Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).EndsWith("SlideTickNote", StringComparison.OrdinalIgnoreCase)) == 46,
             "Expected 46 particle-only hold mids");
         foreach (var tone in new[] { "cyan", "mint", "pink", "yellow" })
@@ -70,6 +79,10 @@ public static class RuntimeValidation
         foreach (var sound in new[] { "perfect", "great", "good", "alternative", "stage" })
             Require(Resources.Load<AudioClip>($"NeonRhythm/package/audio/{sound}") != null,
                 $"SCP-derived judgment sound is missing: {sound}");
+        Require(Resources.Load<AudioClip>("NeonRhythm/package/audio/flick") != null,
+            "Normal Flick sound is missing");
+        Require(Resources.Load<AudioClip>("NeonRhythm/package/audio/critical-flick") != null,
+            "Critical Flick sound is missing");
         var flicks = chart.Notes.Where(note => note.Kind == RuntimeNoteKind.Flick).ToArray();
         Require(flicks.Length == 243, $"Expected 243 flick notes, got {flicks.Length}");
         Require(flicks.Count(note => note.Direction < 0) == 117 && flicks.Count(note => note.Direction == 0) == 21 && flicks.Count(note => note.Direction > 0) == 105,
@@ -118,19 +131,197 @@ public static class RuntimeValidation
         engine.Process(2, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2, -2), new InputToken(2, RuntimeNoteKind.Tap, 2, 2) }, Array.Empty<ActiveContact>());
         Require(left.Grade == JudgmentGrade.Perfect && right.Grade == JudgmentGrade.Perfect, "Batched multi-touch matching failed");
 
+        var overlapA = Note(20, 2.5, 1);
+        var overlapB = Note(21, 2.5, 1);
+        engine = new JudgmentEngine(new[] { overlapA, overlapB }, new ScoreState());
+        engine.Process(2.5, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.5, 1) }, Array.Empty<ActiveContact>());
+        Require((overlapA.Grade == JudgmentGrade.Perfect) != (overlapB.Grade == JudgmentGrade.Perfect),
+            "One discrete activation must not consume two geometrically overlapping notes");
+
+        overlapA = Note(22, 2.6, 1);
+        overlapB = Note(23, 2.6, 1);
+        engine = new JudgmentEngine(new[] { overlapA, overlapB }, new ScoreState());
+        engine.Process(2.6, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Tap, 2.6, 1),
+            new InputToken(2, RuntimeNoteKind.Tap, 2.6, 1),
+        }, Array.Empty<ActiveContact>());
+        Require(overlapA.Grade == JudgmentGrade.Perfect && overlapB.Grade == JudgmentGrade.Perfect,
+            "Two contacts must be able to consume two geometrically overlapping notes");
+
+        var overlapSustainA = Note(24, 2.7, 1);
+        overlapSustainA.Kind = RuntimeNoteKind.Sustain;
+        var overlapSustainB = Note(25, 2.7, 1);
+        overlapSustainB.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { overlapSustainA, overlapSustainB }, new ScoreState());
+        engine.Process(2.7, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 1, 2.5) });
+        Require(overlapSustainA.Grade == JudgmentGrade.Perfect && overlapSustainB.Grade == JudgmentGrade.Perfect,
+            "One continuous contact must satisfy overlapping Hold checkpoints without discrete matching limits");
+
         var release = Note(5, 3, 0);
         release.Kind = RuntimeNoteKind.Release;
         engine = new JudgmentEngine(new[] { release }, new ScoreState());
         engine.Process(3, new[] { new InputToken(1, RuntimeNoteKind.Tap, 3, 0) }, Array.Empty<ActiveContact>());
         Require(release.Grade == JudgmentGrade.Pending, "A Hold release tail must not consume a tap input");
-        engine.Process(3, new[] { new InputToken(1, RuntimeNoteKind.Release, 3, 0) }, Array.Empty<ActiveContact>());
-        Require(release.Grade == JudgmentGrade.Perfect, "A Hold release tail must consume a release input");
+        engine.Process(3, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 2.5) });
+        Require(release.Grade == JudgmentGrade.Perfect, "A Hold release tail must complete from sustained coverage without a release input");
 
         var traceTail = Note(6, 4, 0);
         traceTail.Kind = RuntimeNoteKind.Sustain;
         engine = new JudgmentEngine(new[] { traceTail }, new ScoreState());
         engine.Process(4, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 3.5) });
         Require(traceTail.Grade == JudgmentGrade.Perfect, "A Trace Hold tail must complete from sustained coverage without a release input");
+
+        var pathTail = Note(7, 5, 0);
+        pathTail.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { pathTail }, new ScoreState());
+        engine.Process(5.05, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(), new[]
+        {
+            new ContactPathSegment(1, 5, 5.05, -2, 2, false),
+        });
+        Require(pathTail.Grade == JudgmentGrade.Perfect,
+            "A Hold checkpoint crossed by a post-note contact path must complete at low frame rate");
+
+        var earlyPath = Note(8, 6, 0);
+        earlyPath.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { earlyPath }, new ScoreState());
+        engine.Process(6, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(), new[]
+        {
+            new ContactPathSegment(1, 5.8, 5.9, -2, 2, false),
+        });
+        Require(earlyPath.Grade == JudgmentGrade.Pending,
+            "A Hold path that finishes before the checkpoint time must not be consumed early");
+
+        var recoveryA = Note(9, 7, 0);
+        recoveryA.Kind = RuntimeNoteKind.Sustain;
+        var recoveryB = Note(10, 7.2, 0);
+        recoveryB.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { recoveryA, recoveryB }, new ScoreState());
+        engine.Process(7.12, Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        engine.Process(7.2, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 6.9) });
+        Require(recoveryA.Grade == JudgmentGrade.Miss && recoveryB.Grade == JudgmentGrade.Perfect,
+            "A missed Hold checkpoint must not prevent a later checkpoint from recovering");
+
+        var flickTail = Note(11, 8, 0);
+        flickTail.Kind = RuntimeNoteKind.Flick;
+        var flickTailInputs = new List<InputToken>();
+        var flickSlider = new VirtualSliderInput();
+        flickSlider.Begin(1, 7.95, -.2f, flickTailInputs);
+        flickSlider.Move(1, 8, .15f, flickTailInputs);
+        engine = new JudgmentEngine(new[] { flickTail }, new ScoreState());
+        engine.Process(8, flickTailInputs, Array.Empty<ActiveContact>());
+        Require(flickTail.Grade == JudgmentGrade.Perfect,
+            "A Flick Hold tail must resolve from a 0.35-lane Flick activation");
+
+        ValidateVirtualSlider();
+    }
+
+    static void ValidateVirtualSlider()
+    {
+        var slider = new VirtualSliderInput();
+        var inputs = new List<InputToken>();
+        slider.Begin(1, 1, -5.5f, inputs);
+        Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.5f) < .0001,
+            "Initial slider contact must emit one Tap activation");
+
+        slider.Move(1, 1.005, -5.4f, inputs);
+        Require(inputs.Count == 1, "Motion inside one slider cell must not retrigger Tap");
+
+        slider.Move(1, 1.02, -2.5f, inputs);
+        var crossedTaps = inputs.Where(input => input.Kind == RuntimeNoteKind.Tap).ToArray();
+        Require(crossedTaps.Length == 4 && crossedTaps.Skip(1).Select(input => input.Lane).SequenceEqual(new[] { -4.5f, -3.5f, -2.5f }),
+            "A rub must activate every newly entered slider cell exactly once");
+
+        slider.Move(1, 1.1, -3.5f, inputs);
+        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 5 && Math.Abs(inputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 3.5f) < .0001,
+            "Leaving and re-entering a slider cell after debounce must reactivate it");
+
+        slider.End(1, 1.11, -3.5f, inputs);
+        slider.Begin(1, 2, 0, inputs);
+        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 6, "A new contact must activate its initial slider cell");
+
+        var releaseInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(12, 2.2, -1.5f, releaseInputs);
+        releaseInputs.Clear();
+        slider.End(12, 2.21, 1.5f, releaseInputs);
+        Require(releaseInputs.Count == 0,
+            "TouchUp must only release contact ownership and must not emit Tap or Flick while the finger leaves");
+        slider.Begin(12, 2.22, 1.5f, releaseInputs);
+        Require(releaseInputs.Count == 1 && releaseInputs[0].Kind == RuntimeNoteKind.Tap,
+            "A new TouchDown after release must activate normally");
+
+        var jitterInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(4, 2.5, -5.5f, jitterInputs);
+        slider.Move(4, 2.505, -4.99f, jitterInputs);
+        slider.Move(4, 2.510, -5.01f, jitterInputs);
+        Require(jitterInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 2,
+            "A boundary jitter return inside 25 ms must not rearm its starting slider cell");
+
+        var reentryInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(5, 3, -5.5f, reentryInputs);
+        slider.Move(5, 3.005, -4.85f, reentryInputs);
+        slider.Move(5, 3.010, -5.01f, reentryInputs);
+        Require(reentryInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 3 && Math.Abs(reentryInputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 5.5f) < .0001,
+            "Departing a slider cell by 0.15 lanes must permit its early reentry activation");
+
+        var flickThreshold = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(6, 4, -5.5f, flickThreshold);
+        slider.Move(6, 4.01, -5.151f, flickThreshold);
+        Require(!flickThreshold.Any(input => input.Kind == RuntimeNoteKind.Flick),
+            "Moving 0.349 lanes must not activate Flick");
+        slider.Move(6, 4.02, -5.15f, flickThreshold);
+        Require(flickThreshold.Count(input => input.Kind == RuntimeNoteKind.Flick) == 1,
+            "Moving 0.35 lanes from the Flick anchor must activate exactly one Flick");
+
+        var oppositeFlick = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(7, 4.1, -5.15f, oppositeFlick);
+        slider.Move(7, 4.2, -5.5f, oppositeFlick);
+        Require(oppositeFlick.Count(input => input.Kind == RuntimeNoteKind.Flick) == 1,
+            "A leftward 0.35-lane motion must activate Flick without direction filtering");
+
+        var longFlick = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(8, 4.3, -5.5f, longFlick);
+        slider.Move(8, 4.44, -4.1f, longFlick);
+        var longFlicks = longFlick.Where(input => input.Kind == RuntimeNoteKind.Flick).ToArray();
+        Require(longFlicks.Length == 4 && longFlicks.Zip(longFlicks.Skip(1), (a, b) => a.Time < b.Time).All(value => value),
+            "A long motion must emit every interpolated 0.35-lane Flick threshold");
+
+        var flickJitter = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(9, 4.5, -5.5f, flickJitter);
+        slider.Move(9, 4.6, -5.3f, flickJitter);
+        slider.Move(9, 4.7, -5.5f, flickJitter);
+        slider.Move(9, 4.8, -5.3f, flickJitter);
+        Require(!flickJitter.Any(input => input.Kind == RuntimeNoteKind.Flick),
+            "Sub-threshold oscillation must not accumulate into Flick activation");
+
+        var outsideSweep = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(3, 2.1, -7, outsideSweep);
+        slider.Move(3, 2.2, 7, outsideSweep);
+        Require(outsideSweep.Count(input => input.Kind == RuntimeNoteKind.Tap) == VirtualSliderInput.CellCount,
+            "A low-frame-rate sweep across the whole slider must not skip cells");
+
+        var rubNotes = new[]
+        {
+            Note(10, 3.05, -4.5f),
+            Note(11, 3.10, -3.5f),
+            Note(12, 3.15, -2.5f),
+        };
+        var rubInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(2, 3, -5.5f, rubInputs);
+        slider.Move(2, 3.2, -2.5f, rubInputs);
+        var rubEngine = new JudgmentEngine(rubNotes, new ScoreState());
+        rubEngine.Process(3.2, rubInputs, Array.Empty<ActiveContact>());
+        Require(rubNotes.All(note => note.Grade == JudgmentGrade.Perfect),
+            "A timed rub must match Tap notes in every crossed slider cell");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
