@@ -24,18 +24,27 @@ namespace Gugarythm
         const float ReferenceWidth = 1920f;
         const float LaneTextureWidth = 1280f;
         const float LaneTextureHeight = 732f;
-        const float HitSourceY = 502f;
+        const float HitSourceY = 500f;
         const float CentralHalfLanes = 6f;
         const float PerspectiveDepthRatio = 3.2f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
         // keeps curved ribbons smooth, while stable boundaries prevent the
         // entire tessellation from shifting whenever the visible end is clipped.
         const int ConnectorPathSegments = 128;
-        // The texture contains seven actual gray guides at chart lanes
-        // -6,-4,-2,0,2,4,6. These straight-line fits are in source-image pixels
-        // (x = intercept + slope * y); the six lanes between them are interpolated.
-        static readonly float[] LaneGuideIntercepts = { 613.9411f, 623.2157f, 631.3852f, 639.0410f, 647.6391f, 655.7550f, 665.0466f };
-        static readonly float[] LaneGuideSlopes = { -.8341789f, -.5564627f, -.2783288f, -.0000775f, .2781847f, .5565205f, .8342110f };
+        // All thirteen lane boundaries (-6 through 6) were measured from the
+        // alignment reference. Keeping every boundary avoids the one-to-two
+        // pixel drift caused by interpolating only the even gray guides.
+        // Fits are in source-image pixels: x = intercept + slope * y.
+        static readonly float[] LaneGuideIntercepts =
+        {
+            616.0356f, 620.9612f, 624.5489f, 628.4903f, 631.5389f, 635.4715f, 638.8049f,
+            642.5187f, 646.0649f, 649.5068f, 653.0450f, 656.5548f, 660.2418f,
+        };
+        static readonly float[] LaneGuideSlopes =
+        {
+            -.8379661f, -.7036342f, -.5590519f, -.4198532f, -.2774788f, -.1406074f, .0000444f,
+            .1412126f, .2827021f, .4205463f, .5611308f, .7017399f, .8439814f,
+        };
         // Note height is independent of note.Size, but follows the same depth
         // scale as lane width. This preserves the source video's perspective
         // without making wide notes uniformly taller.
@@ -79,6 +88,7 @@ namespace Gugarythm
         // cropped atlas sprites are wider than they are tall, so width and
         // height must be reconstructed independently from these values.
         static readonly float[] FlickLogicalSizes = { 44f, 66f, 96f, 128f, 159f, 190f };
+        const float FlickArrowScale = .82f;
         Texture2D holdGreenConnectorTexture;
         Texture2D holdYellowConnectorTexture;
         Texture2D holdMidMintTexture;
@@ -434,8 +444,8 @@ namespace Gugarythm
         {
             foreach (var guide in chart.Guides)
             {
-                var headApproach = ApproachProgress(guide.Head.Time, visualTime);
-                var tailApproach = ApproachProgress(guide.Tail.Time, visualTime);
+                var headApproach = ApproachProgress(guide.Head.Time, visualTime, chart.DefaultTimeScaleGroup);
+                var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, chart.DefaultTimeScaleGroup);
                 var show = ScreenY(PerspectiveProgress(tailApproach)) >= HitY - 90 &&
                     ScreenY(PerspectiveProgress(headApproach)) <= TopY + 8;
                 if (!show)
@@ -454,8 +464,8 @@ namespace Gugarythm
 
             foreach (var simLine in chart.SimLines)
             {
-                var aApproach = ApproachProgress(simLine.A.Time, visualTime);
-                var bApproach = ApproachProgress(simLine.B.Time, visualTime);
+                var aApproach = ApproachProgress(simLine.A, visualTime);
+                var bApproach = ApproachProgress(simLine.B, visualTime);
                 var aScreen = PerspectiveProgress(aApproach);
                 var bScreen = PerspectiveProgress(bApproach);
                 var aY = ScreenY(aScreen);
@@ -480,7 +490,7 @@ namespace Gugarythm
 
             foreach (var note in chart.Notes)
             {
-                var approachProgress = ApproachProgress(note.Time, visualTime);
+                var approachProgress = ApproachProgress(note, visualTime);
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
                 var visible = note.Grade == JudgmentGrade.Pending && y <= TopY + 8 && y >= HitY - 90;
@@ -522,7 +532,7 @@ namespace Gugarythm
                 if (flickArrow != null && flickArrow.gameObject.activeSelf && flickArrow.texture != null)
                 {
                     var spriteIndex = FlickSpriteIndex(note.Size);
-                    var arrowBaseWidth = LaneWidth(note.Lane, Mathf.Min(note.Size, 3f) * .5f, screenProgress);
+                    var arrowBaseWidth = LaneWidth(note.Lane, Mathf.Min(note.Size, 3f) * .5f, screenProgress) * FlickArrowScale;
                     var logicalSize = FlickLogicalSizes[spriteIndex];
                     var arrowWidth = arrowBaseWidth * flickArrow.texture.width / logicalSize;
                     var arrowHeight = arrowBaseWidth * flickArrow.texture.height / logicalSize;
@@ -541,8 +551,8 @@ namespace Gugarythm
 
             foreach (var connector in chart.Connectors)
             {
-                var startApproach = ApproachProgress(connector.Start.Time, visualTime);
-                var endApproach = ApproachProgress(connector.End.Time, visualTime);
+                var startApproach = ApproachProgress(connector.Start, visualTime);
+                var endApproach = ApproachProgress(connector.End, visualTime);
                 var startScreen = PerspectiveProgress(startApproach);
                 var endScreen = PerspectiveProgress(endApproach);
                 var show = ScreenY(endScreen) >= HitY - 90 && ScreenY(startScreen) <= TopY + 8;
@@ -561,7 +571,7 @@ namespace Gugarythm
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
                     line.color = new Color(1, 1, 1, .62f);
                 }
-                SetConnectorPath(line, connector, startApproach, endApproach);
+                SetConnectorPath(line, connector, visualTime, startApproach, endApproach);
             }
         }
 
@@ -610,7 +620,7 @@ namespace Gugarythm
             _ => new Color(115 / 255f, 214 / 255f, 157 / 255f, .32f),
         };
 
-        void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, float startApproach, float endApproach)
+        void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, double visualTime, float startApproach, float endApproach)
         {
             var approachSpan = startApproach - endApproach;
             if (approachSpan <= 1e-5f)
@@ -625,16 +635,39 @@ namespace Gugarythm
             // Clip in approach space, then interpolate the lane at the clipped
             // time. This keeps an active hold attached to the judgment edge
             // instead of leaving it at the already-passed start lane.
-            var nearT = Mathf.Clamp01((startApproach - 1f) / approachSpan);
-            var farT = Mathf.Clamp01(startApproach / approachSpan);
+            var nearT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
+            var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
             line.BeginPath(sampleCount);
             for (var index = 0; index < sampleCount; index++)
             {
                 var t = connectorPathSamples[index];
-                SetConnectorPoint(line, index, connector, t, Mathf.Lerp(startApproach, endApproach, t));
+                SetConnectorPoint(line, index, connector, t, ConnectorApproach(connector, visualTime, t));
             }
             line.EndPath();
+        }
+
+        float FindConnectorProgress(RuntimeConnector connector, double visualTime, float target, float startApproach, float endApproach)
+        {
+            if (target >= startApproach) return 0;
+            if (target <= endApproach) return 1;
+            var low = 0f;
+            var high = 1f;
+            for (var iteration = 0; iteration < 20; iteration++)
+            {
+                var middle = (low + high) * .5f;
+                if (ConnectorApproach(connector, visualTime, middle) > target) low = middle;
+                else high = middle;
+            }
+            return (low + high) * .5f;
+        }
+
+        float ConnectorApproach(RuntimeConnector connector, double visualTime, float progress)
+        {
+            var time = connector.Start.Time + (connector.End.Time - connector.Start.Time) * progress;
+            var group = string.IsNullOrEmpty(connector.Start.TimeScaleGroup)
+                ? connector.End.TimeScaleGroup : connector.Start.TimeScaleGroup;
+            return ApproachProgress(time, visualTime, group);
         }
 
         int BuildStablePathSamples(float nearT, float farT)
@@ -673,8 +706,11 @@ namespace Gugarythm
         };
 
         // approach=0 is the far spawn plane; approach=1 is the judgment edge.
-        float ApproachProgress(double noteTime, double visualTime) =>
-            1f - (float)((noteTime - visualTime) / ApproachDuration);
+        float ApproachProgress(RuntimeNote note, double visualTime) =>
+            ApproachProgress(note.Time, visualTime, note.TimeScaleGroup);
+
+        float ApproachProgress(double noteTime, double visualTime, string timeScaleGroup) =>
+            1f - (float)((chart.VisualPosition(noteTime, timeScaleGroup) - chart.VisualPosition(visualTime, timeScaleGroup)) / ApproachDuration);
 
         // Perspective projection of constant-depth motion. The derivatives at
         // both boundaries are continued linearly to keep off-stage clipping
@@ -690,9 +726,9 @@ namespace Gugarythm
         static float X(float lane, float screenProgress)
         {
             var sourceY = (TopY - ScreenY(screenProgress)) * LaneTextureHeight / CanvasHeight;
-            var guide = Mathf.Clamp(Mathf.FloorToInt((lane + CentralHalfLanes) * .5f), 0, LaneGuideIntercepts.Length - 2);
-            var guideLane = -CentralHalfLanes + guide * 2f;
-            var t = (lane - guideLane) * .5f;
+            var guide = Mathf.Clamp(Mathf.FloorToInt(lane + CentralHalfLanes), 0, LaneGuideIntercepts.Length - 2);
+            var guideLane = -CentralHalfLanes + guide;
+            var t = lane - guideLane;
             var left = LaneGuideIntercepts[guide] + LaneGuideSlopes[guide] * sourceY;
             var right = LaneGuideIntercepts[guide + 1] + LaneGuideSlopes[guide + 1] * sourceY;
             var sourceX = Mathf.LerpUnclamped(left, right, t);
@@ -707,19 +743,19 @@ namespace Gugarythm
             if (canvasX <= X(-CentralHalfLanes, screenProgress))
             {
                 var left = X(-CentralHalfLanes, screenProgress);
-                var span = X(-CentralHalfLanes + 2, screenProgress) - left;
-                return -CentralHalfLanes + (canvasX - left) / span * 2f;
+                var span = X(-CentralHalfLanes + 1, screenProgress) - left;
+                return -CentralHalfLanes + (canvasX - left) / span;
             }
             for (var guide = 0; guide < LaneGuideIntercepts.Length - 1; guide++)
             {
-                var leftLane = -CentralHalfLanes + guide * 2f;
+                var leftLane = -CentralHalfLanes + guide;
                 var left = X(leftLane, screenProgress);
-                var right = X(leftLane + 2, screenProgress);
-                if (canvasX <= right) return leftLane + (canvasX - left) / (right - left) * 2f;
+                var right = X(leftLane + 1, screenProgress);
+                if (canvasX <= right) return leftLane + (canvasX - left) / (right - left);
             }
-            var finalLeft = X(CentralHalfLanes - 2, screenProgress);
+            var finalLeft = X(CentralHalfLanes - 1, screenProgress);
             var finalSpan = X(CentralHalfLanes, screenProgress) - finalLeft;
-            return CentralHalfLanes - 2 + (canvasX - finalLeft) / finalSpan * 2f;
+            return CentralHalfLanes - 1 + (canvasX - finalLeft) / finalSpan;
         }
         static bool IsTrace(RuntimeNote note)
         {
