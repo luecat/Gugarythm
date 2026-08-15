@@ -1,8 +1,10 @@
 using Gugarythm;
 using UnityEditor;
 using UnityEditor.SceneManagement;
+using UnityEditor.Build;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using System.IO;
 
 public static class CreatePrototypeScene
 {
@@ -22,5 +24,25 @@ public static class CreatePrototypeScene
         EditorSceneManager.SaveScene(scene, "Assets/Scenes/RhythmPrototype.unity");
         EditorBuildSettings.scenes = new[] { new EditorBuildSettingsScene("Assets/Scenes/RhythmPrototype.unity", true) };
         AssetDatabase.SaveAssets();
+    }
+
+    [MenuItem("Gugarythm/Build Android Debug APK")]
+    public static void BuildAndroidDebug()
+    {
+        Build();
+        EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
+        PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarythm");
+        PlayerSettings.productName = "Gugarythm";
+        var directory = "Builds";
+        Directory.CreateDirectory(directory);
+        var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
+        {
+            scenes = new[] { "Assets/Scenes/RhythmPrototype.unity" },
+            locationPathName = Path.Combine(directory, "Gugarythm-debug.apk"),
+            target = BuildTarget.Android,
+            options = BuildOptions.Development,
+        });
+        if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            throw new System.Exception($"Android build failed: {report.summary.result}");
     }
 }
