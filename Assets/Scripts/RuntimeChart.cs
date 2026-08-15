@@ -26,6 +26,7 @@ namespace Gugarythm
         public bool Visible = true;
         public bool Judged = true;
         public HoldCheckpointSource HoldCheckpointSource;
+        public int HoldRootIndex = -1;
     }
 
     public sealed class RuntimeTimeScaleGroup
@@ -211,6 +212,7 @@ namespace Gugarythm
                 var tail = path[^1];
                 if (tail.Beat <= head.Beat + 1e-9) continue;
 
+                foreach (var point in path) point.HoldRootIndex = head.Index;
                 foreach (var mid in path.Skip(1).Where(IsAuthoredMid))
                     mid.HoldCheckpointSource = HoldCheckpointSource.Mid;
                 // A normal Hold tail is visual only. An authored SlideTick at
@@ -240,6 +242,7 @@ namespace Gugarythm
                         Visible = false,
                         Judged = true,
                         HoldCheckpointSource = HoldCheckpointSource.Auto,
+                        HoldRootIndex = head.Index,
                     });
                 }
             }

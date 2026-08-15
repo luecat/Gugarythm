@@ -17,6 +17,7 @@ namespace Gugarythm
 {
     public sealed class SonolusLandscapePrototype : MonoBehaviour
     {
+        public enum HoldConnectorRenderMode { AnchorClipped, NaturalPassThrough }
         // Mapping measured directly from the original 1280x732 lane artwork.
         // CanvasScaler matches width, so Free Aspect/editor windows can be taller
         // than 1080 logical units. Derive Y from the live viewport instead of
@@ -68,9 +69,13 @@ namespace Gugarythm
         readonly Dictionary<string, Texture2D> buttonTextures = new(StringComparer.Ordinal);
         readonly Dictionary<string, Texture2D> traceTextures = new(StringComparer.Ordinal);
         readonly Dictionary<int, HorizontalSlicedRawImage> noteViews = new();
+        readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
+        readonly HashSet<int> renderedPersistentHoldHeads = new();
         readonly Dictionary<RuntimeConnector, TaperedConnectorGraphic> connectorViews = new();
         readonly Dictionary<RuntimeSimLine, SimLineGraphic> simLineViews = new();
         readonly Dictionary<RuntimeGuide, TaperedConnectorGraphic> guideViews = new();
+        readonly Dictionary<int, RuntimeNote> holdRoots = new();
+        readonly Dictionary<int, List<RuntimeNote>> holdCheckpoints = new();
         readonly Stack<HorizontalSlicedRawImage> notePool = new();
         readonly Stack<TaperedConnectorGraphic> connectorPool = new();
         readonly Stack<SimLineGraphic> simLinePool = new();
@@ -430,6 +435,7 @@ namespace Gugarythm
         void ResetRuntime()
         {
             foreach (var note in chart.Notes) note.Grade = JudgmentGrade.Pending;
+            BuildHoldRenderState();
             scoreState.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
             touches.Clear();
@@ -437,6 +443,22 @@ namespace Gugarythm
             virtualSlider.Reset();
             ReleaseAllViews();
             RefreshHud();
+        }
+
+        void BuildHoldRenderState()
+        {
+            holdRoots.Clear();
+            holdCheckpoints.Clear();
+            foreach (var note in chart.Notes.Where(note => note.HoldRootIndex >= 0))
+            {
+                if (note.HoldRootIndex == note.Index) holdRoots[note.Index] = note;
+                if (note.HoldCheckpointSource == HoldCheckpointSource.None) continue;
+                if (!holdCheckpoints.TryGetValue(note.HoldRootIndex, out var checkpoints))
+                    holdCheckpoints[note.HoldRootIndex] = checkpoints = new List<RuntimeNote>();
+                checkpoints.Add(note);
+            }
+            foreach (var checkpoints in holdCheckpoints.Values)
+                checkpoints.Sort((left, right) => left.Time.CompareTo(right.Time));
         }
 
         double CurrentSongTime() => AudioSettings.dspTime - scheduledDsp - accumulatedPause - chart.BgmOffset;
@@ -580,7 +602,9 @@ namespace Gugarythm
             ShowJudgment(judgment.Grade.ToString().ToUpperInvariant(), color);
             PlayJudgmentSound(judgment);
             if (judgment.Grade != JudgmentGrade.Miss)
+            {
                 SpawnHitParticle(X(judgment.Note.Lane, 1f), judgment.Note.Critical ? "yellow" : IsTrace(judgment.Note) || judgment.Note.Kind == RuntimeNoteKind.Sustain ? "green" : judgment.Note.Kind == RuntimeNoteKind.Flick ? "pink" : "blue");
+            }
         }
 
         void PlayJudgmentSound(JudgmentEvent judgment)
@@ -605,6 +629,7 @@ namespace Gugarythm
 
         void UpdateVisuals(double visualTime)
         {
+            renderedPersistentHoldHeads.Clear();
             foreach (var guide in chart.Guides)
             {
                 var headApproach = ApproachProgress(guide.Head.Time, visualTime, guide.Head.TimeScaleGroup);
@@ -674,7 +699,7 @@ namespace Gugarythm
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
                 var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY &&
-                    !ShouldHideJudgedVisual(note.Grade, approachProgress);
+                    !ShouldHideHoldHead(note, approachProgress);
                 if (!visible)
                 {
                     if (noteViews.TryGetValue(note.Index, out var oldView)) ReleaseNoteView(note.Index, oldView);
@@ -740,8 +765,10 @@ namespace Gugarythm
                 var endScreen = PerspectiveProgress(endApproach);
                 var startY = ScreenY(startScreen);
                 var endY = ScreenY(endScreen);
-                var clipJudgedSection = IsJudged(connector.Start) || IsJudged(connector.End);
-                var show = startY <= TopY + 8 && (clipJudgedSection ? endApproach < JudgmentBottomApproach : endY >= NoteExitY);
+                var holdMode = ResolveConnectorRenderMode(connector);
+                var show = startY <= TopY + 8 && (holdMode == HoldConnectorRenderMode.AnchorClipped
+                    ? endApproach < JudgmentBottomApproach
+                    : endY >= NoteExitY);
                 if (!show)
                 {
                     if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
@@ -757,8 +784,42 @@ namespace Gugarythm
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
                     line.color = new Color(1, 1, 1, .62f);
                 }
-                SetConnectorPath(line, connector, visualTime, startApproach, endApproach, clipJudgedSection);
+                SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
+                if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
+                    holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root))
+                {
+                    var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
+                    RenderPersistentHoldHead(root, connector, headT);
+                }
             }
+            foreach (var pair in persistentHoldHeadViews.ToArray())
+                if (!renderedPersistentHoldHeads.Contains(pair.Key)) ReleasePersistentHoldHead(pair.Key, pair.Value);
+        }
+
+        void RenderPersistentHoldHead(RuntimeNote root, RuntimeConnector connector, float progress)
+        {
+            var rootIndex = root.Index;
+            renderedPersistentHoldHeads.Add(rootIndex);
+            if (!persistentHoldHeadViews.TryGetValue(rootIndex, out var view))
+            {
+                view = AcquireNoteView();
+                persistentHoldHeadViews[rootIndex] = view;
+                view.texture = buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var texture) ? texture : null;
+                view.color = Color.white;
+                view.capRatio = NoteCapRatio;
+                var particle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
+                if (particle != null) particle.gameObject.SetActive(false);
+                var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
+                if (flickArrow != null) flickArrow.gameObject.SetActive(false);
+            }
+            var laneProgress = EaseConnector(progress, connector.Ease);
+            var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
+            var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
+            var screenProgress = PerspectiveProgress(1f);
+            var height = LaneWidth(0, 1f, screenProgress) * ButtonHeightRatio;
+            var padding = height * (root.Critical ? 28f : 40f) / NoteTextureHeight;
+            view.rectTransform.anchoredPosition = new Vector2(X(lane, screenProgress), HitY);
+            view.rectTransform.sizeDelta = new Vector2(LaneWidth(lane, size, screenProgress) + padding * 2, height);
         }
 
         void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, double visualTime, float headApproach, float tailApproach)
@@ -833,7 +894,7 @@ namespace Gugarythm
         };
 
         void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, double visualTime, float startApproach, float endApproach,
-            bool clipJudgedSection)
+            HoldConnectorRenderMode holdMode)
         {
             var approachSpan = startApproach - endApproach;
             if (approachSpan <= 1e-5f)
@@ -845,7 +906,7 @@ namespace Gugarythm
                 return;
             }
 
-            var nearApproach = clipJudgedSection ? JudgmentBottomApproach : NearTrackApproach;
+            var nearApproach = holdMode == HoldConnectorRenderMode.AnchorClipped ? 1f : NearTrackApproach;
             var nearT = FindConnectorProgress(connector, visualTime, nearApproach, startApproach, endApproach);
             var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
@@ -938,6 +999,25 @@ namespace Gugarythm
         public static bool HasVisibleDecorationSegment(float leadingApproach, float trailingApproach) => trailingApproach < 1f;
         public static bool ShouldHideJudgedVisual(JudgmentGrade grade, float approachProgress) =>
             approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
+        static bool ShouldHideHoldHead(RuntimeNote note, float approachProgress) =>
+            note.HoldRootIndex == note.Index
+                ? approachProgress >= 1f
+                : ShouldHideJudgedVisual(note.Grade, approachProgress);
+        public static HoldConnectorRenderMode ResolveHoldConnectorRenderMode(bool rootSucceeded, JudgmentGrade nextCheckpointGrade) =>
+            HoldConnectorRenderMode.AnchorClipped;
+
+        HoldConnectorRenderMode ResolveConnectorRenderMode(RuntimeConnector connector)
+        {
+            var rootIndex = connector.Start.HoldRootIndex;
+            if (rootIndex < 0 || !holdRoots.TryGetValue(rootIndex, out var root)) return HoldConnectorRenderMode.NaturalPassThrough;
+            var rootSucceeded = root.Grade is JudgmentGrade.Perfect or JudgmentGrade.Great or JudgmentGrade.Good;
+            var nextGrade = holdCheckpoints.TryGetValue(rootIndex, out var checkpoints)
+                ? checkpoints.Where(checkpoint => checkpoint.Time <= connector.End.Time + 1e-7 && checkpoint.Grade == JudgmentGrade.Miss)
+                    .Select(checkpoint => checkpoint.Grade).DefaultIfEmpty(JudgmentGrade.Pending).First()
+                : JudgmentGrade.Pending;
+            return ResolveHoldConnectorRenderMode(rootSucceeded, nextGrade);
+        }
+
         static bool IsJudged(RuntimeNote note) => note.Grade != JudgmentGrade.Pending;
         static float X(float lane, float screenProgress)
         {
@@ -1352,7 +1432,7 @@ namespace Gugarythm
                     ? note.Critical ? holdMidYellowTexture : holdMidMintTexture
                     : traceKey == "yellow" ? traceDiamondYellowTexture :
                     traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture;
-                particle.gameObject.SetActive((trace || holdMid) && particle.texture != null);
+                particle.gameObject.SetActive(trace && !holdMid && particle.texture != null);
             }
             var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
             if (flickArrow != null)
@@ -1371,6 +1451,7 @@ namespace Gugarythm
         static int FlickSpriteIndex(float size) => Mathf.Clamp(Mathf.RoundToInt(size * 2), 1, 6) - 1;
 
         void ReleaseNoteView(int index, HorizontalSlicedRawImage view) { noteViews.Remove(index); view.gameObject.SetActive(false); notePool.Push(view); }
+        void ReleasePersistentHoldHead(int rootIndex, HorizontalSlicedRawImage view) { persistentHoldHeadViews.Remove(rootIndex); view.gameObject.SetActive(false); notePool.Push(view); }
         TaperedConnectorGraphic AcquireConnector()
         {
             if (connectorPool.Count > 0)
@@ -1427,7 +1508,7 @@ namespace Gugarythm
             graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
         }
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
-        void ReleaseAllViews() { foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
+        void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
 
         void SpawnHitParticle(float x, string color)
         {
