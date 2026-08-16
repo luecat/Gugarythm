@@ -109,6 +109,7 @@ public static class RuntimeValidation
 
         ValidateJudgedVisualMasking();
         ValidateJudgmentRules();
+        ValidateAudioDeviceRecovery();
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
@@ -283,6 +284,18 @@ public static class RuntimeValidation
             "A Flick Hold tail must resolve from a 0.35-lane Flick activation");
 
         ValidateVirtualSlider();
+    }
+
+    static void ValidateAudioDeviceRecovery()
+    {
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(12.5, .3, 60) - 12.8) < .0001,
+            "Audio recovery must seek to chart time plus BGM offset");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(-.4, .3, 60)) < .0001,
+            "Audio recovery must not seek before the start of a clip");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(100, 0, 60) - 60) < .0001,
+            "Audio recovery must not seek past the end of a clip");
+        Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForChartTime(400.25, 12.5, .3) - 387.45) < .0001,
+            "Audio recovery must rebuild a DSP schedule that preserves chart time");
     }
 
     static void ValidateVirtualSlider()
