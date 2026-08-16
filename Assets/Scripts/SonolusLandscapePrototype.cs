@@ -89,7 +89,7 @@ namespace Gugarythm
         readonly VirtualSliderInput virtualSlider = new();
         readonly float[] connectorPathSamples = new float[ConnectorPathSegments + 3];
         readonly ScoreState scoreState = new();
-        readonly List<IChartImporter> importers = new() { new ScpChartImporter(), new SusChartImporter(), new UscChartImporter(), new LevelDataImporter() };
+        readonly List<IChartImporter> importers = new() { new GgrChartImporter() };
 
         Texture2D backgroundTexture;
         Texture2D laneTexture;
@@ -147,6 +147,7 @@ namespace Gugarythm
         Material laneMaterial;
         bool running;
         bool loading;
+        bool musicLoadSucceeded;
         bool paused;
         int audioDeviceChangePending;
         bool resumeNeedsAudioReschedule;
@@ -192,7 +193,7 @@ namespace Gugarythm
             EnhancedTouchSupport.Enable();
             LoadArtwork();
             BuildInterface();
-            StartCoroutine(LoadDefaultChart());
+            SetStatus("請匯入 GGR 封包。");
         }
 
         void OnDestroy()
@@ -237,24 +238,7 @@ namespace Gugarythm
             if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => !note.Judged || note.Grade != JudgmentGrade.Pending)) FinishGame();
         }
 
-        IEnumerator LoadDefaultChart()
-        {
-            loading = true;
-            SetStatus("正在解析預設 SCP…");
-            var path = Path.Combine(Application.streamingAssetsPath, "Charts/default.scp");
-            byte[] bytes;
-            if (path.Contains("://") || path.Contains(":///"))
-            {
-                using var request = UnityWebRequest.Get(path);
-                yield return request.SendWebRequest();
-                if (request.result != UnityWebRequest.Result.Success) { SetStatus("預設 SCP 載入失敗：" + request.error); loading = false; yield break; }
-                bytes = request.downloadHandler.data;
-            }
-            else bytes = File.ReadAllBytes(path);
-            yield return ImportBytes("default.scp", bytes, null, true);
-        }
-
-        IEnumerator ImportBytes(string fileName, byte[] bytes, IReadOnlyDictionary<string, byte[]> companions, bool isDefault = false)
+        IEnumerator ImportBytes(string fileName, byte[] bytes)
         {
             loading = true;
             startButton.interactable = false;
@@ -265,7 +249,7 @@ namespace Gugarythm
             foreach (var importer in importers)
             {
                 if (!importer.CanImport(fileName, header)) continue;
-                result = importer.Import(fileName, bytes, companions);
+                result = importer.Import(fileName, bytes, null);
                 if (result.Success) break;
             }
             if (result == null) result = ImportResult.Fail("不支援的譜面格式。");
@@ -278,10 +262,11 @@ namespace Gugarythm
             chart = result.Chart;
             if (chart.BgmBytes != null)
             {
+                musicLoadSucceeded = false;
                 yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
-                if (music.clip == null) { loading = false; yield break; }
+                if (!musicLoadSucceeded) { SetStatus("GGR 音樂格式不支援或無法解碼。"); loading = false; yield break; }
             }
-            else SetStatus("譜面已解析，但缺少音樂。請用 ZIP／資料夾連同音訊匯入。");
+            else SetStatus("GGR 缺少 USC 譜面或音樂。");
 
             SaveToLocalLibrary(fileName, bytes, chart);
             startButton.interactable = music.clip != null;
@@ -328,22 +313,44 @@ namespace Gugarythm
 
         IEnumerator LoadMusic(byte[] bytes, string extension)
         {
-            var cache = Path.Combine(Application.persistentDataPath, "AudioCache");
-            Directory.CreateDirectory(cache);
-            var hash = LocalChartLibrary.Sha256(bytes);
-            var path = Path.Combine(cache, hash + (string.IsNullOrEmpty(extension) ? ".mp3" : extension));
-            if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
+            musicLoadSucceeded = false;
+            music.clip = null;
+            string path;
+            var audioCacheReady = true;
+            try
+            {
+                var cache = Path.Combine(Application.persistentDataPath, "AudioCache");
+                Directory.CreateDirectory(cache);
+                var hash = LocalChartLibrary.Sha256(bytes);
+                path = Path.Combine(cache, hash + (string.IsNullOrEmpty(extension) ? ".mp3" : extension));
+                if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
+            }
+            catch (Exception)
+            {
+                path = null;
+                audioCacheReady = false;
+            }
+            if (!audioCacheReady) yield break;
             var type = extension?.ToLowerInvariant() switch
             {
                 ".ogg" => AudioType.OGGVORBIS,
                 ".wav" => AudioType.WAV,
                 ".m4a" or ".aac" => AudioType.ACC,
+                ".flac" => AudioType.UNKNOWN,
                 _ => AudioType.MPEG,
             };
             using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, type);
             yield return request.SendWebRequest();
-            if (request.result != UnityWebRequest.Result.Success) { SetStatus("音樂解碼失敗：" + request.error); yield break; }
-            music.clip = DownloadHandlerAudioClip.GetContent(request);
+            if (request.result != UnityWebRequest.Result.Success) yield break;
+            try
+            {
+                music.clip = DownloadHandlerAudioClip.GetContent(request);
+                musicLoadSucceeded = music.clip != null;
+            }
+            catch (Exception)
+            {
+                music.clip = null;
+            }
         }
 
         void StartGame()
@@ -1339,7 +1346,7 @@ namespace Gugarythm
             MakeButton("−", menuPanel, new Vector2(-320, 42), () => AdjustScrollSpeed(-.1f), new Vector2(88, 58));
             MakeButton("＋", menuPanel, new Vector2(320, 42), () => AdjustScrollSpeed(.1f), new Vector2(88, 58));
             startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -62), StartGame); startButton.interactable = false;
-            MakeButton("匯入 ZIP／SCP", menuPanel, new Vector2(0, -168), RequestImport);
+            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -168), RequestImport);
         }
 
         void BuildResult(RectTransform root)
@@ -1372,60 +1379,23 @@ namespace Gugarythm
         void RequestImport()
         {
 #if UNITY_EDITOR
-            var path = UnityEditor.EditorUtility.OpenFilePanel("匯入 ZIP／SCP", "", "zip,scp");
+            var path = UnityEditor.EditorUtility.OpenFilePanel("匯入 GGR", "", "ggr");
             if (!string.IsNullOrEmpty(path)) StartCoroutine(ImportPath(path));
 #elif UNITY_ANDROID
             NativeChartPicker.OpenFile();
-            SetStatus("請在系統檔案選擇器選取 ZIP 或 SCP…");
+            SetStatus("請在系統檔案選擇器選取 GGR…");
 #else
             SetStatus("目前請將譜面放入 StreamingAssets，或使用 Android 匯入。");
-#endif
-        }
-
-        void RequestImportFolder()
-        {
-#if UNITY_EDITOR
-            var path = UnityEditor.EditorUtility.OpenFolderPanel("匯入譜面資料夾", "", "");
-            if (!string.IsNullOrEmpty(path)) StartCoroutine(ImportPath(path));
-#elif UNITY_ANDROID
-            NativeChartPicker.OpenFolder();
-            SetStatus("請在系統檔案選擇器選取譜面資料夾…");
-#else
-            SetStatus("目前請使用 ZIP 匯入譜面與伴隨檔案。");
 #endif
         }
 
         IEnumerator ImportPath(string path)
         {
             if (path.StartsWith("ERROR:", StringComparison.Ordinal)) { SetStatus("匯入失敗：" + path[6..]); yield break; }
-            if (!File.Exists(path) && !Directory.Exists(path)) { SetStatus("匯入檔案不存在。"); yield break; }
-            if (File.Exists(path))
-            {
-                var extension = Path.GetExtension(path);
-                if (!extension.Equals(".zip", StringComparison.OrdinalIgnoreCase) &&
-                    !extension.Equals(".scp", StringComparison.OrdinalIgnoreCase))
-                {
-                    SetStatus("請選擇內含 USC 與 BGM 的 ZIP，或 SCP 檔案。");
-                    yield break;
-                }
-            }
-            byte[] bytes;
-            IReadOnlyDictionary<string, byte[]> companions = null;
-            if (Directory.Exists(path))
-            {
-                var package = ChartPackageReader.ReadFolder(path);
-                path = package.ChartName; bytes = package.ChartBytes; companions = package.Files;
-            }
-            else
-            {
-                bytes = File.ReadAllBytes(path);
-                if (Path.GetExtension(path).Equals(".zip", StringComparison.OrdinalIgnoreCase))
-                {
-                    var package = ChartPackageReader.ReadZip(bytes);
-                    if (package.ChartName != null) { path = package.ChartName; bytes = package.ChartBytes; companions = package.Files; }
-                }
-            }
-            yield return ImportBytes(Path.GetFileName(path), bytes, companions);
+            if (!File.Exists(path)) { SetStatus("匯入檔案不存在。"); yield break; }
+            if (!Path.GetExtension(path).Equals(".ggr", StringComparison.OrdinalIgnoreCase)) { SetStatus("請選擇 GGR 封包。"); yield break; }
+            var bytes = File.ReadAllBytes(path);
+            yield return ImportBytes(Path.GetFileName(path), bytes);
         }
 
         void PollNativeImport()

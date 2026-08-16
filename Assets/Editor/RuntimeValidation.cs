@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.IO.Compression;
 using System.Linq;
 using Gugarythm;
 using UnityEditor;
@@ -22,6 +23,7 @@ public static class RuntimeValidation
     [MenuItem("Gugarythm/Validate Runtime")]
     public static void ValidateRuntime()
     {
+        ValidateGgrPackageReader();
         var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
         if (!File.Exists(path)) throw new FileNotFoundException("Default SCP is missing", path);
         var bytes = File.ReadAllBytes(path);
@@ -113,6 +115,35 @@ public static class RuntimeValidation
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateGgrPackageReader()
+    {
+        var package = GgrPackageReader.Read(GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.mp3\"}"),
+            ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
+            ["audio.mp3"] = new byte[] { 1, 2, 3 },
+        }));
+        Require(package.ChartBytes.Length > 0 && package.AudioName == "audio.mp3",
+            "A canonical stored GGR package must expose its chart and audio resources");
+        RequireGgrFailure(GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["payload.exe"] = new byte[] { 1 },
+        }), "GGR 包含不安全的檔案路徑。");
+    }
+
+    static void RequireGgrFailure(byte[] bytes, string expected)
+    {
+        try
+        {
+            GgrPackageReader.Read(bytes);
+            throw new InvalidOperationException("Expected GGR import failure: " + expected);
+        }
+        catch (GgrPackageException exception)
+        {
+            Require(exception.Message == expected, "Unexpected GGR error: " + exception.Message);
+        }
     }
 
     static void ValidateJudgedVisualMasking()
@@ -432,5 +463,23 @@ public static class RuntimeValidation
     static void Require(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException("GUGARYTHM_VALIDATION_FAILED: " + message);
+    }
+}
+
+static class GgrZipFixture
+{
+    public static byte[] Create(IReadOnlyDictionary<string, byte[]> entries)
+    {
+        using var output = new MemoryStream();
+        using (var archive = new ZipArchive(output, ZipArchiveMode.Create, true))
+        {
+            foreach (var pair in entries)
+            {
+                var entry = archive.CreateEntry(pair.Key, System.IO.Compression.CompressionLevel.NoCompression);
+                using var stream = entry.Open();
+                stream.Write(pair.Value, 0, pair.Value.Length);
+            }
+        }
+        return output.ToArray();
     }
 }
