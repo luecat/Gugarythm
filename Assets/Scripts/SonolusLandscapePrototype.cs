@@ -149,6 +149,7 @@ namespace Gugarythm
         bool loading;
         bool paused;
         int audioDeviceChangePending;
+        bool resumeNeedsAudioReschedule;
         Coroutine resumeCoroutine;
         Rect appliedSafeArea = new(-1, -1, -1, -1);
         double scheduledDsp;
@@ -357,6 +358,9 @@ namespace Gugarythm
             running = true;
             paused = false;
             accumulatedPause = 0;
+            Interlocked.Exchange(ref audioDeviceChangePending, 0);
+            resumeNeedsAudioReschedule = false;
+            lastObservedSongTime = -chart.BgmOffset;
             effects.UnPause();
             scheduledDsp = AudioSettings.dspTime + .25;
             music.time = 0;
@@ -394,6 +398,7 @@ namespace Gugarythm
         {
             if (!running || paused) return;
             interruptedSongTime = lastObservedSongTime;
+            resumeNeedsAudioReschedule = true;
             paused = true;
             music.Stop();
             effects.Stop();
@@ -423,11 +428,24 @@ namespace Gugarythm
                 yield return new WaitForSecondsRealtime(1);
             }
 
-            accumulatedPause += AudioSettings.dspTime - pauseDsp;
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
-            music.UnPause();
+            if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
+            {
+                var nextDsp = AudioSettings.dspTime + .25;
+                music.Stop();
+                music.time = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, music.clip.length);
+                scheduledDsp = AudioDeviceRecovery.ScheduledDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset);
+                accumulatedPause = 0;
+                music.PlayScheduled(nextDsp);
+                resumeNeedsAudioReschedule = false;
+            }
+            else
+            {
+                accumulatedPause += AudioSettings.dspTime - pauseDsp;
+                music.UnPause();
+            }
             effects.UnPause();
             paused = false;
             pauseOverlay.gameObject.SetActive(false);
@@ -449,6 +467,8 @@ namespace Gugarythm
             CancelResumeCountdown();
             running = false;
             paused = false;
+            Interlocked.Exchange(ref audioDeviceChangePending, 0);
+            resumeNeedsAudioReschedule = false;
             music.Stop();
             effects.Stop();
             touches.Clear();
