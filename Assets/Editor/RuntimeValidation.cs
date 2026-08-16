@@ -37,6 +37,9 @@ public static class RuntimeValidation
             "Hold connector geometry must stop at its first particle/control point");
         Require(!chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "7"),
             "Hold connector geometry must not skip particles and flatten logical start/end into one ribbon");
+        var hiddenRootConnector = chart.Connectors.FirstOrDefault(value => value.Start.Archetype == "HiddenSlideStartNote");
+        Require(hiddenRootConnector != null && SonolusLandscapePrototype.ShouldClipHoldConnector(hiddenRootConnector),
+            "Hidden-head Hold connectors must remain clipped at the judgment line");
         Require(chart.TimeScaleGroups.Count == 3, $"Expected 3 time-scale layers, got {chart.TimeScaleGroups.Count}");
         Require(chart.Notes.Any(note => note.TimeScaleGroup == "tsg:1") && chart.Notes.Any(note => note.TimeScaleGroup == "tsg:2"),
             "Notes from secondary time-scale layers were not preserved");
