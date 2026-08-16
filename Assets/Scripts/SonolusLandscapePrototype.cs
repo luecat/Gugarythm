@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Networking;
@@ -139,6 +140,7 @@ namespace Gugarythm
         Text resultText;
         Text speedLabel;
         Text resumeCountdownLabel;
+        Text pauseTitle;
         Button startButton;
         Button pauseButton;
         Slider speedSlider;
@@ -146,11 +148,14 @@ namespace Gugarythm
         bool running;
         bool loading;
         bool paused;
+        int audioDeviceChangePending;
         Coroutine resumeCoroutine;
         Rect appliedSafeArea = new(-1, -1, -1, -1);
         double scheduledDsp;
         double pauseDsp;
         double accumulatedPause;
+        double lastObservedSongTime;
+        double interruptedSongTime;
         double inputOffsetSeconds;
         double visualOffsetSeconds;
         float scrollSpeed = 8f;
@@ -173,6 +178,7 @@ namespace Gugarythm
 
         void Awake()
         {
+            AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.targetFrameRate = 120;
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
@@ -190,6 +196,7 @@ namespace Gugarythm
 
         void OnDestroy()
         {
+            AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
 #if UNITY_EDITOR || UNITY_STANDALONE
             TouchSimulation.Disable();
 #endif
@@ -212,8 +219,12 @@ namespace Gugarythm
             UpdateDesktopSpeedControls();
             if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
                 ShowJudgment("", Color.white);
+            if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0 &&
+                ShouldPauseForAudioConfigurationChange(true, running, paused))
+                PauseForAudioDeviceChange();
             if (!running || paused || chart == null || judgmentEngine == null) return;
             var songTime = CurrentSongTime();
+            lastObservedSongTime = songTime;
             CollectInput();
             var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths);
             if (events.Count > 0)
@@ -364,6 +375,32 @@ namespace Gugarythm
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
+            pauseTitle.text = "暫停";
+            pauseButton.gameObject.SetActive(false);
+            pauseMenuContent.gameObject.SetActive(true);
+            resumeCountdownLabel.gameObject.SetActive(false);
+            pauseOverlay.gameObject.SetActive(true);
+        }
+
+        public static bool ShouldPauseForAudioConfigurationChange(bool deviceWasChanged, bool isRunning, bool isPaused) =>
+            deviceWasChanged && isRunning && !isPaused;
+
+        void HandleAudioConfigurationChanged(bool deviceWasChanged)
+        {
+            if (deviceWasChanged) Interlocked.Exchange(ref audioDeviceChangePending, 1);
+        }
+
+        void PauseForAudioDeviceChange()
+        {
+            if (!running || paused) return;
+            interruptedSongTime = lastObservedSongTime;
+            paused = true;
+            music.Stop();
+            effects.Stop();
+            touches.Clear();
+            contactPaths.Clear();
+            virtualSlider.Reset();
+            pauseTitle.text = "音訊裝置已變更\n請重新同步";
             pauseButton.gameObject.SetActive(false);
             pauseMenuContent.gameObject.SetActive(true);
             resumeCountdownLabel.gameObject.SetActive(false);
@@ -1298,9 +1335,9 @@ namespace Gugarythm
             pauseOverlay.GetComponent<Image>().raycastTarget = true;
             pauseMenuContent = Panel("Pause Menu", pauseOverlay, new Color(.04f, .06f, .14f, .98f), new Vector2(620, 520), Vector2.zero);
             Outline(pauseMenuContent.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
-            var title = Label("暫停", pauseMenuContent, 42);
-            title.rectTransform.sizeDelta = new Vector2(560, 80);
-            title.rectTransform.anchoredPosition = new Vector2(0, 190);
+            pauseTitle = Label("暫停", pauseMenuContent, 42);
+            pauseTitle.rectTransform.sizeDelta = new Vector2(560, 120);
+            pauseTitle.rectTransform.anchoredPosition = new Vector2(0, 180);
             MakeButton("繼續", pauseMenuContent, new Vector2(0, 80), ContinueGame, new Vector2(360, 82));
             MakeButton("重新開始", pauseMenuContent, new Vector2(0, -30), RestartGame, new Vector2(360, 82));
             MakeButton("退出", pauseMenuContent, new Vector2(0, -140), ExitToMenu, new Vector2(360, 82));
