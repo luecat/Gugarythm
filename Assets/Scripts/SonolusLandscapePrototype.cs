@@ -143,6 +143,7 @@ namespace Gugarythm
         Text pauseTitle;
         Button startButton;
         Button pauseButton;
+        Toggle autoPlayToggle;
         Slider speedSlider;
         Material laneMaterial;
         bool running;
@@ -228,7 +229,7 @@ namespace Gugarythm
             var songTime = CurrentSongTime();
             lastObservedSongTime = songTime;
             CollectInput();
-            var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths);
+            var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths, autoPlayToggle != null && autoPlayToggle.isOn);
             if (events.Count > 0)
             {
                 foreach (var judgment in events) OnJudgment(judgment);
@@ -1345,8 +1346,9 @@ namespace Gugarythm
             });
             MakeButton("−", menuPanel, new Vector2(-320, 42), () => AdjustScrollSpeed(-.1f), new Vector2(88, 58));
             MakeButton("＋", menuPanel, new Vector2(320, 42), () => AdjustScrollSpeed(.1f), new Vector2(88, 58));
-            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -62), StartGame); startButton.interactable = false;
-            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -168), RequestImport);
+            autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -12));
+            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -82), StartGame); startButton.interactable = false;
+            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -188), RequestImport);
         }
 
         void BuildResult(RectTransform root)
@@ -1623,6 +1625,24 @@ namespace Gugarythm
         {
             var panel = Panel(text, parent, new Color(.1f, .62f, .78f), size ?? new Vector2(300, 82), position); panel.GetComponent<Image>().raycastTarget = true; Outline(panel.gameObject, Color.white, 2);
             var label = Label(text, panel, 27); Fill(label.rectTransform); var button = panel.gameObject.AddComponent<Button>(); button.onClick.AddListener(() => action()); return button;
+        }
+
+        static Toggle MakeToggle(string text, RectTransform parent, Vector2 position)
+        {
+            var panel = Panel("Auto Play Toggle", parent, new Color(.08f, .13f, .26f, .95f), new Vector2(300, 48), position);
+            var background = panel.GetComponent<Image>();
+            background.raycastTarget = true;
+            Outline(panel.gameObject, new Color(.45f, .75f, 1f, .8f), 2);
+            var check = Panel("Checkmark", panel, new Color(.25f, 1f, .76f, .95f), new Vector2(30, 30), new Vector2(-118, 0)).GetComponent<Image>();
+            check.raycastTarget = false;
+            var label = Label(text, panel, 22);
+            label.rectTransform.sizeDelta = new Vector2(210, 42);
+            label.rectTransform.anchoredPosition = new Vector2(28, 0);
+            var toggle = panel.gameObject.AddComponent<Toggle>();
+            toggle.targetGraphic = background;
+            toggle.graphic = check;
+            toggle.isOn = false;
+            return toggle;
         }
 
         static RectTransform Layer(string name, RectTransform parent)
