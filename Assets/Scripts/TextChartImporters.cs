@@ -93,6 +93,7 @@ namespace Gugarythm
                     else if (type == "slide" && item["connections"] is JArray connections) AddSlide(chart, item, connections, tempo, ref index);
                     else if (type == "guide" && item["midpoints"] is JArray midpoints) AddGuide(chart, item, midpoints, tempo);
                 }
+                HoldCheckpointBuilder.Apply(chart, tempo.SecondsAt);
                 chart.Notes.Sort((a, b) => a.Time != b.Time ? a.Time.CompareTo(b.Time) : a.Index.CompareTo(b.Index));
                 LevelDataImporter.AttachCompanionAudio(chart, companionFiles);
                 return ImportResult.Ok(chart);
