@@ -317,11 +317,24 @@ public static class RuntimeValidation
         Require(SonolusLandscapePrototype.UsesHoldJudgmentSound(holdHead) && !SonolusLandscapePrototype.UsesHoldJudgmentSound(holdMid) &&
                 !SonolusLandscapePrototype.UsesHoldJudgmentSound(autoCheckpoints[0]),
             "Hold audio must play once at the Hold head, not at every checkpoint");
-        Require(!SonolusLandscapePrototype.IsSilentHoldCheckpoint(holdHead) && SonolusLandscapePrototype.IsSilentHoldCheckpoint(holdMid) &&
-                SonolusLandscapePrototype.IsSilentHoldCheckpoint(autoCheckpoints[0]),
-            "Hold checkpoints must not consume a one-shot audio voice");
+        Require(SonolusLandscapePrototype.IsHoldJudgment(holdHead) && SonolusLandscapePrototype.IsHoldJudgment(holdMid) &&
+                SonolusLandscapePrototype.IsHoldJudgment(autoCheckpoints[0]),
+            "Every Hold part must join the same single Hold audio lifetime");
         Require(!holdTail.Judged,
             "Hold tails must not create a judgment checkpoint");
+
+        var tempoChangingHold = new RuntimeChart();
+        var tempoChangingHead = Note(40, 3, 0); tempoChangingHead.Beat = 3;
+        var tempoChangingTail = Note(41, 5, 0); tempoChangingTail.Beat = 5;
+        tempoChangingHold.Notes.AddRange(new[] { tempoChangingHead, tempoChangingTail });
+        tempoChangingHold.Connectors.Add(new RuntimeConnector { Start = tempoChangingHead, End = tempoChangingTail });
+        var changingTempo = new BeatTimeMap(new[] { new BeatBpm(0, 180), new BeatBpm(4, 240) });
+        HoldCheckpointBuilder.Apply(tempoChangingHold, changingTempo.SecondsAt);
+        var changingCheckpoints = tempoChangingHold.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).OrderBy(note => note.Beat).ToArray();
+        Require(changingCheckpoints.Select(note => note.Beat).SequenceEqual(new[] { 3.5d, 4d, 4.5d }) &&
+                Math.Abs(changingCheckpoints[1].Time - changingCheckpoints[0].Time - (60d / 180 / 2)) < 1e-7 &&
+                Math.Abs(changingCheckpoints[2].Time - changingCheckpoints[1].Time - (60d / 240 / 2)) < 1e-7,
+            "Hold eighth-note checkpoints must use the BPM in effect at each chart segment");
 
         var tailMidChart = new RuntimeChart();
         var tailMidHead = Note(33, 0, 0);
