@@ -127,6 +127,14 @@ public static class RuntimeValidation
         }));
         Require(package.ChartBytes.Length > 0 && package.AudioName == "audio.mp3",
             "A canonical stored GGR package must expose its chart and audio resources");
+        var disguisedAudio = new GgrChartImporter().Import("disguised.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.mp3\"}"),
+            ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
+            ["audio.mp3"] = new byte[] { 0, 0, 0, 24, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'d', (byte)'a', (byte)'s', (byte)'h' },
+        }));
+        Require(disguisedAudio.Success && disguisedAudio.Chart.BgmExtension == ".m4a",
+            "GGR MP4/AAC audio disguised as MP3 must use the AAC decoder");
         RequireGgrFailure(GgrZipFixture.Create(new Dictionary<string, byte[]>
         {
             ["payload.exe"] = new byte[] { 1 },

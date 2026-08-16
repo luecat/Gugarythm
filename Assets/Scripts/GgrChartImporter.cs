@@ -47,7 +47,7 @@ namespace Gugarythm
                 var chart = usc.Chart;
                 chart.SourceFormat = "GGR";
                 chart.BgmBytes = package.AudioBytes;
-                chart.BgmExtension = Path.GetExtension(package.AudioName);
+                chart.BgmExtension = EffectiveAudioExtension(package.AudioName, package.AudioBytes);
                 chart.BgmOffset += FiniteNumber(manifest["offset"]);
                 if (manifest["title"]?.Type == JTokenType.String) chart.Title = (string)manifest["title"];
                 if (manifest["artist"]?.Type == JTokenType.String) chart.Artist = (string)manifest["artist"];
@@ -110,6 +110,14 @@ namespace Gugarythm
 
         static bool IsAllowedCoverName(string name) =>
             name is "cover.png" or "cover.jpg" or "cover.jpeg" or "cover.webp";
+
+        static string EffectiveAudioExtension(string archiveName, byte[] audioBytes)
+        {
+            if (audioBytes?.Length >= 8 && audioBytes[4] == (byte)'f' && audioBytes[5] == (byte)'t' &&
+                audioBytes[6] == (byte)'y' && audioBytes[7] == (byte)'p')
+                return ".m4a";
+            return Path.GetExtension(archiveName).ToLowerInvariant();
+        }
 
         static double FiniteNumber(JToken token)
         {
