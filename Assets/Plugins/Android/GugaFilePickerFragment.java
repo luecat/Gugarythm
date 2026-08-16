@@ -8,9 +8,9 @@ public final class GugaFilePickerFragment extends Fragment {
     public void openFile() {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT);
         intent.addCategory(Intent.CATEGORY_OPENABLE);
-        intent.setType("*/*");
+        intent.setType("application/octet-stream");
         intent.putExtra(Intent.EXTRA_MIME_TYPES, new String[] {
-            "application/zip", "application/octet-stream"
+            "application/octet-stream", "application/zip"
         });
         startActivityForResult(intent, GugaFilePicker.REQUEST_FILE);
     }
