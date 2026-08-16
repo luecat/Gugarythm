@@ -24,6 +24,7 @@ public static class RuntimeValidation
     public static void ValidateRuntime()
     {
         ValidateGgrPackageReader();
+        ValidateGgrUscHoldRoots();
         var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
         if (!File.Exists(path)) throw new FileNotFoundException("Default SCP is missing", path);
         var bytes = File.ReadAllBytes(path);
@@ -153,6 +154,19 @@ public static class RuntimeValidation
         {
             ["payload.exe"] = new byte[] { 1 },
         }), "GGR 包含不安全的檔案路徑。");
+    }
+
+    static void ValidateGgrUscHoldRoots()
+    {
+        var result = new GgrChartImporter().Import("hold.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}"),
+            ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[{\"beat\":0,\"bpm\":120,\"type\":\"bpm\"},{\"type\":\"slide\",\"connections\":[{\"beat\":0,\"judgeType\":\"normal\",\"lane\":0,\"size\":1,\"type\":\"start\"},{\"beat\":2,\"judgeType\":\"none\",\"lane\":0,\"size\":1,\"type\":\"end\"}]}]}}"),
+            ["audio.wav"] = new byte[] { 0 },
+        }));
+        Require(result.Success && result.Chart.Connectors.Count == 1 &&
+                result.Chart.Connectors.All(connector => connector.Start.HoldRootIndex >= 0 && connector.End.HoldRootIndex >= 0),
+            "GGR USC Hold connectors must retain Hold root metadata for clipped rendering");
     }
 
     static void RequireGgrFailure(byte[] bytes, string expected)
