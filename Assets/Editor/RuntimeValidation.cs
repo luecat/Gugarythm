@@ -308,6 +308,10 @@ public static class RuntimeValidation
             "An audio interruption must rebuild its schedule instead of unpausing the old one");
         Require(!AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(false),
             "A normal manual pause must retain the existing unpause path");
+        Require(Math.Abs(AudioDeviceRecovery.PlaybackDspForChartTime(400, -.4, .3) - 400.1) < .0001,
+            "Audio recovery must delay playback until a pre-roll chart time reaches the BGM start");
+        Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForPlayback(400.1, 0) - 400.1) < .0001,
+            "Pre-roll recovery must keep the chart clock silent until clip playback begins");
     }
 
     static void ValidateVirtualSlider()
