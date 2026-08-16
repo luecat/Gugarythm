@@ -60,6 +60,7 @@ namespace Gugarythm
         const float ButtonHeightRatio = 45f / 147.5f * ButtonSpriteTransform;
         const float NoteCapRatio = 93f / 354f;
         const float NoteTextureHeight = 186f;
+        const float HoldHeadWidthScale = 1.275f;
         const int MouseContactId = int.MinValue;
         // Missed notes keep travelling beyond the judgment line until their
         // sprite leaves the viewport. Successful hits return to the pool at once.
@@ -449,6 +450,9 @@ namespace Gugarythm
         {
             holdRoots.Clear();
             holdCheckpoints.Clear();
+            foreach (var point in chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
+                         .Where(point => point != null && point.HoldRootIndex == point.Index).Distinct())
+                holdRoots[point.Index] = point;
             foreach (var note in chart.Notes.Where(note => note.HoldRootIndex >= 0))
             {
                 if (note.HoldRootIndex == note.Index) holdRoots[note.Index] = note;
@@ -711,7 +715,8 @@ namespace Gugarythm
                     noteViews[note.Index] = view;
                     ApplyNoteTexture(view, note);
                 }
-                var width = LaneWidth(note.Lane, note.Size, screenProgress);
+                var width = LaneWidth(note.Lane, note.Size, screenProgress) *
+                    (note.HoldRootIndex == note.Index ? HoldHeadWidthScale : 1f);
                 view.rectTransform.anchoredPosition = new Vector2(X(note.Lane, screenProgress), y);
                 // The source engine applies the same perspective depth to both
                 // axes. Slim Trace/Damage bodies use a full-height atlas quad;
@@ -819,7 +824,7 @@ namespace Gugarythm
             var height = LaneWidth(0, 1f, screenProgress) * ButtonHeightRatio;
             var padding = height * (root.Critical ? 28f : 40f) / NoteTextureHeight;
             view.rectTransform.anchoredPosition = new Vector2(X(lane, screenProgress), HitY);
-            view.rectTransform.sizeDelta = new Vector2(LaneWidth(lane, size, screenProgress) + padding * 2, height);
+            view.rectTransform.sizeDelta = new Vector2(LaneWidth(lane, size, screenProgress) * HoldHeadWidthScale + padding * 2, height);
         }
 
         void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, double visualTime, float headApproach, float tailApproach)
@@ -1000,22 +1005,21 @@ namespace Gugarythm
         public static bool ShouldHideJudgedVisual(JudgmentGrade grade, float approachProgress) =>
             approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
         static bool ShouldHideHoldHead(RuntimeNote note, float approachProgress) =>
-            note.HoldRootIndex == note.Index
+            note.IsHoldTerminal
+                ? approachProgress >= 1f
+                : note.HoldRootIndex == note.Index
                 ? approachProgress >= 1f
                 : ShouldHideJudgedVisual(note.Grade, approachProgress);
         public static HoldConnectorRenderMode ResolveHoldConnectorRenderMode(bool rootSucceeded, JudgmentGrade nextCheckpointGrade) =>
             HoldConnectorRenderMode.AnchorClipped;
+        public static bool ShouldClipHoldConnector(RuntimeConnector connector) =>
+            connector?.Start != null && connector.Start.HoldRootIndex >= 0;
 
         HoldConnectorRenderMode ResolveConnectorRenderMode(RuntimeConnector connector)
         {
-            var rootIndex = connector.Start.HoldRootIndex;
-            if (rootIndex < 0 || !holdRoots.TryGetValue(rootIndex, out var root)) return HoldConnectorRenderMode.NaturalPassThrough;
-            var rootSucceeded = root.Grade is JudgmentGrade.Perfect or JudgmentGrade.Great or JudgmentGrade.Good;
-            var nextGrade = holdCheckpoints.TryGetValue(rootIndex, out var checkpoints)
-                ? checkpoints.Where(checkpoint => checkpoint.Time <= connector.End.Time + 1e-7 && checkpoint.Grade == JudgmentGrade.Miss)
-                    .Select(checkpoint => checkpoint.Grade).DefaultIfEmpty(JudgmentGrade.Pending).First()
-                : JudgmentGrade.Pending;
-            return ResolveHoldConnectorRenderMode(rootSucceeded, nextGrade);
+            return ShouldClipHoldConnector(connector)
+                ? HoldConnectorRenderMode.AnchorClipped
+                : HoldConnectorRenderMode.NaturalPassThrough;
         }
 
         static bool IsJudged(RuntimeNote note) => note.Grade != JudgmentGrade.Pending;
@@ -1519,17 +1523,6 @@ namespace Gugarythm
                 "green" => new Color(.12f, 1f, .58f, .84f),
                 _ => new Color(.28f, .82f, 1f, .84f),
             };
-            var flashObject = new GameObject("Judgment Lane Flash", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
-            var flashRect = flashObject.GetComponent<RectTransform>(); flashRect.SetParent(stage, false); Fill(flashRect);
-            flashRect.SetSiblingIndex(Mathf.Max(0, noteLayer.GetSiblingIndex()));
-            var flash = flashObject.GetComponent<TaperedConnectorGraphic>(); flash.raycastTarget = false;
-            flash.drawGlow = false; flash.drawEdges = false; flash.fillAlphaScale = 1; flash.fillAlphaLimit = 1;
-            var hitWidth = LaneWidth(0, 1f, 1f);
-            flash.BeginPath(2);
-            flash.SetPathPoint(0, new Vector2(x, HitY + 2), hitWidth * 1.08f, 1);
-            flash.SetPathPoint(1, new Vector2(x, -TopY - 20), hitWidth * 1.85f, .34f);
-            flash.EndPath();
-
             var particleRoot = new GameObject("Pixel Judgment Burst", typeof(RectTransform)).GetComponent<RectTransform>();
             particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(240, 240); particleRoot.anchoredPosition = new Vector2(x, HitY);
             particleRoot.SetAsLastSibling();
@@ -1545,7 +1538,7 @@ namespace Gugarythm
                 core.raycastTarget = false;
                 ring.raycastTarget = false;
             }
-            StartCoroutine(AnimateHitEffect(flash, particleRoot, core, ring, tint));
+            StartCoroutine(AnimateHitEffect(particleRoot, core, ring, tint));
         }
 
         static Rect PixelParticleUv(int sprite)
@@ -1564,14 +1557,13 @@ namespace Gugarythm
                 spriteSize / atlasSize, spriteSize / atlasSize);
         }
 
-        IEnumerator AnimateHitEffect(TaperedConnectorGraphic flash, RectTransform particleRoot, RawImage core, RawImage ring, Color tint)
+        IEnumerator AnimateHitEffect(RectTransform particleRoot, RawImage core, RawImage ring, Color tint)
         {
             const float Duration = .38f;
             for (var elapsed = 0f; elapsed < Duration; elapsed += Time.unscaledDeltaTime)
             {
                 var t = elapsed / Duration;
                 var fade = 1 - Mathf.SmoothStep(0, 1, t);
-                flash.color = new Color(tint.r, tint.g, tint.b, .2f * fade);
                 if (core != null)
                 {
                     core.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(48, 108, t);
@@ -1581,7 +1573,6 @@ namespace Gugarythm
                 }
                 yield return null;
             }
-            Destroy(flash.gameObject);
             Destroy(particleRoot.gameObject);
         }
 
