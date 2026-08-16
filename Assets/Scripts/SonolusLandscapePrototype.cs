@@ -680,7 +680,7 @@ namespace Gugarythm
 
         void PlayJudgmentSound(JudgmentEvent judgment)
         {
-            if (judgment.Grade == JudgmentGrade.Miss || effects == null) return;
+            if (judgment.Grade == JudgmentGrade.Miss || effects == null || IsSilentHoldCheckpoint(judgment.Note)) return;
             var clip = UsesHoldJudgmentSound(judgment.Note) && holdSound != null
                 ? holdSound
                 : judgment.Note.Kind == RuntimeNoteKind.Flick
@@ -696,6 +696,9 @@ namespace Gugarythm
         }
 
         public static bool UsesHoldJudgmentSound(RuntimeNote note) =>
+            note != null && note.HoldRootIndex == note.Index;
+
+        public static bool IsSilentHoldCheckpoint(RuntimeNote note) =>
             note != null && note.HoldCheckpointSource is HoldCheckpointSource.Auto or HoldCheckpointSource.Mid;
 
         void UpdateVisuals(double visualTime)

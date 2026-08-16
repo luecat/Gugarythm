@@ -314,9 +314,12 @@ public static class RuntimeValidation
             "Every Hold must create one invisible Auto checkpoint per eighth note before its tail");
         Require(holdMid.HoldCheckpointSource == HoldCheckpointSource.Mid && holdMid.Judged,
             "Each authored Hold mid must remain an independent judged checkpoint");
-        Require(SonolusLandscapePrototype.UsesHoldJudgmentSound(holdMid) && SonolusLandscapePrototype.UsesHoldJudgmentSound(autoCheckpoints[0]) &&
-                !SonolusLandscapePrototype.UsesHoldJudgmentSound(holdHead),
-            "Only Hold checkpoints must select the Hold judgment sound");
+        Require(SonolusLandscapePrototype.UsesHoldJudgmentSound(holdHead) && !SonolusLandscapePrototype.UsesHoldJudgmentSound(holdMid) &&
+                !SonolusLandscapePrototype.UsesHoldJudgmentSound(autoCheckpoints[0]),
+            "Hold audio must play once at the Hold head, not at every checkpoint");
+        Require(!SonolusLandscapePrototype.IsSilentHoldCheckpoint(holdHead) && SonolusLandscapePrototype.IsSilentHoldCheckpoint(holdMid) &&
+                SonolusLandscapePrototype.IsSilentHoldCheckpoint(autoCheckpoints[0]),
+            "Hold checkpoints must not consume a one-shot audio voice");
         Require(!holdTail.Judged,
             "Hold tails must not create a judgment checkpoint");
 
