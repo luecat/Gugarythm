@@ -304,6 +304,10 @@ public static class RuntimeValidation
             "An already paused game must not restart its pause flow");
         Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(false, true, false),
             "Non-device audio configuration changes must not interrupt gameplay");
+        Require(AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(true),
+            "An audio interruption must rebuild its schedule instead of unpausing the old one");
+        Require(!AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(false),
+            "A normal manual pause must retain the existing unpause path");
     }
 
     static void ValidateVirtualSlider()
