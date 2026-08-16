@@ -135,6 +135,20 @@ public static class RuntimeValidation
         }));
         Require(disguisedAudio.Success && disguisedAudio.Chart.BgmExtension == ".m4a",
             "GGR MP4/AAC audio disguised as MP3 must use the AAC decoder");
+        var unknownLengthWav = new GgrChartImporter().Import("unknown-length-wav.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}"),
+            ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
+            ["audio.wav"] = new byte[]
+            {
+                (byte)'R', (byte)'I', (byte)'F', (byte)'F', 255, 255, 255, 255, (byte)'W', (byte)'A', (byte)'V', (byte)'E',
+                (byte)'f', (byte)'m', (byte)'t', (byte)' ', 16, 0, 0, 0, 1, 0, 2, 0, 68, 172, 0, 0, 16, 177, 2, 0, 4, 0, 16, 0,
+                (byte)'d', (byte)'a', (byte)'t', (byte)'a', 255, 255, 255, 255, 0, 0, 0, 0,
+            },
+        }));
+        Require(unknownLengthWav.Success && unknownLengthWav.Chart.BgmBytes[4] == 40 && unknownLengthWav.Chart.BgmBytes[5] == 0 &&
+                unknownLengthWav.Chart.BgmBytes[40] == 4 && unknownLengthWav.Chart.BgmBytes[41] == 0,
+            "GGR PCM WAV files with unknown chunk lengths must be normalized before decoding");
         RequireGgrFailure(GgrZipFixture.Create(new Dictionary<string, byte[]>
         {
             ["payload.exe"] = new byte[] { 1 },
