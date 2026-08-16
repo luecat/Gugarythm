@@ -122,14 +122,22 @@ namespace Gugarythm
         {
             RuntimeNote previousPoint = null;
             var previousEase = 0;
-            foreach (var connection in connections.OfType<JObject>())
+            var sourceConnections = connections.OfType<JObject>().ToArray();
+            var firstJudgedConnection = true;
+            for (var connectionIndex = 0; connectionIndex < sourceConnections.Length; connectionIndex++)
             {
+                var connection = sourceConnections[connectionIndex];
                 var beat = (double?)connection["beat"] ?? 0;
                 var judgeType = (string)connection["judgeType"] ?? "none";
                 var connectionType = (string)connection["type"] ?? "tick";
                 var flick = connection["direction"] != null;
                 var trace = judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase);
-                var judged = !judgeType.Equals("none", StringComparison.OrdinalIgnoreCase) || flick;
+                var judged = !judgeType.Equals("none", StringComparison.OrdinalIgnoreCase);
+                var terminal = connectionIndex == sourceConnections.Length - 1;
+                var kind = !judged ? RuntimeNoteKind.Sustain :
+                    firstJudgedConnection ? RuntimeNoteKind.Tap :
+                    terminal && flick ? RuntimeNoteKind.Flick : RuntimeNoteKind.Sustain;
+                if (judged) firstJudgedConnection = false;
                 var visibleMidpoint = (connectionType is "tick" or "attach") && connection["critical"] != null;
                 var archetype = trace ? "USC Trace Slide " + connectionType :
                     (connectionType is "tick" or "attach") ? "USC SlideTickNote" : "USC Slide " + connectionType;
@@ -140,10 +148,11 @@ namespace Gugarythm
                     Beat = beat, Time = tempo.SecondsAt(beat), Lane = (float?)connection["lane"] ?? 0,
                     Size = Math.Max(.25f, (float?)connection["size"] ?? 1), Critical = (bool?)connection["critical"] ?? (bool?)slide["critical"] ?? false,
                     Direction = FlickDirection(connection["direction"]),
-                    Kind = flick ? RuntimeNoteKind.Flick : trace ? RuntimeNoteKind.Sustain :
-                        judgeType == "normal" ? connectionType == "end" ? RuntimeNoteKind.Release : RuntimeNoteKind.Tap : RuntimeNoteKind.Sustain,
+                    Kind = kind,
                     Visible = judged || visibleMidpoint,
                     Judged = judged,
+                    HoldCheckpointSource = judged && !terminal && kind == RuntimeNoteKind.Sustain
+                        ? HoldCheckpointSource.Mid : HoldCheckpointSource.None,
                     TimeScaleGroup = TimeScaleGroupKey(chart, connection["timeScaleGroup"]),
                 };
                 if (point.Visible) chart.Notes.Add(point);
