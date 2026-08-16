@@ -78,6 +78,8 @@ namespace Gugarythm
         readonly Dictionary<RuntimeGuide, TaperedConnectorGraphic> guideViews = new();
         readonly Dictionary<int, RuntimeNote> holdRoots = new();
         readonly Dictionary<int, List<RuntimeNote>> holdCheckpoints = new();
+        readonly Dictionary<int, double> holdEndTimes = new();
+        readonly Dictionary<int, double> activeHoldSoundEnds = new();
         readonly Stack<HorizontalSlicedRawImage> notePool = new();
         readonly Stack<TaperedConnectorGraphic> connectorPool = new();
         readonly Stack<SimLineGraphic> simLinePool = new();
@@ -122,6 +124,7 @@ namespace Gugarythm
         JudgmentEngine judgmentEngine;
         AudioSource music;
         AudioSource effects;
+        AudioSource holdEffects;
         RectTransform canvasRoot;
         RectTransform stage;
         RectTransform safeAreaRoot;
@@ -234,6 +237,7 @@ namespace Gugarythm
             {
                 foreach (var judgment in events) OnJudgment(judgment);
             }
+            UpdateHoldSound(songTime);
             UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
             if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => !note.Judged || note.Grade != JudgmentGrade.Pending)) FinishGame();
@@ -370,6 +374,7 @@ namespace Gugarythm
             resumeNeedsAudioReschedule = false;
             lastObservedSongTime = -chart.BgmOffset;
             effects.UnPause();
+            holdEffects.UnPause();
             scheduledDsp = AudioSettings.dspTime + .25;
             music.time = 0;
             music.PlayScheduled(scheduledDsp);
@@ -384,6 +389,7 @@ namespace Gugarythm
             pauseDsp = AudioSettings.dspTime;
             music.Pause();
             effects.Pause();
+            holdEffects.Pause();
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
@@ -410,6 +416,7 @@ namespace Gugarythm
             paused = true;
             music.Stop();
             effects.Stop();
+            StopHoldSound();
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
@@ -457,6 +464,7 @@ namespace Gugarythm
                 music.UnPause();
             }
             effects.UnPause();
+            holdEffects.UnPause();
             paused = false;
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(true);
@@ -469,6 +477,7 @@ namespace Gugarythm
             CancelResumeCountdown();
             music.Stop();
             effects.Stop();
+            StopHoldSound();
             StartGame();
         }
 
@@ -481,6 +490,7 @@ namespace Gugarythm
             resumeNeedsAudioReschedule = false;
             music.Stop();
             effects.Stop();
+            StopHoldSound();
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
@@ -502,6 +512,7 @@ namespace Gugarythm
 
         void ResetRuntime()
         {
+            StopHoldSound();
             foreach (var note in chart.Notes) note.Grade = JudgmentGrade.Pending;
             BuildHoldRenderState();
             scoreState.Reset();
@@ -517,6 +528,8 @@ namespace Gugarythm
         {
             holdRoots.Clear();
             holdCheckpoints.Clear();
+            holdEndTimes.Clear();
+            activeHoldSoundEnds.Clear();
             foreach (var point in chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
                          .Where(point => point != null && point.HoldRootIndex == point.Index).Distinct())
                 holdRoots[point.Index] = point;
@@ -528,6 +541,8 @@ namespace Gugarythm
                     holdCheckpoints[note.HoldRootIndex] = checkpoints = new List<RuntimeNote>();
                 checkpoints.Add(note);
             }
+            foreach (var terminal in chart.Notes.Where(note => note.HoldRootIndex >= 0 && note.IsHoldTerminal))
+                holdEndTimes[terminal.HoldRootIndex] = terminal.Time;
             foreach (var checkpoints in holdCheckpoints.Values)
                 checkpoints.Sort((left, right) => left.Time.CompareTo(right.Time));
         }
@@ -680,7 +695,12 @@ namespace Gugarythm
 
         void PlayJudgmentSound(JudgmentEvent judgment)
         {
-            if (judgment.Grade == JudgmentGrade.Miss || effects == null || IsSilentHoldCheckpoint(judgment.Note)) return;
+            if (judgment.Grade == JudgmentGrade.Miss || effects == null) return;
+            if (IsHoldJudgment(judgment.Note))
+            {
+                StartHoldSound(judgment.Note);
+                return;
+            }
             var clip = UsesHoldJudgmentSound(judgment.Note) && holdSound != null
                 ? holdSound
                 : judgment.Note.Kind == RuntimeNoteKind.Flick
@@ -698,8 +718,33 @@ namespace Gugarythm
         public static bool UsesHoldJudgmentSound(RuntimeNote note) =>
             note != null && note.HoldRootIndex == note.Index;
 
-        public static bool IsSilentHoldCheckpoint(RuntimeNote note) =>
-            note != null && note.HoldCheckpointSource is HoldCheckpointSource.Auto or HoldCheckpointSource.Mid;
+        public static bool IsHoldJudgment(RuntimeNote note) =>
+            note != null && note.HoldRootIndex >= 0;
+
+        void StartHoldSound(RuntimeNote note)
+        {
+            if (holdEffects == null || !holdEndTimes.TryGetValue(note.HoldRootIndex, out var endTime)) return;
+            activeHoldSoundEnds[note.HoldRootIndex] = endTime;
+            if (holdEffects.isPlaying || holdEffects.clip != null || holdSound == null) return;
+            holdEffects.clip = holdSound;
+            holdEffects.loop = false;
+            holdEffects.Play();
+        }
+
+        void UpdateHoldSound(double songTime)
+        {
+            foreach (var root in activeHoldSoundEnds.Where(pair => pair.Value <= songTime).Select(pair => pair.Key).ToArray())
+                activeHoldSoundEnds.Remove(root);
+            if (activeHoldSoundEnds.Count == 0) StopHoldSound();
+        }
+
+        void StopHoldSound()
+        {
+            activeHoldSoundEnds.Clear();
+            if (holdEffects == null) return;
+            holdEffects.Stop();
+            holdEffects.clip = null;
+        }
 
         void UpdateVisuals(double visualTime)
         {
@@ -1161,6 +1206,7 @@ namespace Gugarythm
             running = false;
             paused = false;
             music.Stop();
+            StopHoldSound();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
             ReleaseAllViews();
@@ -1231,6 +1277,8 @@ namespace Gugarythm
             music.playOnAwake = false; music.spatialBlend = 0;
             effects = gameObject.AddComponent<AudioSource>();
             effects.playOnAwake = false; effects.spatialBlend = 0;
+            holdEffects = gameObject.AddComponent<AudioSource>();
+            holdEffects.playOnAwake = false; holdEffects.spatialBlend = 0;
             var canvasObject = new GameObject("Rhythm Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var eventSystemObject = new GameObject("Event System", typeof(EventSystem));
             // A module created entirely at runtime has no UI action asset until
