@@ -296,6 +296,14 @@ public static class RuntimeValidation
             "Audio recovery must not seek past the end of a clip");
         Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForChartTime(400.25, 12.5, .3) - 387.45) < .0001,
             "Audio recovery must rebuild a DSP schedule that preserves chart time");
+        Require(SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, false),
+            "An active unpaused game must pause after an output-device change");
+        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, false, false),
+            "An idle game must ignore an output-device change");
+        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, true),
+            "An already paused game must not restart its pause flow");
+        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(false, true, false),
+            "Non-device audio configuration changes must not interrupt gameplay");
     }
 
     static void ValidateVirtualSlider()
