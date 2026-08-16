@@ -434,11 +434,13 @@ namespace Gugarythm
             if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
             {
                 var nextDsp = AudioSettings.dspTime + .25;
+                var clipTime = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, music.clip.length);
+                var playbackDsp = AudioDeviceRecovery.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset);
                 music.Stop();
-                music.time = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, music.clip.length);
-                scheduledDsp = AudioDeviceRecovery.ScheduledDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset);
+                music.time = clipTime;
+                scheduledDsp = AudioDeviceRecovery.ScheduledDspForPlayback(playbackDsp, clipTime);
                 accumulatedPause = 0;
-                music.PlayScheduled(nextDsp);
+                music.PlayScheduled(playbackDsp);
                 resumeNeedsAudioReschedule = false;
             }
             else

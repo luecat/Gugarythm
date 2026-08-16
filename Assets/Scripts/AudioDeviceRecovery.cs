@@ -13,6 +13,12 @@ namespace Gugarythm
         public static double ScheduledDspForChartTime(double nextDsp, double chartTime, double bgmOffset) =>
             nextDsp - chartTime - bgmOffset;
 
+        public static double PlaybackDspForChartTime(double nextDsp, double chartTime, double bgmOffset) =>
+            nextDsp + System.Math.Max(0, -chartTime - bgmOffset);
+
+        public static double ScheduledDspForPlayback(double playbackDsp, float clipTime) =>
+            playbackDsp - clipTime;
+
         public static bool ShouldRescheduleAfterAudioInterruption(bool resumeNeedsAudioReschedule) =>
             resumeNeedsAudioReschedule;
     }
