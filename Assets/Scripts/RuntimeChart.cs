@@ -6,7 +6,7 @@ namespace Gugarythm
 {
     public enum RuntimeNoteKind { Tap, Flick, Sustain, Release }
     public enum JudgmentGrade { Pending, Perfect, Great, Good, Miss }
-    public enum HoldCheckpointSource { None, Mid, Auto }
+    public enum HoldCheckpointSource { None, Mid, Auto, Tail }
 
     [Serializable]
     public sealed class RuntimeNote
@@ -187,7 +187,8 @@ namespace Gugarythm
 
     /// <summary>
     /// Adds runtime-only eighth-note checkpoints to connected Hold paths. Authored
-    /// Sustain mids remain separate checkpoints; terminal nodes are visual only.
+    /// Sustain mids remain separate checkpoints; judged terminals remain
+    /// contact/flick checkpoints while unjudged terminals stay visual only.
     /// </summary>
     public static class HoldCheckpointBuilder
     {
@@ -215,12 +216,14 @@ namespace Gugarythm
 
                 foreach (var point in path) point.HoldRootIndex = head.Index;
                 tail.IsHoldTerminal = true;
-                foreach (var mid in path.Skip(1).Where(IsAuthoredMid))
+                foreach (var mid in path.Skip(1).Take(path.Count - 2).Where(IsAuthoredMid))
                     mid.HoldCheckpointSource = HoldCheckpointSource.Mid;
-                // A normal Hold tail is visual only. An authored SlideTick at
-                // the tail remains a real Mid checkpoint and is still judged.
-                if (tail.HoldCheckpointSource != HoldCheckpointSource.Mid)
-                    tail.Judged = false;
+                if (tail.Judged)
+                {
+                    if (tail.Kind == RuntimeNoteKind.Release)
+                        tail.Kind = RuntimeNoteKind.Sustain;
+                    tail.HoldCheckpointSource = HoldCheckpointSource.Tail;
+                }
 
                 for (var beat = head.Beat + EighthNoteBeats; beat < tail.Beat - 1e-9; beat += EighthNoteBeats)
                 {

@@ -25,6 +25,10 @@ public static class RuntimeValidation
     {
         ValidateGgrPackageReader();
         ValidateGgrUscHoldRoots();
+        ValidateAttachedGgrPlayableCount();
+        ValidateUscSlideRoleClassification();
+        ValidateHoldSoundGate();
+        ValidateHoldJudgmentAudioRouting();
         var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
         if (!File.Exists(path)) throw new FileNotFoundException("Default SCP is missing", path);
         var bytes = File.ReadAllBytes(path);
@@ -83,9 +87,12 @@ public static class RuntimeValidation
                 $"Official Trace diamond is missing: {tone}");
         Require(Resources.Load<Texture2D>("Gugarhythm/package/particles/pixel-atlas") != null,
             "SCP-derived Pixel judgment atlas is missing");
-        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "hold", "stage" })
+        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "hold-loop", "stage" })
             Require(Resources.Load<AudioClip>($"Gugarhythm/package/audio/{sound}") != null,
                 $"SCP-derived judgment sound is missing: {sound}");
+        var holdLoop = Resources.Load<AudioClip>("Gugarhythm/package/audio/hold-loop");
+        Require(holdLoop != null && holdLoop.channels == 1 && holdLoop.frequency == 44100,
+            "Hold loop must be a mono 44.1 kHz resource for gapless Android playback");
         Require(Resources.Load<AudioClip>("Gugarhythm/package/audio/flick") != null,
             "Normal Flick sound is missing");
         Require(Resources.Load<AudioClip>("Gugarhythm/package/audio/critical-flick") != null,
@@ -98,8 +105,9 @@ public static class RuntimeValidation
             .Where(note => !chart.Connectors.Any(connector => ReferenceEquals(connector.Start, note)))
             .Distinct()
             .ToArray();
-        Require(holdTerminalNotes.Length > 0 && holdTerminalNotes.Where(note => note.HoldCheckpointSource != HoldCheckpointSource.Mid).All(note => !note.Judged),
-            "Normal Hold tails must be visual endpoints without sustained, Flick, or release judgment");
+        Require(holdTerminalNotes.Length > 0 && holdTerminalNotes.Where(note => note.Judged).All(note =>
+                    note.IsHoldTerminal && note.HoldCheckpointSource == HoldCheckpointSource.Tail),
+            "Judged Hold terminals must retain Tail checkpoint metadata while unjudged geometry stays non-playable");
         Require(chart.Guides.Any(guide => guide.TailOpacity < guide.HeadOpacity) && chart.Guides.Min(guide => guide.TailOpacity) <= .081f,
             "Guide chains must fade continuously toward their ending");
         Require(chart.Guides.Any(guide => guide.Start.Lane - guide.Start.Size < -6 || guide.Start.Lane + guide.Start.Size > 6 ||
@@ -168,6 +176,255 @@ public static class RuntimeValidation
         Require(result.Success && result.Chart.Connectors.Count == 1 &&
                 result.Chart.Connectors.All(connector => connector.Start.HoldRootIndex >= 0 && connector.End.HoldRootIndex >= 0),
             "GGR USC Hold connectors must retain Hold root metadata for clipped rendering");
+    }
+
+    static void ValidateAttachedGgrPlayableCount()
+    {
+        var path = Environment.GetEnvironmentVariable("GUGARYTHM_VALIDATION_GGR");
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
+        var result = new GgrChartImporter().Import(Path.GetFileName(path), File.ReadAllBytes(path));
+        Require(result.Success, "Attached GGR must import successfully: " + result.Error);
+        Require(result.Chart.PlayableCount == 5579,
+            $"Attached GGR must contain 5579 playable notes after judged Slide tails are restored, got {result.Chart.PlayableCount}");
+    }
+
+    // This fixture deliberately has no .5-beat interior spans, so PlayableCount
+    // describes only authored Slide nodes. Auto-checkpoint cadence is covered by
+    // the existing HoldCheckpointBuilder validation below.
+    static void ValidateUscSlideRoleClassification()
+    {
+        const string usc = @"{
+            ""usc"": {
+                ""objects"": [
+                    { ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 0, ""judgeType"": ""normal"", ""lane"": -4, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 0.125, ""judgeType"": ""normal"", ""lane"": -3, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 0.25, ""judgeType"": ""normal"", ""lane"": -2, ""size"": 1, ""type"": ""end"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 1, ""judgeType"": ""trace"", ""lane"": -1, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 1.125, ""judgeType"": ""trace"", ""lane"": 0, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 1.25, ""judgeType"": ""trace"", ""lane"": 1, ""size"": 1, ""type"": ""end"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 2, ""judgeType"": ""none"", ""lane"": -1, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 2.125, ""judgeType"": ""none"", ""lane"": 0, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 2.25, ""judgeType"": ""none"", ""lane"": 1, ""size"": 1, ""type"": ""end"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 3, ""judgeType"": ""normal"", ""lane"": 2, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 3.125, ""judgeType"": ""normal"", ""lane"": 3, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 3.25, ""judgeType"": ""normal"", ""lane"": 4, ""size"": 1, ""type"": ""end"", ""direction"": ""right"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 4, ""judgeType"": ""normal"", ""lane"": 2, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 4.125, ""judgeType"": ""normal"", ""lane"": 3, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 4.25, ""judgeType"": ""none"", ""lane"": 4, ""size"": 1, ""type"": ""end"", ""direction"": ""right"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 5, ""judgeType"": ""none"", ""lane"": -4, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 5.125, ""judgeType"": ""normal"", ""lane"": -3, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 5.25, ""judgeType"": ""none"", ""lane"": -2, ""size"": 1, ""type"": ""end"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 6, ""judgeType"": ""none"", ""lane"": -4, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 6.25, ""judgeType"": ""normal"", ""lane"": -3, ""size"": 1, ""type"": ""end"" }
+                    ] }
+                ]
+            }
+        }";
+        var result = new UscChartImporter().Import("slide-roles.usc", System.Text.Encoding.UTF8.GetBytes(usc));
+        Require(result.Success, "Synthetic USC Slide-role fixture must import: " + result.Error);
+        var chart = result.Chart;
+        var nodes = chart.Notes.Concat(chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End }))
+            .Distinct().ToArray();
+        RuntimeNote At(double beat) => nodes.Single(note => Math.Abs(note.Beat - beat) < 1e-9);
+
+        var normalHead = At(0);
+        var normalMid = At(.125);
+        var normalTail = At(.25);
+        var traceHead = At(1);
+        var traceMid = At(1.125);
+        var traceTail = At(1.25);
+        var noneNodes = new[] { At(2), At(2.125), At(2.25) };
+        var flickTail = At(3.25);
+        var noneDirectionTail = At(4.25);
+        var noneHead = At(5);
+        var firstJudgedAfterNoneHead = At(5.125);
+        var noneHeadTail = At(5.25);
+        var terminalFirstJudgedAfterNoneHead = At(6.25);
+
+        Require(Enum.TryParse("Tail", out HoldCheckpointSource tailSource),
+            "HoldCheckpointSource must define Tail for judged Slide terminals");
+        Require(normalHead.Judged && normalHead.Kind == RuntimeNoteKind.Tap && traceHead.Judged && traceHead.Kind == RuntimeNoteKind.Tap,
+            "Normal and trace Slide heads must be discrete Tap judgments");
+        Require(normalMid.Judged && normalMid.Kind == RuntimeNoteKind.Sustain && traceMid.Judged && traceMid.Kind == RuntimeNoteKind.Sustain,
+            "Judged authored Slide mids must be Sustain checkpoints regardless of normal or trace judgeType");
+        Require(normalTail.Judged && normalTail.Kind == RuntimeNoteKind.Sustain && normalTail.IsHoldTerminal && normalTail.HoldCheckpointSource == tailSource &&
+                traceTail.Judged && traceTail.Kind == RuntimeNoteKind.Sustain && traceTail.IsHoldTerminal && traceTail.HoldCheckpointSource == tailSource,
+            "Normal and trace Slide terminals must be judged Sustain Tail checkpoints");
+        Require(flickTail.Judged && flickTail.Kind == RuntimeNoteKind.Flick && flickTail.IsHoldTerminal && flickTail.HoldCheckpointSource == tailSource,
+            "Directional Slide terminals must remain judged Flick Tail checkpoints");
+        Require(noneNodes.All(note => !note.Judged) && !noneDirectionTail.Judged && !noneHeadTail.Judged && chart.PlayableCount == 13,
+            "Slide judgeType:none nodes must stay out of judgment and PlayableCount");
+        Require(!noneHead.Judged && firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Tap,
+            "The first judged Slide connection after a none head must become the discrete Tap head");
+        Require(terminalFirstJudgedAfterNoneHead.Judged && terminalFirstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Tap &&
+                terminalFirstJudgedAfterNoneHead.IsHoldTerminal && terminalFirstJudgedAfterNoneHead.HoldCheckpointSource == tailSource,
+            "A first judged Slide terminal after a none head must remain a Tap with Tail metadata");
+
+        var headEngine = new JudgmentEngine(new[] { normalHead }, new ScoreState());
+        headEngine.Process(normalHead.Time, Array.Empty<InputToken>(), new[] { new ActiveContact(1, normalHead.Lane, normalHead.Time - .1) });
+        Require(normalHead.Grade == JudgmentGrade.Pending,
+            "A static pre-held contact must not hit a Slide Tap head");
+        headEngine.Process(normalHead.Time, new[] { new InputToken(1, RuntimeNoteKind.Tap, normalHead.Time, normalHead.Lane) }, Array.Empty<ActiveContact>());
+        Require(normalHead.Grade == JudgmentGrade.Perfect,
+            "A Slide Tap head must resolve from a discrete Tap token");
+
+        var terminalHeadEngine = new JudgmentEngine(new[] { terminalFirstJudgedAfterNoneHead }, new ScoreState());
+        terminalHeadEngine.Process(terminalFirstJudgedAfterNoneHead.Time, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, terminalFirstJudgedAfterNoneHead.Lane, terminalFirstJudgedAfterNoneHead.Time - .1) });
+        Require(terminalFirstJudgedAfterNoneHead.Grade == JudgmentGrade.Pending,
+            "A pre-held contact must not hit a first judged Slide terminal Tap");
+
+        var midEngine = new JudgmentEngine(new[] { normalMid }, new ScoreState());
+        midEngine.Process(normalMid.Time, Array.Empty<InputToken>(), new[] { new ActiveContact(1, normalMid.Lane, normalMid.Time - .1) });
+        Require(normalMid.Grade == JudgmentGrade.Perfect,
+            "A judged Slide mid must resolve from sustained contact");
+        var tailEngine = new JudgmentEngine(new[] { normalTail }, new ScoreState());
+        tailEngine.Process(normalTail.Time, Array.Empty<InputToken>(), new[] { new ActiveContact(1, normalTail.Lane, normalTail.Time - .1) });
+        Require(normalTail.Grade == JudgmentGrade.Perfect,
+            "A non-Flick Slide tail must resolve Perfect from sustained contact without release");
+
+        var flickEngine = new JudgmentEngine(new[] { flickTail }, new ScoreState());
+        flickEngine.Process(flickTail.Time, new[] { new InputToken(1, RuntimeNoteKind.Tap, flickTail.Time, flickTail.Lane) }, Array.Empty<ActiveContact>());
+        Require(flickTail.Grade == JudgmentGrade.Pending,
+            "A Slide Flick tail must not resolve from a Tap token");
+        flickEngine.Process(flickTail.Time, new[] { new InputToken(1, RuntimeNoteKind.Flick, flickTail.Time, flickTail.Lane, flickTail.Lane, flickTail.Time) }, Array.Empty<ActiveContact>());
+        Require(flickTail.Grade == JudgmentGrade.Perfect,
+            "A Slide Flick tail must resolve from a Flick token");
+
+        var noneDirectionScore = new ScoreState();
+        var noneDirectionEngine = new JudgmentEngine(new[] { noneDirectionTail }, noneDirectionScore);
+        noneDirectionEngine.Process(noneDirectionTail.Time,
+            new[] { new InputToken(1, RuntimeNoteKind.Flick, noneDirectionTail.Time, noneDirectionTail.Lane, noneDirectionTail.Lane, noneDirectionTail.Time) },
+            Array.Empty<ActiveContact>());
+        Require(noneDirectionTail.Grade == JudgmentGrade.Pending && noneDirectionScore.Judged == 0 && noneDirectionScore.Combo == 0,
+            "A directional judgeType:none Slide terminal must not be judged or add Combo");
+    }
+
+    static void ValidateHoldSoundGate()
+    {
+        var gate = new HoldSoundGate();
+        Require(!gate.ShouldPlay && gate.ActiveCount == 0,
+            "An empty HoldSoundGate must keep the shared Hold loop stopped");
+
+        gate.Deactivate(999);
+        Require(!gate.ShouldPlay && gate.ActiveCount == 0,
+            "Deactivating an unknown Hold root must leave an empty gate stopped");
+
+        gate.Activate(10);
+        gate.Activate(10);
+        Require(gate.ShouldPlay && gate.ActiveCount == 1,
+            "Duplicate HoldSoundGate activation must retain one active root");
+
+        gate.Activate(20);
+        Require(gate.ShouldPlay && gate.ActiveCount == 2,
+            "Two active Hold roots must share one playing gate with count two");
+
+        gate.Deactivate(10);
+        Require(gate.ShouldPlay && gate.ActiveCount == 1,
+            "Ending one of multiple active Holds must keep the shared loop active");
+
+        gate.Deactivate(20);
+        Require(!gate.ShouldPlay && gate.ActiveCount == 0,
+            "Ending the last active Hold must stop the shared loop gate");
+
+        gate.Deactivate(20);
+        Require(!gate.ShouldPlay && gate.ActiveCount == 0,
+            "Repeated Hold deactivation must leave the stopped gate unchanged");
+
+        gate.Activate(10);
+        Require(gate.ShouldPlay && gate.ActiveCount == 1,
+            "A Hold must reactivate the gate after Miss-style deactivation");
+
+        gate.Clear();
+        Require(!gate.ShouldPlay && gate.ActiveCount == 0,
+            "Clearing HoldSoundGate must remove every active root and stop the loop");
+        gate.Clear();
+        Require(!gate.ShouldPlay && gate.ActiveCount == 0,
+            "Repeated HoldSoundGate clearing must leave the gate stopped");
+    }
+
+    static void ValidateHoldJudgmentAudioRouting()
+    {
+        RuntimeNote HoldPart(int index, int root, HoldCheckpointSource source, RuntimeNoteKind kind = RuntimeNoteKind.Sustain)
+        {
+            var note = Note(index, index, 0);
+            note.Kind = kind;
+            note.HoldRootIndex = root;
+            note.HoldCheckpointSource = source;
+            note.IsHoldTerminal = source == HoldCheckpointSource.Tail;
+            return note;
+        }
+
+        var state = new SonolusLandscapePrototype.HoldJudgmentAudioState();
+        var head = HoldPart(100, 100, HoldCheckpointSource.None, RuntimeNoteKind.Tap);
+        var headRoute = state.Route(new JudgmentEvent(head, JudgmentGrade.Perfect, 0));
+        Require(headRoute == SonolusLandscapePrototype.JudgmentAudioRoute.GradeOneShot &&
+                !state.ShouldPlay && state.ActiveCount == 0,
+            "A successful Slide head must route only to its ordinary judgment one-shot and never activate the Hold loop");
+
+        var mid = HoldPart(101, 100, HoldCheckpointSource.Mid);
+        var midRoute = state.Route(new JudgmentEvent(mid, JudgmentGrade.Great, 0));
+        Require(midRoute == SonolusLandscapePrototype.JudgmentAudioRoute.ActivateHoldLoop &&
+                state.ShouldPlay && state.ActiveCount == 1,
+            "A successful authored Hold mid must activate its root without routing a one-shot");
+
+        var otherMid = HoldPart(201, 200, HoldCheckpointSource.Mid);
+        state.Route(new JudgmentEvent(otherMid, JudgmentGrade.Perfect, 0));
+        Require(state.ActiveCount == 2,
+            "Successful checkpoints from overlapping Holds must add roots to the shared gate");
+
+        var midMissRoute = state.Route(new JudgmentEvent(mid, JudgmentGrade.Miss, 0));
+        Require(midMissRoute == SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
+                state.ShouldPlay && state.ActiveCount == 1,
+            "A missed Hold mid must deactivate only its own root while another active Hold keeps the loop enabled");
+
+        var auto = HoldPart(102, 100, HoldCheckpointSource.Auto);
+        var autoRoute = state.Route(new JudgmentEvent(auto, JudgmentGrade.Good, 0));
+        Require(autoRoute == SonolusLandscapePrototype.JudgmentAudioRoute.ActivateHoldLoop && state.ActiveCount == 2,
+            "A later successful Auto checkpoint must reactivate a Hold after an authored-mid Miss");
+
+        var missedTail = HoldPart(103, 100, HoldCheckpointSource.Tail);
+        var missedTailRoute = state.Route(new JudgmentEvent(missedTail, JudgmentGrade.Miss, 0));
+        Require(missedTailRoute == SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
+                state.ShouldPlay && state.ActiveCount == 1,
+            "A missed Hold tail must permanently deactivate its root without a success one-shot");
+        Require(state.Route(new JudgmentEvent(auto, JudgmentGrade.Perfect, 0)) == SonolusLandscapePrototype.JudgmentAudioRoute.None &&
+                state.ActiveCount == 1,
+            "A Hold root must never reactivate after its terminal judgment");
+
+        var normalAuto = HoldPart(301, 300, HoldCheckpointSource.Auto);
+        state.Route(new JudgmentEvent(normalAuto, JudgmentGrade.Perfect, 0));
+        var normalTail = HoldPart(302, 300, HoldCheckpointSource.Tail);
+        var normalTailRoute = state.Route(new JudgmentEvent(normalTail, JudgmentGrade.Perfect, 0));
+        Require(normalTailRoute == (SonolusLandscapePrototype.JudgmentAudioRoute.PerfectOneShot |
+                                    SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
+                state.ActiveCount == 1,
+            "A successful non-Flick Hold tail must deactivate its root and retain the Perfect one-shot route");
+
+        var flickTail = HoldPart(202, 200, HoldCheckpointSource.Tail, RuntimeNoteKind.Flick);
+        var flickTailRoute = state.Route(new JudgmentEvent(flickTail, JudgmentGrade.Perfect, 0));
+        Require(flickTailRoute == (SonolusLandscapePrototype.JudgmentAudioRoute.FlickOneShot |
+                                   SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
+                !state.ShouldPlay && state.ActiveCount == 0,
+            "A successful Flick Hold tail must deactivate its root and retain the Flick one-shot route");
+
+        state.Clear();
+        Require(!state.ShouldPlay && state.ActiveCount == 0,
+            "Clearing Hold judgment audio state must reset both active and permanently-ended roots for a new chart");
     }
 
     static void RequireGgrFailure(byte[] bytes, string expected)
@@ -314,14 +571,9 @@ public static class RuntimeValidation
             "Every Hold must create one invisible Auto checkpoint per eighth note before its tail");
         Require(holdMid.HoldCheckpointSource == HoldCheckpointSource.Mid && holdMid.Judged,
             "Each authored Hold mid must remain an independent judged checkpoint");
-        Require(SonolusLandscapePrototype.UsesHoldJudgmentSound(holdHead) && !SonolusLandscapePrototype.UsesHoldJudgmentSound(holdMid) &&
-                !SonolusLandscapePrototype.UsesHoldJudgmentSound(autoCheckpoints[0]),
-            "Hold audio must play once at the Hold head, not at every checkpoint");
-        Require(SonolusLandscapePrototype.IsHoldJudgment(holdHead) && SonolusLandscapePrototype.IsHoldJudgment(holdMid) &&
-                SonolusLandscapePrototype.IsHoldJudgment(autoCheckpoints[0]),
-            "Every Hold part must join the same single Hold audio lifetime");
-        Require(!holdTail.Judged,
-            "Hold tails must not create a judgment checkpoint");
+        Require(holdTail.Judged && holdTail.Kind == RuntimeNoteKind.Sustain && holdTail.IsHoldTerminal &&
+                holdTail.HoldCheckpointSource == HoldCheckpointSource.Tail,
+            "A judged non-Flick Hold tail, including a legacy Release, must become a Sustain Tail checkpoint");
 
         var tempoChangingHold = new RuntimeChart();
         var tempoChangingHead = Note(40, 3, 0); tempoChangingHead.Beat = 3;
@@ -346,8 +598,8 @@ public static class RuntimeValidation
         tailMidChart.Notes.AddRange(new[] { tailMidHead, tailMid });
         tailMidChart.Connectors.Add(new RuntimeConnector { Start = tailMidHead, End = tailMid });
         HoldCheckpointBuilder.Apply(tailMidChart, beat => beat);
-        Require(tailMid.Judged && tailMid.HoldCheckpointSource == HoldCheckpointSource.Mid,
-            "An authored mid at a Hold tail must remain an independent judged checkpoint");
+        Require(tailMid.Judged && tailMid.IsHoldTerminal && tailMid.HoldCheckpointSource == HoldCheckpointSource.Tail,
+            "An authored node at a Hold tail must retain Tail rather than Mid checkpoint metadata");
 
         engine = new JudgmentEngine(holdChart.Notes, new ScoreState());
         engine.Process(.5, Array.Empty<InputToken>(), new[] { new ActiveContact(1, -.5f, .5) });
