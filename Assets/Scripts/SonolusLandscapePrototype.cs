@@ -1346,9 +1346,9 @@ namespace Gugarythm
             });
             MakeButton("−", menuPanel, new Vector2(-320, 42), () => AdjustScrollSpeed(-.1f), new Vector2(88, 58));
             MakeButton("＋", menuPanel, new Vector2(320, 42), () => AdjustScrollSpeed(.1f), new Vector2(88, 58));
-            autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -12));
-            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -82), StartGame); startButton.interactable = false;
-            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -188), RequestImport);
+            autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -8));
+            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -98), StartGame); startButton.interactable = false;
+            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -208), RequestImport);
         }
 
         void BuildResult(RectTransform root)
@@ -1636,8 +1636,8 @@ namespace Gugarythm
             var check = Panel("Checkmark", panel, new Color(.25f, 1f, .76f, .95f), new Vector2(30, 30), new Vector2(-118, 0)).GetComponent<Image>();
             check.raycastTarget = false;
             var label = Label(text, panel, 22);
-            label.rectTransform.sizeDelta = new Vector2(210, 42);
-            label.rectTransform.anchoredPosition = new Vector2(28, 0);
+            label.rectTransform.sizeDelta = new Vector2(300, 42);
+            label.rectTransform.anchoredPosition = Vector2.zero;
             var toggle = panel.gameObject.AddComponent<Toggle>();
             toggle.targetGraphic = background;
             toggle.graphic = check;
