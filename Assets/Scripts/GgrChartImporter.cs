@@ -46,7 +46,7 @@ namespace Gugarythm
                 if (!usc.Success) return ImportResult.Fail(InvalidChart);
                 var chart = usc.Chart;
                 chart.SourceFormat = "GGR";
-                chart.BgmBytes = package.AudioBytes;
+                chart.BgmBytes = NormalizeWavLengths(package.AudioName, package.AudioBytes);
                 chart.BgmExtension = EffectiveAudioExtension(package.AudioName, package.AudioBytes);
                 chart.BgmOffset += FiniteNumber(manifest["offset"]);
                 if (manifest["title"]?.Type == JTokenType.String) chart.Title = (string)manifest["title"];
@@ -117,6 +117,54 @@ namespace Gugarythm
                 audioBytes[6] == (byte)'y' && audioBytes[7] == (byte)'p')
                 return ".m4a";
             return Path.GetExtension(archiveName).ToLowerInvariant();
+        }
+
+        static byte[] NormalizeWavLengths(string archiveName, byte[] audioBytes)
+        {
+            if (!string.Equals(Path.GetExtension(archiveName), ".wav", StringComparison.OrdinalIgnoreCase) ||
+                audioBytes?.Length < 20 || audioBytes[0] != (byte)'R' || audioBytes[1] != (byte)'I' ||
+                audioBytes[2] != (byte)'F' || audioBytes[3] != (byte)'F' || audioBytes[8] != (byte)'W' ||
+                audioBytes[9] != (byte)'A' || audioBytes[10] != (byte)'V' || audioBytes[11] != (byte)'E')
+                return audioBytes;
+
+            var normalized = (byte[])audioBytes.Clone();
+            var changed = false;
+            if (IsUnknownLength(normalized, 4))
+            {
+                WriteU32(normalized, 4, (uint)(normalized.Length - 8));
+                changed = true;
+            }
+            for (var offset = 12; offset + 8 <= normalized.Length;)
+            {
+                var size = ReadU32(normalized, offset + 4);
+                if (normalized[offset] == (byte)'d' && normalized[offset + 1] == (byte)'a' &&
+                    normalized[offset + 2] == (byte)'t' && normalized[offset + 3] == (byte)'a')
+                {
+                    if (IsUnknownLength(normalized, offset + 4))
+                    {
+                        WriteU32(normalized, offset + 4, (uint)(normalized.Length - offset - 8));
+                        changed = true;
+                    }
+                    break;
+                }
+                var next = (long)offset + 8 + size + (size & 1);
+                if (next > normalized.Length) return audioBytes;
+                offset = (int)next;
+            }
+            return changed ? normalized : audioBytes;
+        }
+
+        static bool IsUnknownLength(byte[] bytes, int offset) => ReadU32(bytes, offset) == uint.MaxValue;
+
+        static uint ReadU32(byte[] bytes, int offset) =>
+            (uint)(bytes[offset] | bytes[offset + 1] << 8 | bytes[offset + 2] << 16 | bytes[offset + 3] << 24);
+
+        static void WriteU32(byte[] bytes, int offset, uint value)
+        {
+            bytes[offset] = (byte)value;
+            bytes[offset + 1] = (byte)(value >> 8);
+            bytes[offset + 2] = (byte)(value >> 16);
+            bytes[offset + 3] = (byte)(value >> 24);
         }
 
         static double FiniteNumber(JToken token)
