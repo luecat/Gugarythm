@@ -1,0 +1,46 @@
+# Unity generated directories
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+[Mm]emoryCaptures/
+[Rr]ecordings/
+
+# IDE and generated project files
+.vs/
+.idea/
+.vscode/
+*.csproj
+*.sln
+*.suo
+*.tmp
+*.user
+*.userprefs
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+
+# Local build credentials and packages
+*.apk
+*.aab
+*.keystore
+*.jks
+
+# OS metadata
+.DS_Store
+Thumbs.db
+
+# Local AI-agent instructions and generated planning artifacts
+AGENTS.md
+CLAUDE.md
+GEMINI.md
+.agents/
+.codex/
+docs/superpowers/
