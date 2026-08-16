@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using Gugarythm;
@@ -29,12 +30,16 @@ public static class RuntimeValidation
         var chart = result.Chart;
         // Hidden and attached slide-control entities belong to connector geometry,
         // not the playable/judged note set.
-        Require(chart.PlayableCount == 2063, $"Expected 2063 playable notes, got {chart.PlayableCount}");
+        Require(chart.Notes.Any(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto && !note.Visible),
+            "Imported Holds must add invisible eighth-note checkpoints");
         Require(chart.Connectors.Count == 1175, $"Expected 1175 connectors, got {chart.Connectors.Count}");
         Require(chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "8"),
             "Hold connector geometry must stop at its first particle/control point");
         Require(!chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "7"),
             "Hold connector geometry must not skip particles and flatten logical start/end into one ribbon");
+        var hiddenRootConnector = chart.Connectors.FirstOrDefault(value => value.Start.Archetype == "HiddenSlideStartNote");
+        Require(hiddenRootConnector != null && SonolusLandscapePrototype.ShouldClipHoldConnector(hiddenRootConnector),
+            "Hidden-head Hold connectors must remain clipped at the judgment line");
         Require(chart.TimeScaleGroups.Count == 3, $"Expected 3 time-scale layers, got {chart.TimeScaleGroups.Count}");
         Require(chart.Notes.Any(note => note.TimeScaleGroup == "tsg:1") && chart.Notes.Any(note => note.TimeScaleGroup == "tsg:2"),
             "Notes from secondary time-scale layers were not preserved");
@@ -44,6 +49,14 @@ public static class RuntimeValidation
         Require(chart.Guides.Count == 154, $"Expected 154 decoration guides, got {chart.Guides.Count}");
         Require(chart.Guides.Count(guide => guide.FadeOut) == 39,
             $"Expected 39 decoration guide chain endings, got {chart.Guides.Count(guide => guide.FadeOut)}");
+        var chartNotes = new HashSet<RuntimeNote>(chart.Notes);
+        var connectorOnlyNodes = chart.Connectors
+            .SelectMany(connector => new[] { connector.Start, connector.End })
+            .Where(note => !chartNotes.Contains(note))
+            .Distinct()
+            .ToArray();
+        Require(connectorOnlyNodes.Length > 0 && connectorOnlyNodes.All(note => !note.Judged && !note.Visible),
+            "Connector-only geometry nodes must not be classified as playable Hold checkpoints or visible notes");
         Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).EndsWith("SlideTickNote", StringComparison.OrdinalIgnoreCase)) == 46,
             "Expected 46 particle-only hold mids");
         foreach (var tone in new[] { "cyan", "mint", "pink", "yellow" })
@@ -67,17 +80,23 @@ public static class RuntimeValidation
                 $"Official Trace diamond is missing: {tone}");
         Require(Resources.Load<Texture2D>("NeonRhythm/package/particles/pixel-atlas") != null,
             "SCP-derived Pixel judgment atlas is missing");
-        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "stage" })
+        foreach (var sound in new[] { "perfect", "great", "good", "alternative", "hold", "stage" })
             Require(Resources.Load<AudioClip>($"NeonRhythm/package/audio/{sound}") != null,
                 $"SCP-derived judgment sound is missing: {sound}");
+        Require(Resources.Load<AudioClip>("NeonRhythm/package/audio/flick") != null,
+            "Normal Flick sound is missing");
+        Require(Resources.Load<AudioClip>("NeonRhythm/package/audio/critical-flick") != null,
+            "Critical Flick sound is missing");
         var flicks = chart.Notes.Where(note => note.Kind == RuntimeNoteKind.Flick).ToArray();
         Require(flicks.Length == 243, $"Expected 243 flick notes, got {flicks.Length}");
         Require(flicks.Count(note => note.Direction < 0) == 117 && flicks.Count(note => note.Direction == 0) == 21 && flicks.Count(note => note.Direction > 0) == 105,
             "Flick left/center/right directions were not preserved");
-        Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).Contains("TraceSlideEnd") && note.Kind == RuntimeNoteKind.Sustain) == 143,
-            "Trace Hold tails must complete from sustained coverage without a separate release input");
-        Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).Contains("SlideEndFlick") && note.Kind == RuntimeNoteKind.Flick) == 37,
-            "Flick Hold tails must retain flick input");
+        var holdTerminalNotes = chart.Connectors.Select(connector => connector.End)
+            .Where(note => !chart.Connectors.Any(connector => ReferenceEquals(connector.Start, note)))
+            .Distinct()
+            .ToArray();
+        Require(holdTerminalNotes.Length > 0 && holdTerminalNotes.Where(note => note.HoldCheckpointSource != HoldCheckpointSource.Mid).All(note => !note.Judged),
+            "Normal Hold tails must be visual endpoints without sustained, Flick, or release judgment");
         Require(chart.Guides.Any(guide => guide.TailOpacity < guide.HeadOpacity) && chart.Guides.Min(guide => guide.TailOpacity) <= .081f,
             "Guide chains must fade continuously toward their ending");
         Require(chart.Guides.Any(guide => guide.Start.Lane - guide.Start.Size < -6 || guide.Start.Lane + guide.Start.Size > 6 ||
@@ -88,10 +107,29 @@ public static class RuntimeValidation
         Require(chart.BgmBytes?.Length > 0, "Default SCP BGM was not extracted");
         Require(chart.Notes.SequenceEqual(chart.Notes.OrderBy(note => note.Time).ThenBy(note => note.Index)), "Notes are not time sorted");
 
+        ValidateJudgedVisualMasking();
         ValidateJudgmentRules();
+        ValidateAudioDeviceRecovery();
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateJudgedVisualMasking()
+    {
+        Require(SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Pending) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
+                SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Perfect) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
+                SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Miss) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
+                SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(false, JudgmentGrade.Perfect) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped,
+            "Hold connectors must always stop at their Head, regardless of judgment result");
+        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1f),
+            "A successful note must remain visible until it reaches the lower edge of the judgment strip");
+        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Miss, 1.01f),
+            "A missed note must remain visible while travelling through the judgment strip");
+        Require(SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1.02f),
+            "A successful note must disappear after reaching the lower edge of the judgment strip");
+        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Pending, 1.1f),
+            "An unresolved note must not be hidden by the judgment mask");
     }
 
     static void ValidateJudgmentRules()
@@ -118,19 +156,272 @@ public static class RuntimeValidation
         engine.Process(2, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2, -2), new InputToken(2, RuntimeNoteKind.Tap, 2, 2) }, Array.Empty<ActiveContact>());
         Require(left.Grade == JudgmentGrade.Perfect && right.Grade == JudgmentGrade.Perfect, "Batched multi-touch matching failed");
 
+        var overlapA = Note(20, 2.5, 1);
+        var overlapB = Note(21, 2.5, 1);
+        engine = new JudgmentEngine(new[] { overlapA, overlapB }, new ScoreState());
+        engine.Process(2.5, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.5, 1) }, Array.Empty<ActiveContact>());
+        Require((overlapA.Grade == JudgmentGrade.Perfect) != (overlapB.Grade == JudgmentGrade.Perfect),
+            "One discrete activation must not consume two geometrically overlapping notes");
+
+        overlapA = Note(22, 2.6, 1);
+        overlapB = Note(23, 2.6, 1);
+        engine = new JudgmentEngine(new[] { overlapA, overlapB }, new ScoreState());
+        engine.Process(2.6, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Tap, 2.6, 1),
+            new InputToken(2, RuntimeNoteKind.Tap, 2.6, 1),
+        }, Array.Empty<ActiveContact>());
+        Require(overlapA.Grade == JudgmentGrade.Perfect && overlapB.Grade == JudgmentGrade.Perfect,
+            "Two contacts must be able to consume two geometrically overlapping notes");
+
+        var overlapSustainA = Note(24, 2.7, 1);
+        overlapSustainA.Kind = RuntimeNoteKind.Sustain;
+        var overlapSustainB = Note(25, 2.7, 1);
+        overlapSustainB.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { overlapSustainA, overlapSustainB }, new ScoreState());
+        engine.Process(2.7, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 1, 2.5) });
+        Require(overlapSustainA.Grade == JudgmentGrade.Perfect && overlapSustainB.Grade == JudgmentGrade.Perfect,
+            "One continuous contact must satisfy overlapping Hold checkpoints without discrete matching limits");
+
         var release = Note(5, 3, 0);
         release.Kind = RuntimeNoteKind.Release;
         engine = new JudgmentEngine(new[] { release }, new ScoreState());
         engine.Process(3, new[] { new InputToken(1, RuntimeNoteKind.Tap, 3, 0) }, Array.Empty<ActiveContact>());
         Require(release.Grade == JudgmentGrade.Pending, "A Hold release tail must not consume a tap input");
-        engine.Process(3, new[] { new InputToken(1, RuntimeNoteKind.Release, 3, 0) }, Array.Empty<ActiveContact>());
-        Require(release.Grade == JudgmentGrade.Perfect, "A Hold release tail must consume a release input");
+        engine.Process(3, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 2.5) });
+        Require(release.Grade == JudgmentGrade.Perfect, "A Hold release tail must complete from sustained coverage without a release input");
 
         var traceTail = Note(6, 4, 0);
         traceTail.Kind = RuntimeNoteKind.Sustain;
         engine = new JudgmentEngine(new[] { traceTail }, new ScoreState());
         engine.Process(4, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 3.5) });
         Require(traceTail.Grade == JudgmentGrade.Perfect, "A Trace Hold tail must complete from sustained coverage without a release input");
+
+        var pathTail = Note(7, 5, 0);
+        pathTail.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { pathTail }, new ScoreState());
+        engine.Process(5.05, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(), new[]
+        {
+            new ContactPathSegment(1, 5, 5.05, -2, 2, false),
+        });
+        Require(pathTail.Grade == JudgmentGrade.Perfect,
+            "A Hold checkpoint crossed by a post-note contact path must complete at low frame rate");
+
+        var earlyPath = Note(8, 6, 0);
+        earlyPath.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { earlyPath }, new ScoreState());
+        engine.Process(6, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(), new[]
+        {
+            new ContactPathSegment(1, 5.8, 5.9, -2, 2, false),
+        });
+        Require(earlyPath.Grade == JudgmentGrade.Pending,
+            "A Hold path that finishes before the checkpoint time must not be consumed early");
+
+        var recoveryA = Note(9, 7, 0);
+        recoveryA.Kind = RuntimeNoteKind.Sustain;
+        var recoveryB = Note(10, 7.2, 0);
+        recoveryB.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { recoveryA, recoveryB }, new ScoreState());
+        engine.Process(7.12, Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        engine.Process(7.2, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, 7.2) });
+        Require(recoveryA.Grade == JudgmentGrade.Miss && recoveryB.Grade == JudgmentGrade.Perfect,
+            "A newly pressed contact must recover a later Hold checkpoint after an earlier miss");
+
+        var holdChart = new RuntimeChart();
+        var holdHead = Note(30, 0, -1);
+        holdHead.Beat = 0;
+        var holdMid = Note(31, 1, 0);
+        holdMid.Beat = 1;
+        holdMid.Kind = RuntimeNoteKind.Sustain;
+        holdMid.Archetype = "SlideTickNote";
+        var holdTail = Note(32, 2, 1);
+        holdTail.Beat = 2;
+        holdTail.Kind = RuntimeNoteKind.Release;
+        holdChart.Notes.AddRange(new[] { holdHead, holdMid, holdTail });
+        holdChart.Connectors.Add(new RuntimeConnector { Start = holdHead, End = holdMid });
+        holdChart.Connectors.Add(new RuntimeConnector { Start = holdMid, End = holdTail });
+        HoldCheckpointBuilder.Apply(holdChart, beat => beat);
+        var autoCheckpoints = holdChart.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).OrderBy(note => note.Beat).ToArray();
+        Require(autoCheckpoints.Length == 3 && autoCheckpoints.Select(note => note.Beat).SequenceEqual(new[] { .5, 1d, 1.5 }),
+            "Every Hold must create one invisible Auto checkpoint per eighth note before its tail");
+        Require(holdMid.HoldCheckpointSource == HoldCheckpointSource.Mid && holdMid.Judged,
+            "Each authored Hold mid must remain an independent judged checkpoint");
+        Require(SonolusLandscapePrototype.UsesHoldJudgmentSound(holdMid) && SonolusLandscapePrototype.UsesHoldJudgmentSound(autoCheckpoints[0]) &&
+                !SonolusLandscapePrototype.UsesHoldJudgmentSound(holdHead),
+            "Only Hold checkpoints must select the Hold judgment sound");
+        Require(!holdTail.Judged,
+            "Hold tails must not create a judgment checkpoint");
+
+        var tailMidChart = new RuntimeChart();
+        var tailMidHead = Note(33, 0, 0);
+        tailMidHead.Beat = 0;
+        var tailMid = Note(34, 1, 1);
+        tailMid.Beat = 1;
+        tailMid.Kind = RuntimeNoteKind.Sustain;
+        tailMid.Archetype = "SlideTickNote";
+        tailMidChart.Notes.AddRange(new[] { tailMidHead, tailMid });
+        tailMidChart.Connectors.Add(new RuntimeConnector { Start = tailMidHead, End = tailMid });
+        HoldCheckpointBuilder.Apply(tailMidChart, beat => beat);
+        Require(tailMid.Judged && tailMid.HoldCheckpointSource == HoldCheckpointSource.Mid,
+            "An authored mid at a Hold tail must remain an independent judged checkpoint");
+
+        engine = new JudgmentEngine(holdChart.Notes, new ScoreState());
+        engine.Process(.5, Array.Empty<InputToken>(), new[] { new ActiveContact(1, -.5f, .5) });
+        engine.Process(1, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, .8) });
+        Require(autoCheckpoints[0].Grade == JudgmentGrade.Perfect && autoCheckpoints[1].Grade == JudgmentGrade.Perfect &&
+                holdMid.Grade == JudgmentGrade.Perfect && holdHead.Grade == JudgmentGrade.Miss,
+            "A middle press must independently hit auto and authored-mid Hold checkpoints after a missed head");
+
+        var flickTail = Note(11, 8, 0);
+        flickTail.Kind = RuntimeNoteKind.Flick;
+        var flickTailInputs = new List<InputToken>();
+        var flickSlider = new VirtualSliderInput();
+        flickSlider.Begin(1, 7.95, -.2f, flickTailInputs);
+        flickSlider.Move(1, 8, .15f, flickTailInputs);
+        engine = new JudgmentEngine(new[] { flickTail }, new ScoreState());
+        engine.Process(8, flickTailInputs, Array.Empty<ActiveContact>());
+        Require(flickTail.Grade == JudgmentGrade.Perfect,
+            "A Flick Hold tail must resolve from a 0.35-lane Flick activation");
+
+        ValidateVirtualSlider();
+    }
+
+    static void ValidateAudioDeviceRecovery()
+    {
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(12.5, .3, 60) - 12.8) < .0001,
+            "Audio recovery must seek to chart time plus BGM offset");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(-.4, .3, 60)) < .0001,
+            "Audio recovery must not seek before the start of a clip");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(100, 0, 60) - 60) < .0001,
+            "Audio recovery must not seek past the end of a clip");
+        Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForChartTime(400.25, 12.5, .3) - 387.45) < .0001,
+            "Audio recovery must rebuild a DSP schedule that preserves chart time");
+        Require(SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, false),
+            "An active unpaused game must pause after an output-device change");
+        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, false, false),
+            "An idle game must ignore an output-device change");
+        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, true),
+            "An already paused game must not restart its pause flow");
+        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(false, true, false),
+            "Non-device audio configuration changes must not interrupt gameplay");
+        Require(AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(true),
+            "An audio interruption must rebuild its schedule instead of unpausing the old one");
+        Require(!AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(false),
+            "A normal manual pause must retain the existing unpause path");
+        Require(Math.Abs(AudioDeviceRecovery.PlaybackDspForChartTime(400, -.4, .3) - 400.1) < .0001,
+            "Audio recovery must delay playback until a pre-roll chart time reaches the BGM start");
+        Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForPlayback(400.1, 0) - 400.1) < .0001,
+            "Pre-roll recovery must keep the chart clock silent until clip playback begins");
+        Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForRecovery(400, 100, 0) - 300) < .0001,
+            "Audio recovery must preserve chart time even after clip playback reaches its end");
+    }
+
+    static void ValidateVirtualSlider()
+    {
+        var slider = new VirtualSliderInput();
+        var inputs = new List<InputToken>();
+        slider.Begin(1, 1, -5.5f, inputs);
+        Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.5f) < .0001,
+            "Initial slider contact must emit one Tap activation");
+
+        slider.Move(1, 1.005, -5.4f, inputs);
+        Require(inputs.Count == 1, "Motion inside one slider cell must not retrigger Tap");
+
+        slider.Move(1, 1.02, -2.5f, inputs);
+        var crossedTaps = inputs.Where(input => input.Kind == RuntimeNoteKind.Tap).ToArray();
+        Require(crossedTaps.Length == 4 && crossedTaps.Skip(1).Select(input => input.Lane).SequenceEqual(new[] { -4.5f, -3.5f, -2.5f }),
+            "A rub must activate every newly entered slider cell exactly once");
+
+        slider.Move(1, 1.1, -3.5f, inputs);
+        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 5 && Math.Abs(inputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 3.5f) < .0001,
+            "Leaving and re-entering a slider cell after debounce must reactivate it");
+
+        slider.End(1, 1.11, -3.5f, inputs);
+        slider.Begin(1, 2, 0, inputs);
+        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 6, "A new contact must activate its initial slider cell");
+
+        var releaseInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(12, 2.2, -1.5f, releaseInputs);
+        releaseInputs.Clear();
+        slider.End(12, 2.21, 1.5f, releaseInputs);
+        Require(releaseInputs.Count == 0,
+            "TouchUp must only release contact ownership and must not emit Tap or Flick while the finger leaves");
+        slider.Begin(12, 2.22, 1.5f, releaseInputs);
+        Require(releaseInputs.Count == 1 && releaseInputs[0].Kind == RuntimeNoteKind.Tap,
+            "A new TouchDown after release must activate normally");
+
+        var jitterInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(4, 2.5, -5.5f, jitterInputs);
+        slider.Move(4, 2.505, -4.99f, jitterInputs);
+        slider.Move(4, 2.510, -5.01f, jitterInputs);
+        Require(jitterInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 2,
+            "A boundary jitter return inside 25 ms must not rearm its starting slider cell");
+
+        var reentryInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(5, 3, -5.5f, reentryInputs);
+        slider.Move(5, 3.005, -4.85f, reentryInputs);
+        slider.Move(5, 3.010, -5.01f, reentryInputs);
+        Require(reentryInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 3 && Math.Abs(reentryInputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 5.5f) < .0001,
+            "Departing a slider cell by 0.15 lanes must permit its early reentry activation");
+
+        var flickThreshold = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(6, 4, -5.5f, flickThreshold);
+        slider.Move(6, 4.01, -5.151f, flickThreshold);
+        Require(!flickThreshold.Any(input => input.Kind == RuntimeNoteKind.Flick),
+            "Moving 0.349 lanes must not activate Flick");
+        slider.Move(6, 4.02, -5.15f, flickThreshold);
+        Require(flickThreshold.Count(input => input.Kind == RuntimeNoteKind.Flick) == 1,
+            "Moving 0.35 lanes from the Flick anchor must activate exactly one Flick");
+
+        var oppositeFlick = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(7, 4.1, -5.15f, oppositeFlick);
+        slider.Move(7, 4.2, -5.5f, oppositeFlick);
+        Require(oppositeFlick.Count(input => input.Kind == RuntimeNoteKind.Flick) == 1,
+            "A leftward 0.35-lane motion must activate Flick without direction filtering");
+
+        var longFlick = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(8, 4.3, -5.5f, longFlick);
+        slider.Move(8, 4.44, -4.1f, longFlick);
+        var longFlicks = longFlick.Where(input => input.Kind == RuntimeNoteKind.Flick).ToArray();
+        Require(longFlicks.Length == 4 && longFlicks.Zip(longFlicks.Skip(1), (a, b) => a.Time < b.Time).All(value => value),
+            "A long motion must emit every interpolated 0.35-lane Flick threshold");
+
+        var flickJitter = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(9, 4.5, -5.5f, flickJitter);
+        slider.Move(9, 4.6, -5.3f, flickJitter);
+        slider.Move(9, 4.7, -5.5f, flickJitter);
+        slider.Move(9, 4.8, -5.3f, flickJitter);
+        Require(!flickJitter.Any(input => input.Kind == RuntimeNoteKind.Flick),
+            "Sub-threshold oscillation must not accumulate into Flick activation");
+
+        var outsideSweep = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(3, 2.1, -7, outsideSweep);
+        slider.Move(3, 2.2, 7, outsideSweep);
+        Require(outsideSweep.Count(input => input.Kind == RuntimeNoteKind.Tap) == VirtualSliderInput.CellCount,
+            "A low-frame-rate sweep across the whole slider must not skip cells");
+
+        var rubNotes = new[]
+        {
+            Note(10, 3.05, -4.5f),
+            Note(11, 3.10, -3.5f),
+            Note(12, 3.15, -2.5f),
+        };
+        var rubInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(2, 3, -5.5f, rubInputs);
+        slider.Move(2, 3.2, -2.5f, rubInputs);
+        var rubEngine = new JudgmentEngine(rubNotes, new ScoreState());
+        rubEngine.Process(3.2, rubInputs, Array.Empty<ActiveContact>());
+        Require(rubNotes.All(note => note.Grade == JudgmentGrade.Perfect),
+            "A timed rub must match Tap notes in every crossed slider cell");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()

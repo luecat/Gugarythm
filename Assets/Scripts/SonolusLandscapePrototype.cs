@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Threading;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Networking;
@@ -17,6 +18,7 @@ namespace Gugarythm
 {
     public sealed class SonolusLandscapePrototype : MonoBehaviour
     {
+        public enum HoldConnectorRenderMode { AnchorClipped, NaturalPassThrough }
         // Mapping measured directly from the original 1280x732 lane artwork.
         // CanvasScaler matches width, so Free Aspect/editor windows can be taller
         // than 1080 logical units. Derive Y from the live viewport instead of
@@ -24,7 +26,9 @@ namespace Gugarythm
         const float ReferenceWidth = 1920f;
         const float LaneTextureWidth = 1280f;
         const float LaneTextureHeight = 732f;
+        const float LaneTextureCenterX = 638.8049f;
         const float HitSourceY = 500f;
+        const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
         const float PerspectiveDepthRatio = 3.2f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
@@ -57,18 +61,23 @@ namespace Gugarythm
         const float ButtonHeightRatio = 45f / 147.5f * ButtonSpriteTransform;
         const float NoteCapRatio = 93f / 354f;
         const float NoteTextureHeight = 186f;
+        const float HoldHeadWidthScale = 1.275f;
         const int MouseContactId = int.MinValue;
-        // Keep judged notes alive until their whole sprite has travelled beyond
-        // the near edge. This makes hits feel like they continue through the
-        // judgment line instead of being deleted on contact.
+        // Missed notes keep travelling beyond the judgment line until their
+        // sprite leaves the viewport. Successful hits return to the pool at once.
         const float NoteExitMargin = 140f;
+        const float JudgmentDisplayDuration = .35f;
 
         readonly Dictionary<string, Texture2D> buttonTextures = new(StringComparer.Ordinal);
         readonly Dictionary<string, Texture2D> traceTextures = new(StringComparer.Ordinal);
         readonly Dictionary<int, HorizontalSlicedRawImage> noteViews = new();
+        readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
+        readonly HashSet<int> renderedPersistentHoldHeads = new();
         readonly Dictionary<RuntimeConnector, TaperedConnectorGraphic> connectorViews = new();
         readonly Dictionary<RuntimeSimLine, SimLineGraphic> simLineViews = new();
         readonly Dictionary<RuntimeGuide, TaperedConnectorGraphic> guideViews = new();
+        readonly Dictionary<int, RuntimeNote> holdRoots = new();
+        readonly Dictionary<int, List<RuntimeNote>> holdCheckpoints = new();
         readonly Stack<HorizontalSlicedRawImage> notePool = new();
         readonly Stack<TaperedConnectorGraphic> connectorPool = new();
         readonly Stack<SimLineGraphic> simLinePool = new();
@@ -76,6 +85,8 @@ namespace Gugarythm
         readonly Dictionary<int, TouchMemory> touches = new();
         readonly List<InputToken> inputBatch = new();
         readonly List<ActiveContact> contacts = new();
+        readonly List<ContactPathSegment> contactPaths = new();
+        readonly VirtualSliderInput virtualSlider = new();
         readonly float[] connectorPathSamples = new float[ConnectorPathSegments + 3];
         readonly ScoreState scoreState = new();
         readonly List<IChartImporter> importers = new() { new ScpChartImporter(), new SusChartImporter(), new UscChartImporter(), new LevelDataImporter() };
@@ -103,12 +114,15 @@ namespace Gugarythm
         AudioClip perfectSound;
         AudioClip greatSound;
         AudioClip goodSound;
-        AudioClip alternativeSound;
+        AudioClip holdSound;
+        AudioClip flickSound;
+        AudioClip criticalFlickSound;
         AudioClip stageSound;
         RuntimeChart chart;
         JudgmentEngine judgmentEngine;
         AudioSource music;
         AudioSource effects;
+        RectTransform canvasRoot;
         RectTransform stage;
         RectTransform safeAreaRoot;
         RectTransform guideLayer;
@@ -126,6 +140,7 @@ namespace Gugarythm
         Text resultText;
         Text speedLabel;
         Text resumeCountdownLabel;
+        Text pauseTitle;
         Button startButton;
         Button pauseButton;
         Slider speedSlider;
@@ -133,15 +148,19 @@ namespace Gugarythm
         bool running;
         bool loading;
         bool paused;
-        bool showingReady;
+        int audioDeviceChangePending;
+        bool resumeNeedsAudioReschedule;
         Coroutine resumeCoroutine;
         Rect appliedSafeArea = new(-1, -1, -1, -1);
         double scheduledDsp;
         double pauseDsp;
         double accumulatedPause;
+        double lastObservedSongTime;
+        double interruptedSongTime;
         double inputOffsetSeconds;
         double visualOffsetSeconds;
         float scrollSpeed = 8f;
+        float judgmentHideAt = -1f;
 
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
         static float TopY => CanvasHeight * .5f;
@@ -149,6 +168,9 @@ namespace Gugarythm
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
+        // HitSourceY is the centre of the 45px judgment strip. Notes and
+        // gameplay connectors leave only after reaching its lower edge.
+        static float JudgmentBottomApproach => 1f + (JudgmentStripSourceHeight * .5f / HitSourceY) / PerspectiveDepthRatio;
 
         // Speed controls the time spent approaching the judgment edge. Screen Y,
         // lane position, and width are all derived from the same perspective
@@ -157,6 +179,7 @@ namespace Gugarythm
 
         void Awake()
         {
+            AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.targetFrameRate = 120;
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
@@ -174,6 +197,7 @@ namespace Gugarythm
 
         void OnDestroy()
         {
+            AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
 #if UNITY_EDITOR || UNITY_STANDALONE
             TouchSimulation.Disable();
 #endif
@@ -194,17 +218,21 @@ namespace Gugarythm
             PollNativeImport();
             UpdateSafeAreaLayout();
             UpdateDesktopSpeedControls();
+            if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
+                ShowJudgment("", Color.white);
+            if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0 &&
+                ShouldPauseForAudioConfigurationChange(true, running, paused))
+                PauseForAudioDeviceChange();
             if (!running || paused || chart == null || judgmentEngine == null) return;
             var songTime = CurrentSongTime();
+            lastObservedSongTime = songTime;
             CollectInput();
-            var events = judgmentEngine.Process(songTime, inputBatch, contacts);
-            foreach (var judgment in events) OnJudgment(judgment);
-            UpdateVisuals(songTime + visualOffsetSeconds);
-            if (showingReady && noteViews.Count > 0)
+            var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths);
+            if (events.Count > 0)
             {
-                showingReady = false;
-                ShowJudgment("", Color.white);
+                foreach (var judgment in events) OnJudgment(judgment);
             }
+            UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
             if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => !note.Judged || note.Grade != JudgmentGrade.Pending)) FinishGame();
         }
@@ -330,13 +358,15 @@ namespace Gugarythm
             running = true;
             paused = false;
             accumulatedPause = 0;
+            Interlocked.Exchange(ref audioDeviceChangePending, 0);
+            resumeNeedsAudioReschedule = false;
+            lastObservedSongTime = -chart.BgmOffset;
             effects.UnPause();
             scheduledDsp = AudioSettings.dspTime + .25;
             music.time = 0;
             music.PlayScheduled(scheduledDsp);
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
-            showingReady = true;
-            ShowJudgment("READY", Color.white);
+            ShowJudgment("", Color.white);
         }
 
         void PauseGame()
@@ -347,6 +377,35 @@ namespace Gugarythm
             music.Pause();
             effects.Pause();
             touches.Clear();
+            contactPaths.Clear();
+            virtualSlider.Reset();
+            pauseTitle.text = "暫停";
+            pauseButton.gameObject.SetActive(false);
+            pauseMenuContent.gameObject.SetActive(true);
+            resumeCountdownLabel.gameObject.SetActive(false);
+            pauseOverlay.gameObject.SetActive(true);
+        }
+
+        public static bool ShouldPauseForAudioConfigurationChange(bool deviceWasChanged, bool isRunning, bool isPaused) =>
+            deviceWasChanged && isRunning && !isPaused;
+
+        void HandleAudioConfigurationChanged(bool deviceWasChanged)
+        {
+            if (deviceWasChanged) Interlocked.Exchange(ref audioDeviceChangePending, 1);
+        }
+
+        void PauseForAudioDeviceChange()
+        {
+            if (!running || paused) return;
+            interruptedSongTime = lastObservedSongTime;
+            resumeNeedsAudioReschedule = true;
+            paused = true;
+            music.Stop();
+            effects.Stop();
+            touches.Clear();
+            contactPaths.Clear();
+            virtualSlider.Reset();
+            pauseTitle.text = "音訊裝置已變更\n請重新同步";
             pauseButton.gameObject.SetActive(false);
             pauseMenuContent.gameObject.SetActive(true);
             resumeCountdownLabel.gameObject.SetActive(false);
@@ -369,9 +428,26 @@ namespace Gugarythm
                 yield return new WaitForSecondsRealtime(1);
             }
 
-            accumulatedPause += AudioSettings.dspTime - pauseDsp;
             touches.Clear();
-            music.UnPause();
+            contactPaths.Clear();
+            virtualSlider.Reset();
+            if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
+            {
+                var nextDsp = AudioSettings.dspTime + .25;
+                var clipTime = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, music.clip.length);
+                var playbackDsp = AudioDeviceRecovery.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset);
+                music.Stop();
+                music.time = clipTime;
+                scheduledDsp = AudioDeviceRecovery.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
+                accumulatedPause = 0;
+                music.PlayScheduled(playbackDsp);
+                resumeNeedsAudioReschedule = false;
+            }
+            else
+            {
+                accumulatedPause += AudioSettings.dspTime - pauseDsp;
+                music.UnPause();
+            }
             effects.UnPause();
             paused = false;
             pauseOverlay.gameObject.SetActive(false);
@@ -393,10 +469,13 @@ namespace Gugarythm
             CancelResumeCountdown();
             running = false;
             paused = false;
-            showingReady = false;
+            Interlocked.Exchange(ref audioDeviceChangePending, 0);
+            resumeNeedsAudioReschedule = false;
             music.Stop();
             effects.Stop();
             touches.Clear();
+            contactPaths.Clear();
+            virtualSlider.Reset();
             ReleaseAllViews();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
@@ -416,11 +495,33 @@ namespace Gugarythm
         void ResetRuntime()
         {
             foreach (var note in chart.Notes) note.Grade = JudgmentGrade.Pending;
+            BuildHoldRenderState();
             scoreState.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
             touches.Clear();
+            contactPaths.Clear();
+            virtualSlider.Reset();
             ReleaseAllViews();
             RefreshHud();
+        }
+
+        void BuildHoldRenderState()
+        {
+            holdRoots.Clear();
+            holdCheckpoints.Clear();
+            foreach (var point in chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
+                         .Where(point => point != null && point.HoldRootIndex == point.Index).Distinct())
+                holdRoots[point.Index] = point;
+            foreach (var note in chart.Notes.Where(note => note.HoldRootIndex >= 0))
+            {
+                if (note.HoldRootIndex == note.Index) holdRoots[note.Index] = note;
+                if (note.HoldCheckpointSource == HoldCheckpointSource.None) continue;
+                if (!holdCheckpoints.TryGetValue(note.HoldRootIndex, out var checkpoints))
+                    holdCheckpoints[note.HoldRootIndex] = checkpoints = new List<RuntimeNote>();
+                checkpoints.Add(note);
+            }
+            foreach (var checkpoints in holdCheckpoints.Values)
+                checkpoints.Sort((left, right) => left.Time.CompareTo(right.Time));
         }
 
         double CurrentSongTime() => AudioSettings.dspTime - scheduledDsp - accumulatedPause - chart.BgmOffset;
@@ -429,6 +530,7 @@ namespace Gugarythm
         {
             inputBatch.Clear();
             contacts.Clear();
+            contactPaths.Clear();
             if (!EnhancedTouchSupport.enabled) EnhancedTouchSupport.Enable();
             var seen = new HashSet<int>();
             foreach (var touch in Touch.activeTouches)
@@ -445,11 +547,19 @@ namespace Gugarythm
                 if (touch.time > memory.LastInputRecordTime + 1e-7)
                 {
                     if (touch.phase == UnityEngine.InputSystem.TouchPhase.Began)
-                        inputBatch.Add(new InputToken(id, RuntimeNoteKind.Tap, eventTime - inputOffsetSeconds, lane));
+                        virtualSlider.Begin(id, eventTime - inputOffsetSeconds, lane, inputBatch);
                     else if (touch.phase == UnityEngine.InputSystem.TouchPhase.Moved && Vector2.SqrMagnitude(touch.screenPosition - memory.ScreenPosition) > .01f)
-                        inputBatch.Add(new InputToken(id, RuntimeNoteKind.Flick, eventTime - inputOffsetSeconds, lane, memory.Lane, memory.EventTime - inputOffsetSeconds));
+                    {
+                        virtualSlider.Move(id, eventTime - inputOffsetSeconds, lane, inputBatch);
+                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                            memory.Lane, lane, false));
+                    }
                     else if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
-                        inputBatch.Add(new InputToken(id, RuntimeNoteKind.Release, eventTime - inputOffsetSeconds, lane));
+                    {
+                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                            memory.Lane, lane, true));
+                        virtualSlider.End(id, eventTime - inputOffsetSeconds, lane, inputBatch);
+                    }
                     memory.LastInputRecordTime = touch.time;
                     memory.EventTime = eventTime;
                     memory.Lane = lane;
@@ -462,7 +572,11 @@ namespace Gugarythm
 #if UNITY_EDITOR || UNITY_STANDALONE
             CollectMouseAsTouch(seen);
 #endif
-            foreach (var id in touches.Keys.Where(id => !seen.Contains(id)).ToArray()) touches.Remove(id);
+            foreach (var id in touches.Keys.Where(id => !seen.Contains(id)).ToArray())
+            {
+                touches.Remove(id);
+                virtualSlider.Cancel(id);
+            }
         }
 
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -476,23 +590,24 @@ namespace Gugarythm
 
         void CollectMouseAsTouch(ISet<int> seen)
         {
-            // The legacy mouse backend remains available in Unity Editor even
-            // when the active Android target exposes no InputSystem Mouse
-            // device. Convert its button state into the same touch records used
-            // by mobile input.
-            var pressed = UnityEngine.Input.GetMouseButton(0);
-            var beganThisFrame = UnityEngine.Input.GetMouseButtonDown(0);
-            var endedThisFrame = UnityEngine.Input.GetMouseButtonUp(0);
+            // Keep desktop testing on the same Input System backend as Android;
+            // Android does not support the legacy/new "Both" configuration.
+            var mouse = Mouse.current;
+            if (mouse == null || !mouse.enabled) return;
+            var pressed = mouse.leftButton.isPressed;
+            var beganThisFrame = mouse.leftButton.wasPressedThisFrame;
+            var endedThisFrame = mouse.leftButton.wasReleasedThisFrame;
             if (!pressed && !beganThisFrame && !endedThisFrame) return;
 
-            var position = (Vector2)UnityEngine.Input.mousePosition;
+            var position = mouse.position.ReadValue();
             var lane = ScreenToLane(position);
             var eventTime = CurrentSongTime();
             var began = !touches.TryGetValue(MouseContactId, out var memory);
             if (endedThisFrame && !began)
             {
-                inputBatch.Add(new InputToken(MouseContactId, RuntimeNoteKind.Release,
-                    eventTime - inputOffsetSeconds, lane));
+                contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                    memory.Lane, lane, true));
+                virtualSlider.End(MouseContactId, eventTime - inputOffsetSeconds, lane, inputBatch);
                 return;
             }
             if (began)
@@ -505,12 +620,13 @@ namespace Gugarythm
                     StartTime = eventTime,
                     LastInputRecordTime = eventTime,
                 };
-                inputBatch.Add(new InputToken(MouseContactId, RuntimeNoteKind.Tap, eventTime - inputOffsetSeconds, lane));
+                virtualSlider.Begin(MouseContactId, eventTime - inputOffsetSeconds, lane, inputBatch);
             }
             else if (Vector2.SqrMagnitude(position - memory.ScreenPosition) > .01f)
             {
-                inputBatch.Add(new InputToken(MouseContactId, RuntimeNoteKind.Flick, eventTime - inputOffsetSeconds,
-                    lane, memory.Lane, memory.EventTime - inputOffsetSeconds));
+                virtualSlider.Move(MouseContactId, eventTime - inputOffsetSeconds, lane, inputBatch);
+                contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                    memory.Lane, lane, false));
                 memory.Lane = lane;
                 memory.ScreenPosition = position;
                 memory.EventTime = eventTime;
@@ -539,7 +655,6 @@ namespace Gugarythm
 
         void OnJudgment(JudgmentEvent judgment)
         {
-            showingReady = false;
             var color = judgment.Grade switch
             {
                 JudgmentGrade.Perfect => new Color(.65f, 1f, 1f),
@@ -547,17 +662,22 @@ namespace Gugarythm
                 JudgmentGrade.Good => new Color(.52f, 1f, .66f),
                 _ => new Color(1f, .34f, .55f),
             };
-            var timing = judgment.Grade == JudgmentGrade.Miss || Math.Abs(judgment.Delta) < .01 ? "" : judgment.Delta < 0 ? "  EARLY" : "  LATE";
-            ShowJudgment(judgment.Grade.ToString().ToUpperInvariant() + timing, color);
+            ShowJudgment(judgment.Grade.ToString().ToUpperInvariant(), color);
             PlayJudgmentSound(judgment);
             if (judgment.Grade != JudgmentGrade.Miss)
+            {
                 SpawnHitParticle(X(judgment.Note.Lane, 1f), judgment.Note.Critical ? "yellow" : IsTrace(judgment.Note) || judgment.Note.Kind == RuntimeNoteKind.Sustain ? "green" : judgment.Note.Kind == RuntimeNoteKind.Flick ? "pink" : "blue");
+            }
         }
 
         void PlayJudgmentSound(JudgmentEvent judgment)
         {
             if (judgment.Grade == JudgmentGrade.Miss || effects == null) return;
-            var clip = judgment.Note.Kind == RuntimeNoteKind.Flick ? alternativeSound : judgment.Grade switch
+            var clip = UsesHoldJudgmentSound(judgment.Note) && holdSound != null
+                ? holdSound
+                : judgment.Note.Kind == RuntimeNoteKind.Flick
+                ? judgment.Note.Critical && criticalFlickSound != null ? criticalFlickSound : flickSound
+                : judgment.Grade switch
             {
                 JudgmentGrade.Perfect => perfectSound,
                 JudgmentGrade.Great => greatSound,
@@ -567,14 +687,18 @@ namespace Gugarythm
             if (clip != null) effects.PlayOneShot(clip, .78f);
         }
 
+        public static bool UsesHoldJudgmentSound(RuntimeNote note) =>
+            note != null && note.HoldCheckpointSource is HoldCheckpointSource.Auto or HoldCheckpointSource.Mid;
+
         void UpdateVisuals(double visualTime)
         {
+            renderedPersistentHoldHeads.Clear();
             foreach (var guide in chart.Guides)
             {
                 var headApproach = ApproachProgress(guide.Head.Time, visualTime, guide.Head.TimeScaleGroup);
                 var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, guide.Tail.TimeScaleGroup);
-                var show = ScreenY(PerspectiveProgress(tailApproach)) >= NoteExitY &&
-                    ScreenY(PerspectiveProgress(headApproach)) <= TopY + 8;
+                var headY = ScreenY(PerspectiveProgress(headApproach));
+                var show = headY <= TopY + 8 && HasVisibleDecorationSegment(headApproach, tailApproach);
                 if (!show)
                 {
                     if (guideViews.TryGetValue(guide, out var oldGuide)) ReleaseGuide(guide, oldGuide);
@@ -597,7 +721,10 @@ namespace Gugarythm
                 var bScreen = PerspectiveProgress(bApproach);
                 var aY = ScreenY(aScreen);
                 var bY = ScreenY(bScreen);
-                var visible = Mathf.Max(aY, bY) >= NoteExitY && Mathf.Min(aY, bY) <= TopY + 8;
+                var leadingApproach = Mathf.Max(aApproach, bApproach);
+                var trailingApproach = Mathf.Min(aApproach, bApproach);
+                var visible = Mathf.Min(aY, bY) <= TopY + 8 &&
+                    HasVisibleDecorationSegment(leadingApproach, trailingApproach);
                 if (!visible)
                 {
                     if (simLineViews.TryGetValue(simLine, out var oldLine)) ReleaseSimLine(simLine, oldLine);
@@ -607,6 +734,20 @@ namespace Gugarythm
                 {
                     line = AcquireSimLine();
                     simLineViews[simLine] = line;
+                }
+                if (aApproach > 1 || bApproach > 1)
+                {
+                    var clippedProgress = Mathf.InverseLerp(aApproach, bApproach, 1);
+                    var clippedLane = Mathf.Lerp(simLine.A.Lane, simLine.B.Lane, clippedProgress);
+                    if (aApproach > 1) { aScreen = 1; aY = HitY; }
+                    else { bScreen = 1; bY = HitY; }
+                    if (aApproach > 1)
+                        line.SetGeometry(new Vector2(X(clippedLane, aScreen), aY), new Vector2(X(simLine.B.Lane, bScreen), bY),
+                            Mathf.Lerp(.65f, 2.25f, Mathf.Clamp01((aScreen + bScreen) * .5f)));
+                    else
+                        line.SetGeometry(new Vector2(X(simLine.A.Lane, aScreen), aY), new Vector2(X(clippedLane, bScreen), bY),
+                            Mathf.Lerp(.65f, 2.25f, Mathf.Clamp01((aScreen + bScreen) * .5f)));
+                    continue;
                 }
                 var depth = Mathf.Clamp01((aScreen + bScreen) * .5f);
                 line.SetGeometry(
@@ -620,10 +761,8 @@ namespace Gugarythm
                 var approachProgress = ApproachProgress(note, visualTime);
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
-                // Judgment changes score/input state only. The visual keeps
-                // following the same projective path until it is fully outside
-                // the viewport, including misses and early/late judgments.
-                var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY;
+                var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY &&
+                    !ShouldHideHoldHead(note, approachProgress);
                 if (!visible)
                 {
                     if (noteViews.TryGetValue(note.Index, out var oldView)) ReleaseNoteView(note.Index, oldView);
@@ -635,7 +774,8 @@ namespace Gugarythm
                     noteViews[note.Index] = view;
                     ApplyNoteTexture(view, note);
                 }
-                var width = LaneWidth(note.Lane, note.Size, screenProgress);
+                var width = LaneWidth(note.Lane, note.Size, screenProgress) *
+                    (note.HoldRootIndex == note.Index ? HoldHeadWidthScale : 1f);
                 view.rectTransform.anchoredPosition = new Vector2(X(note.Lane, screenProgress), y);
                 // The source engine applies the same perspective depth to both
                 // axes. Slim Trace/Damage bodies use a full-height atlas quad;
@@ -648,6 +788,7 @@ namespace Gugarythm
                 // the exact same lane edges as Hold and Guide geometry.
                 var horizontalPadding = height * NoteOuterPaddingPixels(note) / NoteTextureHeight;
                 view.rectTransform.sizeDelta = new Vector2(width + horizontalPadding * 2, height);
+                view.color = IsHoldMid(note) ? Color.clear : Color.white;
                 var traceParticle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
                 if (traceParticle != null)
                 {
@@ -657,6 +798,7 @@ namespace Gugarythm
                     var particleAspect = traceParticle.texture == null ? 1f :
                         traceParticle.texture.width / (float)Mathf.Max(1, traceParticle.texture.height);
                     traceParticle.rectTransform.sizeDelta = new Vector2(height * particleAspect, height);
+                    traceParticle.color = Color.white;
                 }
                 var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
                 if (flickArrow != null && flickArrow.gameObject.activeSelf && flickArrow.texture != null)
@@ -685,7 +827,12 @@ namespace Gugarythm
                 var endApproach = ApproachProgress(connector.End, visualTime);
                 var startScreen = PerspectiveProgress(startApproach);
                 var endScreen = PerspectiveProgress(endApproach);
-                var show = ScreenY(endScreen) >= NoteExitY && ScreenY(startScreen) <= TopY + 8;
+                var startY = ScreenY(startScreen);
+                var endY = ScreenY(endScreen);
+                var holdMode = ResolveConnectorRenderMode(connector);
+                var show = startY <= TopY + 8 && (holdMode == HoldConnectorRenderMode.AnchorClipped
+                    ? endApproach < JudgmentBottomApproach
+                    : endY >= NoteExitY);
                 if (!show)
                 {
                     if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
@@ -701,14 +848,48 @@ namespace Gugarythm
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
                     line.color = new Color(1, 1, 1, .62f);
                 }
-                SetConnectorPath(line, connector, visualTime, startApproach, endApproach);
+                SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
+                if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
+                    holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root))
+                {
+                    var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
+                    RenderPersistentHoldHead(root, connector, headT);
+                }
             }
+            foreach (var pair in persistentHoldHeadViews.ToArray())
+                if (!renderedPersistentHoldHeads.Contains(pair.Key)) ReleasePersistentHoldHead(pair.Key, pair.Value);
+        }
+
+        void RenderPersistentHoldHead(RuntimeNote root, RuntimeConnector connector, float progress)
+        {
+            var rootIndex = root.Index;
+            renderedPersistentHoldHeads.Add(rootIndex);
+            if (!persistentHoldHeadViews.TryGetValue(rootIndex, out var view))
+            {
+                view = AcquireNoteView();
+                persistentHoldHeadViews[rootIndex] = view;
+                view.texture = buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var texture) ? texture : null;
+                view.color = Color.white;
+                view.capRatio = NoteCapRatio;
+                var particle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
+                if (particle != null) particle.gameObject.SetActive(false);
+                var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
+                if (flickArrow != null) flickArrow.gameObject.SetActive(false);
+            }
+            var laneProgress = EaseConnector(progress, connector.Ease);
+            var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
+            var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
+            var screenProgress = PerspectiveProgress(1f);
+            var height = LaneWidth(0, 1f, screenProgress) * ButtonHeightRatio;
+            var padding = height * (root.Critical ? 28f : 40f) / NoteTextureHeight;
+            view.rectTransform.anchoredPosition = new Vector2(X(lane, screenProgress), HitY);
+            view.rectTransform.sizeDelta = new Vector2(LaneWidth(lane, size, screenProgress) * HoldHeadWidthScale + padding * 2, height);
         }
 
         void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, double visualTime, float headApproach, float tailApproach)
         {
             var approachSpan = headApproach - tailApproach;
-            var nearT = approachSpan <= 1e-5f ? 0 : FindGuideProgress(guide, visualTime, NearTrackApproach, headApproach, tailApproach);
+            var nearT = approachSpan <= 1e-5f ? 0 : FindGuideProgress(guide, visualTime, 1f, headApproach, tailApproach);
             var farT = approachSpan <= 1e-5f ? 1 : FindGuideProgress(guide, visualTime, 0f, headApproach, tailApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
             line.BeginPath(sampleCount);
@@ -776,7 +957,8 @@ namespace Gugarythm
             _ => new Color(115 / 255f, 214 / 255f, 157 / 255f, .32f),
         };
 
-        void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, double visualTime, float startApproach, float endApproach)
+        void SetConnectorPath(TaperedConnectorGraphic line, RuntimeConnector connector, double visualTime, float startApproach, float endApproach,
+            HoldConnectorRenderMode holdMode)
         {
             var approachSpan = startApproach - endApproach;
             if (approachSpan <= 1e-5f)
@@ -788,10 +970,8 @@ namespace Gugarythm
                 return;
             }
 
-            // Clip in approach space, then interpolate the lane at the clipped
-            // time. The near clip is the extended off-screen track edge, so an
-            // active Hold continues through the judgment line alongside notes.
-            var nearT = FindConnectorProgress(connector, visualTime, NearTrackApproach, startApproach, endApproach);
+            var nearApproach = holdMode == HoldConnectorRenderMode.AnchorClipped ? 1f : NearTrackApproach;
+            var nearT = FindConnectorProgress(connector, visualTime, nearApproach, startApproach, endApproach);
             var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
             line.BeginPath(sampleCount);
@@ -880,6 +1060,28 @@ namespace Gugarythm
         }
 
         static float ScreenY(float screenProgress) => Mathf.LerpUnclamped(TopY, HitY, screenProgress);
+        public static bool HasVisibleDecorationSegment(float leadingApproach, float trailingApproach) => trailingApproach < 1f;
+        public static bool ShouldHideJudgedVisual(JudgmentGrade grade, float approachProgress) =>
+            approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
+        static bool ShouldHideHoldHead(RuntimeNote note, float approachProgress) =>
+            note.IsHoldTerminal
+                ? approachProgress >= 1f
+                : note.HoldRootIndex == note.Index
+                ? approachProgress >= 1f
+                : ShouldHideJudgedVisual(note.Grade, approachProgress);
+        public static HoldConnectorRenderMode ResolveHoldConnectorRenderMode(bool rootSucceeded, JudgmentGrade nextCheckpointGrade) =>
+            HoldConnectorRenderMode.AnchorClipped;
+        public static bool ShouldClipHoldConnector(RuntimeConnector connector) =>
+            connector?.Start != null && connector.Start.HoldRootIndex >= 0;
+
+        HoldConnectorRenderMode ResolveConnectorRenderMode(RuntimeConnector connector)
+        {
+            return ShouldClipHoldConnector(connector)
+                ? HoldConnectorRenderMode.AnchorClipped
+                : HoldConnectorRenderMode.NaturalPassThrough;
+        }
+
+        static bool IsJudged(RuntimeNote note) => note.Grade != JudgmentGrade.Pending;
         static float X(float lane, float screenProgress)
         {
             var sourceY = (TopY - ScreenY(screenProgress)) * LaneTextureHeight / CanvasHeight;
@@ -889,7 +1091,12 @@ namespace Gugarythm
             var left = LaneGuideIntercepts[guide] + LaneGuideSlopes[guide] * sourceY;
             var right = LaneGuideIntercepts[guide + 1] + LaneGuideSlopes[guide + 1] * sourceY;
             var sourceX = Mathf.LerpUnclamped(left, right, t);
-            return (sourceX / LaneTextureWidth - .5f) * ReferenceWidth;
+            // The captured lane art is about 1.2 source pixels left of its
+            // bitmap midpoint. Rebase chart lane zero to the actual viewport
+            // midpoint instead of inheriting that crop offset.
+            var sourceCenter = LaneGuideIntercepts[(int)CentralHalfLanes] +
+                LaneGuideSlopes[(int)CentralHalfLanes] * sourceY;
+            return (sourceX - sourceCenter) / LaneTextureWidth * ReferenceWidth;
         }
 
         static float LaneWidth(float lane, float size, float screenProgress) =>
@@ -942,7 +1149,6 @@ namespace Gugarythm
             CancelResumeCountdown();
             running = false;
             paused = false;
-            showingReady = false;
             music.Stop();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
@@ -991,7 +1197,9 @@ namespace Gugarythm
             perfectSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/perfect");
             greatSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/great");
             goodSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/good");
-            alternativeSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/alternative");
+            holdSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/hold");
+            flickSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/flick");
+            criticalFlickSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/critical-flick");
             stageSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/stage");
         }
 
@@ -1014,20 +1222,17 @@ namespace Gugarythm
             effects.playOnAwake = false; effects.spatialBlend = 0;
             var canvasObject = new GameObject("Rhythm Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var eventSystemObject = new GameObject("Event System", typeof(EventSystem));
-#if UNITY_EDITOR || UNITY_STANDALONE
-            // Desktop UI must not depend on InputSystem Mouse.current: it may be
-            // absent entirely when the active editor build target is Android.
-            eventSystemObject.AddComponent<StandaloneInputModule>();
-#else
             // A module created entirely at runtime has no UI action asset until
-            // defaults are assigned explicitly. Keep the unified Input System so
-            // mouse, pen and touchscreen all drive the same controls.
+            // defaults are assigned explicitly. Use the Input System module on
+            // every platform: StandaloneInputModule reads UnityEngine.Input and
+            // throws every frame when active input handling is Input System only.
             var inputModule = eventSystemObject.AddComponent<InputSystemUIInputModule>();
             inputModule.AssignDefaultActions();
-#endif
+            inputModule.pointerBehavior = UIPointerBehavior.SingleMouseOrPenButMultiTouchAndTrack;
             var canvas = canvasObject.GetComponent<Canvas>(); canvas.renderMode = RenderMode.ScreenSpaceOverlay;
             var scaler = canvasObject.GetComponent<CanvasScaler>(); scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize; scaler.referenceResolution = new Vector2(1920, 1080);
-            var root = canvasObject.GetComponent<RectTransform>();
+            canvasRoot = canvasObject.GetComponent<RectTransform>();
+            var root = canvasRoot;
             Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
             RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
@@ -1040,6 +1245,9 @@ namespace Gugarythm
                 X(CentralHalfLanes, 0) - X(-CentralHalfLanes, 0),
                 X(CentralHalfLanes, NearTrackProgress) - X(-CentralHalfLanes, NearTrackProgress));
             var lane = RawPanel("Perspective Lane", stage, laneTexture, new Color(1, 1, 1, .92f), Vector2.zero, Vector2.zero, true);
+            var laneArtOffset = (LaneTextureWidth * .5f - LaneTextureCenterX) / LaneTextureWidth * ReferenceWidth;
+            lane.offsetMin = new Vector2(laneArtOffset, 0);
+            lane.offsetMax = new Vector2(laneArtOffset, 0);
             var laneShader = Shader.Find("Gugarythm/Black Transparent UI");
             if (laneShader != null)
             {
@@ -1051,14 +1259,14 @@ namespace Gugarythm
             simLineLayer = Layer("Synchronization Lines", stage);
             noteLayer = Layer("Notes", stage);
             safeAreaRoot = Layer("Safe Area UI", root);
-            BuildHud(safeAreaRoot);
+            BuildHud(safeAreaRoot, root);
             BuildMenu(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
         }
 
-        void BuildHud(RectTransform root)
+        void BuildHud(RectTransform root, RectTransform canvasRoot)
         {
             var accuracy = Panel("Accuracy", root, new Color(.04f, .08f, .20f, .72f), new Vector2(280, 72), Vector2.zero);
             PinToAnchor(accuracy, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -24));
@@ -1067,8 +1275,10 @@ namespace Gugarythm
             comboLabel = Label("COMBO\n0", root, 52); comboLabel.rectTransform.sizeDelta = new Vector2(360, 170);
             PinToAnchor(comboLabel.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-324, 80));
             comboLabel.gameObject.SetActive(false);
-            judgmentLabel = Label("", root, 48); judgmentLabel.rectTransform.sizeDelta = new Vector2(620, 80);
-            PinToAnchor(judgmentLabel.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), new Vector2(0, -30));
+            // Judgment feedback belongs to the full-screen canvas rather than
+            // the safe-area container, whose midpoint can shift on cutout devices.
+            judgmentLabel = Label("", canvasRoot, 48); judgmentLabel.rectTransform.sizeDelta = new Vector2(620, 80);
+            PinToAnchor(judgmentLabel.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), Vector2.zero);
             pauseButton = MakeButton("暫停", root, new Vector2(-24, -24), PauseGame, new Vector2(150, 64));
             PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
             pauseButton.gameObject.SetActive(false);
@@ -1147,9 +1357,9 @@ namespace Gugarythm
             pauseOverlay.GetComponent<Image>().raycastTarget = true;
             pauseMenuContent = Panel("Pause Menu", pauseOverlay, new Color(.04f, .06f, .14f, .98f), new Vector2(620, 520), Vector2.zero);
             Outline(pauseMenuContent.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
-            var title = Label("暫停", pauseMenuContent, 42);
-            title.rectTransform.sizeDelta = new Vector2(560, 80);
-            title.rectTransform.anchoredPosition = new Vector2(0, 190);
+            pauseTitle = Label("暫停", pauseMenuContent, 42);
+            pauseTitle.rectTransform.sizeDelta = new Vector2(560, 120);
+            pauseTitle.rectTransform.anchoredPosition = new Vector2(0, 180);
             MakeButton("繼續", pauseMenuContent, new Vector2(0, 80), ContinueGame, new Vector2(360, 82));
             MakeButton("重新開始", pauseMenuContent, new Vector2(0, -30), RestartGame, new Vector2(360, 82));
             MakeButton("退出", pauseMenuContent, new Vector2(0, -140), ExitToMenu, new Vector2(360, 82));
@@ -1285,7 +1495,7 @@ namespace Gugarythm
                     ? note.Critical ? holdMidYellowTexture : holdMidMintTexture
                     : traceKey == "yellow" ? traceDiamondYellowTexture :
                     traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture;
-                particle.gameObject.SetActive((trace || holdMid) && particle.texture != null);
+                particle.gameObject.SetActive(trace && !holdMid && particle.texture != null);
             }
             var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
             if (flickArrow != null)
@@ -1304,6 +1514,7 @@ namespace Gugarythm
         static int FlickSpriteIndex(float size) => Mathf.Clamp(Mathf.RoundToInt(size * 2), 1, 6) - 1;
 
         void ReleaseNoteView(int index, HorizontalSlicedRawImage view) { noteViews.Remove(index); view.gameObject.SetActive(false); notePool.Push(view); }
+        void ReleasePersistentHoldHead(int rootIndex, HorizontalSlicedRawImage view) { persistentHoldHeadViews.Remove(rootIndex); view.gameObject.SetActive(false); notePool.Push(view); }
         TaperedConnectorGraphic AcquireConnector()
         {
             if (connectorPool.Count > 0)
@@ -1360,7 +1571,7 @@ namespace Gugarythm
             graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
         }
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
-        void ReleaseAllViews() { foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
+        void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
 
         void SpawnHitParticle(float x, string color)
         {
@@ -1371,17 +1582,6 @@ namespace Gugarythm
                 "green" => new Color(.12f, 1f, .58f, .84f),
                 _ => new Color(.28f, .82f, 1f, .84f),
             };
-            var flashObject = new GameObject("Judgment Lane Flash", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
-            var flashRect = flashObject.GetComponent<RectTransform>(); flashRect.SetParent(stage, false); Fill(flashRect);
-            flashRect.SetSiblingIndex(Mathf.Max(0, noteLayer.GetSiblingIndex()));
-            var flash = flashObject.GetComponent<TaperedConnectorGraphic>(); flash.raycastTarget = false;
-            flash.drawGlow = false; flash.drawEdges = false; flash.fillAlphaScale = 1; flash.fillAlphaLimit = 1;
-            var hitWidth = LaneWidth(0, 1f, 1f);
-            flash.BeginPath(2);
-            flash.SetPathPoint(0, new Vector2(x, HitY + 2), hitWidth * 1.08f, 1);
-            flash.SetPathPoint(1, new Vector2(x, -TopY - 20), hitWidth * 1.85f, .34f);
-            flash.EndPath();
-
             var particleRoot = new GameObject("Pixel Judgment Burst", typeof(RectTransform)).GetComponent<RectTransform>();
             particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(240, 240); particleRoot.anchoredPosition = new Vector2(x, HitY);
             particleRoot.SetAsLastSibling();
@@ -1397,7 +1597,7 @@ namespace Gugarythm
                 core.raycastTarget = false;
                 ring.raycastTarget = false;
             }
-            StartCoroutine(AnimateHitEffect(flash, particleRoot, core, ring, tint));
+            StartCoroutine(AnimateHitEffect(particleRoot, core, ring, tint));
         }
 
         static Rect PixelParticleUv(int sprite)
@@ -1416,14 +1616,13 @@ namespace Gugarythm
                 spriteSize / atlasSize, spriteSize / atlasSize);
         }
 
-        IEnumerator AnimateHitEffect(TaperedConnectorGraphic flash, RectTransform particleRoot, RawImage core, RawImage ring, Color tint)
+        IEnumerator AnimateHitEffect(RectTransform particleRoot, RawImage core, RawImage ring, Color tint)
         {
             const float Duration = .38f;
             for (var elapsed = 0f; elapsed < Duration; elapsed += Time.unscaledDeltaTime)
             {
                 var t = elapsed / Duration;
                 var fade = 1 - Mathf.SmoothStep(0, 1, t);
-                flash.color = new Color(tint.r, tint.g, tint.b, .2f * fade);
                 if (core != null)
                 {
                     core.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(48, 108, t);
@@ -1433,7 +1632,6 @@ namespace Gugarythm
                 }
                 yield return null;
             }
-            Destroy(flash.gameObject);
             Destroy(particleRoot.gameObject);
         }
 
@@ -1444,7 +1642,12 @@ namespace Gugarythm
             comboLabel.gameObject.SetActive(running && scoreState.Combo > 0);
         }
         void SetStatus(string message) { if (loadStatus != null) loadStatus.text = message; }
-        void ShowJudgment(string value, Color color) { judgmentLabel.text = value; judgmentLabel.color = color; }
+        void ShowJudgment(string value, Color color)
+        {
+            judgmentLabel.text = value;
+            judgmentLabel.color = color;
+            judgmentHideAt = string.IsNullOrEmpty(value) ? -1f : Time.unscaledTime + JudgmentDisplayDuration;
+        }
 
         static Button MakeButton(string text, RectTransform parent, Vector2 position, Action action, Vector2? size = null)
         {

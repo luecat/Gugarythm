@@ -33,6 +33,7 @@ public static class CreatePrototypeScene
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
         PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarythm");
         PlayerSettings.productName = "Gugarythm";
+        PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
         var directory = "Builds";
         Directory.CreateDirectory(directory);
         var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
