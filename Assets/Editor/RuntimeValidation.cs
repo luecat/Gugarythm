@@ -312,6 +312,8 @@ public static class RuntimeValidation
             "Audio recovery must delay playback until a pre-roll chart time reaches the BGM start");
         Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForPlayback(400.1, 0) - 400.1) < .0001,
             "Pre-roll recovery must keep the chart clock silent until clip playback begins");
+        Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForRecovery(400, 100, 0) - 300) < .0001,
+            "Audio recovery must preserve chart time even after clip playback reaches its end");
     }
 
     static void ValidateVirtualSlider()
