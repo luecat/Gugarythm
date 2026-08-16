@@ -124,12 +124,28 @@ namespace Gugarythm
 
         public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
             IReadOnlyList<ContactPathSegment> contactPaths)
+            => Process(songTime, inputBatch, contacts, contactPaths, false);
+
+        public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
+            IReadOnlyList<ContactPathSegment> contactPaths, bool autoPlay)
         {
             var output = new List<JudgmentEvent>();
+            if (autoPlay)
+            {
+                ResolveAutoPlay(songTime, output);
+                return output;
+            }
             MatchDiscreteInputs(inputBatch, output);
             ResolveContactNotes(songTime, contacts, contactPaths, output);
             CommitMisses(songTime, output);
             return output;
+        }
+
+        void ResolveAutoPlay(double songTime, List<JudgmentEvent> output)
+        {
+            foreach (var note in notes)
+                if (note.Grade == JudgmentGrade.Pending && note.Time <= songTime)
+                    Register(note, JudgmentGrade.Perfect, 0, output);
         }
 
         void MatchDiscreteInputs(IReadOnlyList<InputToken> inputs, List<JudgmentEvent> output)

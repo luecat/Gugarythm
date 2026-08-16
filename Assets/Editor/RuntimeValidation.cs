@@ -112,6 +112,7 @@ public static class RuntimeValidation
 
         ValidateJudgedVisualMasking();
         ValidateJudgmentRules();
+        ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
@@ -351,6 +352,20 @@ public static class RuntimeValidation
             "A Flick Hold tail must resolve from a 0.35-lane Flick activation");
 
         ValidateVirtualSlider();
+    }
+
+    static void ValidateAutoPlay()
+    {
+        var tap = Note(500, 1, 0);
+        var flick = Note(501, 1, 2); flick.Kind = RuntimeNoteKind.Flick;
+        var sustain = Note(502, 1, -2); sustain.Kind = RuntimeNoteKind.Sustain;
+        var release = Note(503, 1, 4); release.Kind = RuntimeNoteKind.Release;
+        var future = Note(504, 2, 0);
+        var engine = new JudgmentEngine(new[] { tap, flick, sustain, release, future }, new ScoreState());
+        engine.Process(1, new[] { new InputToken(1, RuntimeNoteKind.Tap, 1, 99) }, Array.Empty<ActiveContact>(), Array.Empty<ContactPathSegment>(), true);
+        Require(tap.Grade == JudgmentGrade.Perfect && flick.Grade == JudgmentGrade.Perfect &&
+                sustain.Grade == JudgmentGrade.Perfect && release.Grade == JudgmentGrade.Perfect && future.Grade == JudgmentGrade.Pending,
+            "Auto Play 必須在音符時間以 Perfect 結算所有可判定音符，並忽略玩家輸入");
     }
 
     static void ValidateAudioDeviceRecovery()
