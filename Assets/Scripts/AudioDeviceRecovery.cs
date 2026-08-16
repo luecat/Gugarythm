@@ -19,6 +19,9 @@ namespace Gugarythm
         public static double ScheduledDspForPlayback(double playbackDsp, float clipTime) =>
             playbackDsp - clipTime;
 
+        public static double ScheduledDspForRecovery(double nextDsp, double chartTime, double bgmOffset) =>
+            ScheduledDspForChartTime(nextDsp, chartTime, bgmOffset);
+
         public static bool ShouldRescheduleAfterAudioInterruption(bool resumeNeedsAudioReschedule) =>
             resumeNeedsAudioReschedule;
     }

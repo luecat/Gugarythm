@@ -438,7 +438,7 @@ namespace Gugarythm
                 var playbackDsp = AudioDeviceRecovery.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset);
                 music.Stop();
                 music.time = clipTime;
-                scheduledDsp = AudioDeviceRecovery.ScheduledDspForPlayback(playbackDsp, clipTime);
+                scheduledDsp = AudioDeviceRecovery.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
                 accumulatedPause = 0;
                 music.PlayScheduled(playbackDsp);
                 resumeNeedsAudioReschedule = false;
