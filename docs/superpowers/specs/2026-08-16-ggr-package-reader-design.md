@@ -7,7 +7,7 @@ Replace Gugarythm's user-facing SCP, ZIP, SUS, USC, and Sonolus LevelData import
 ## Scope
 
 - Accept only `.ggr` through the Editor picker and Android native picker.
-- Load the built-in default song from `default.ggr`.
+- Do not load a built-in default song. The initial menu waits for the user to import a GGR package.
 - Read only the version-1 canonical GGR layout: `manifest.json`, `chart.usc`, exactly one permitted `audio.<extension>`, and optional `metadata.json` / `cover.<extension>`.
 - Use the existing USC parser for chart conversion and validation.
 - Preserve the current local-library and runtime-audio paths after a package has been validated.
@@ -33,7 +33,7 @@ It passes the original `chart.usc` bytes to `UscChartImporter`. An unsuccessful 
 
 ### Integration
 
-`SonolusLandscapePrototype` registers only `GgrChartImporter`, labels the import action as GGR, filters the Editor picker to `ggr`, accepts only `.ggr` paths from the Android bridge, and loads `StreamingAssets/Charts/default.ggr`. It creates/saves a local-song record only after archive validation, manifest validation, USC import, and audio decoding all succeed.
+`SonolusLandscapePrototype` registers only `GgrChartImporter`, labels the import action as GGR, filters the Editor picker to `ggr`, accepts only `.ggr` paths from the Android bridge, and starts at an import-ready menu with no built-in chart. It creates/saves a local-song record only after archive validation, manifest validation, USC import, and audio decoding all succeed.
 
 `ScpChartImporter`, `SusChartImporter`, `UscChartImporter`, `LevelDataImporter`, and `ChartPackageReader` remain compiled but are no longer exposed as import choices or called by the runtime import path. `UscChartImporter` remains an internal dependency of the GGR importer.
 
