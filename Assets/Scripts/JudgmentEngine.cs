@@ -185,8 +185,8 @@ namespace Gugarythm
                     if (!eventTime.HasValue) continue;
                     var grade = GradeFor(note, eventTime.Value - note.Time);
                     if (grade == JudgmentGrade.Pending) continue;
-                    if (JudgmentProtectionEnabled && grade != JudgmentGrade.Perfect &&
-                        IsProtectedOuterWindow(note, eventTime.Value, input.Lane)) continue;
+                    if (JudgmentProtectionEnabled &&
+                        IsProtectedCandidate(note, grade, eventTime.Value, input.Lane)) continue;
                     var spatial = Math.Abs(input.Lane - note.Lane);
                     edges.Add(new Edge(inputIndex, note, eventTime.Value, grade, Math.Abs(eventTime.Value - note.Time), spatial));
                 }
@@ -358,16 +358,24 @@ namespace Gugarythm
             pairs.Add(pair);
         }
 
-        bool IsProtectedOuterWindow(RuntimeNote note, double eventTime, float inputLane)
+        bool IsProtectedCandidate(RuntimeNote note, JudgmentGrade grade, double eventTime, float inputLane)
         {
             if (!IsTapProtectionKind(note.Kind) ||
                 !tapProtectionPairs.TryGetValue(note.Index, out var pairs)) return false;
 
             foreach (var pair in pairs)
             {
-                if (!pair.ContainsSharedLane(inputLane)) continue;
-                if ((ReferenceEquals(note, pair.Earlier) && eventTime > pair.Boundary) ||
-                    (ReferenceEquals(note, pair.Later) && eventTime < pair.Boundary)) return true;
+                var wrongHalf = ReferenceEquals(note, pair.Earlier)
+                    ? eventTime > pair.Boundary
+                    : eventTime < pair.Boundary;
+                if (grade is JudgmentGrade.Great or JudgmentGrade.Good)
+                {
+                    if (wrongHalf) return true;
+                }
+                else if (grade == JudgmentGrade.Perfect && pair.ContainsSharedLane(inputLane) && wrongHalf)
+                {
+                    return true;
+                }
             }
 
             return false;
