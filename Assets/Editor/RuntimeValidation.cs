@@ -767,15 +767,19 @@ public static class RuntimeValidation
 
     static void ValidateLatencyCalibration()
     {
-        var measured = SonolusLandscapePrototype.CalibrationOffsetForElapsed(4.906077, .6);
-        Require(Math.Abs(measured - .106077) < .000001,
-            "Latency calibration must measure against the nearest beat instead of the first four beats");
-        Require(SonolusLandscapePrototype.SanitizeInputOffset(4.906077) == 0,
-            "An impossible persisted input offset must reset to zero");
-        Require(Math.Abs(SonolusLandscapePrototype.SanitizeInputOffset(.106077) - .106077) < .000001,
-            "A plausible persisted input offset must be preserved");
-        Require(SonolusLandscapePrototype.SanitizeInputOffset(.31) == 0,
-            "Manual input offset must not exceed the 300 ms safety limit");
+        var audioOffset = SonolusLandscapePrototype.CalibrationAudioOffsetForElapsed(4.906077, .6);
+        Require(Math.Abs(audioOffset + .106077) < .000001,
+            "A late calibration tap must advance audio instead of shifting judgment input");
+        Require(SonolusLandscapePrototype.SanitizeAudioOffset(4.906077) == 0,
+            "An impossible persisted audio offset must reset to zero");
+        Require(Math.Abs(SonolusLandscapePrototype.SanitizeAudioOffset(.106077) - .106077) < .000001,
+            "A plausible persisted audio offset must be preserved");
+        Require(SonolusLandscapePrototype.SanitizeAudioOffset(.31) == 0,
+            "Manual audio offset must not exceed the 300 ms safety limit");
+        Require(!SonolusLandscapePrototype.CanAdjustAudioOffsetManually(true),
+            "Manual audio offset controls must be disabled while calibration ticks are scheduled");
+        Require(SonolusLandscapePrototype.CanAdjustAudioOffsetManually(false),
+            "Manual audio offset controls must be available outside calibration");
     }
 
     static void ValidateAutoPlay()
@@ -794,11 +798,17 @@ public static class RuntimeValidation
 
     static void ValidateAudioDeviceRecovery()
     {
-        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(12.5, .3, 60) - 12.8) < .0001,
-            "Audio recovery must seek to chart time plus BGM offset");
-        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(-.4, .3, 60)) < .0001,
+        Require(Math.Abs(AudioDeviceRecovery.ChartAnchorDspForAudioOffset(400.25, -.1) - 400.35) < .0001,
+            "An early audio offset must add chart lead-in before playback can be scheduled");
+        Require(Math.Abs(AudioDeviceRecovery.ChartAnchorDspForAudioOffset(400.25, .1) - 400.25) < .0001,
+            "A late audio offset must not delay the chart clock");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(12.5, .3, .1, 60) - 12.7) < .0001,
+            "A positive audio offset must seek the BGM earlier at the same chart time");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(12.5, .3, -.1, 60) - 12.9) < .0001,
+            "A negative audio offset must seek the BGM later at the same chart time");
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(-.4, .3, 0, 60)) < .0001,
             "Audio recovery must not seek before the start of a clip");
-        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(100, 0, 60) - 60) < .0001,
+        Require(Math.Abs(AudioDeviceRecovery.ClipTimeForChartTime(100, 0, 0, 60) - 60) < .0001,
             "Audio recovery must not seek past the end of a clip");
         Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForChartTime(400.25, 12.5, .3) - 387.45) < .0001,
             "Audio recovery must rebuild a DSP schedule that preserves chart time");
@@ -814,7 +824,7 @@ public static class RuntimeValidation
             "An audio interruption must rebuild its schedule instead of unpausing the old one");
         Require(!AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(false),
             "A normal manual pause must retain the existing unpause path");
-        Require(Math.Abs(AudioDeviceRecovery.PlaybackDspForChartTime(400, -.4, .3) - 400.1) < .0001,
+        Require(Math.Abs(AudioDeviceRecovery.PlaybackDspForChartTime(400, -.4, .3, .1) - 400.2) < .0001,
             "Audio recovery must delay playback until a pre-roll chart time reaches the BGM start");
         Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForPlayback(400.1, 0) - 400.1) < .0001,
             "Pre-roll recovery must keep the chart clock silent until clip playback begins");
