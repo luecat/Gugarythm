@@ -10,9 +10,10 @@ namespace Gugarythm
     /// </summary>
     public sealed class VirtualSliderInput
     {
-        public const int CellCount = 12;
         public const float MinimumLane = -6f;
         public const float MaximumLane = 6f;
+        public const int CellCount = 24;
+        public const float CellWidth = (MaximumLane - MinimumLane) / CellCount;
         public const float FlickActivationDistance = .35f;
 
         readonly Dictionary<int, ContactState> contacts = new();
@@ -78,14 +79,16 @@ namespace Gugarythm
         public static int CellAt(float lane)
         {
             if (lane < MinimumLane || lane > MaximumLane) return -1;
-            return Math.Clamp((int)Math.Floor(lane - MinimumLane), 0, CellCount - 1);
+            return Math.Clamp((int)Math.Floor((lane - MinimumLane) / CellWidth), 0, CellCount - 1);
         }
 
-        public static float CellCenter(int cell) => MinimumLane + cell + .5f;
+        public static float CellCenter(int cell) => MinimumLane + (cell + .5f) * CellWidth;
 
         static double CrossingTime(float previousLane, double previousTime, float lane, double time, int enteredCell, int direction)
         {
-            var boundary = direction > 0 ? MinimumLane + enteredCell : MinimumLane + enteredCell + 1;
+            var boundary = direction > 0
+                ? MinimumLane + enteredCell * CellWidth
+                : MinimumLane + (enteredCell + 1) * CellWidth;
             var distance = lane - previousLane;
             if (Math.Abs(distance) < .0001f || time <= previousTime) return time;
             var progress = Math.Clamp((boundary - previousLane) / distance, 0, 1);

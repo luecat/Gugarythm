@@ -836,8 +836,11 @@ public static class RuntimeValidation
     {
         var slider = new VirtualSliderInput();
         var inputs = new List<InputToken>();
+        Require(VirtualSliderInput.CellCount == 24 && VirtualSliderInput.CellAt(-5.5f) == 1 &&
+                Math.Abs(VirtualSliderInput.CellCenter(1) + 5.25f) < .0001,
+            "The 12-lane slider must split each lane into two 0.5-lane cells");
         slider.Begin(1, 1, -5.5f, inputs);
-        Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.5f) < .0001,
+        Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.25f) < .0001,
             "Initial slider contact must emit one Tap activation");
 
         slider.Move(1, 1.005, -5.4f, inputs);
@@ -845,16 +848,16 @@ public static class RuntimeValidation
 
         slider.Move(1, 1.02, -2.5f, inputs);
         var crossedTaps = inputs.Where(input => input.Kind == RuntimeNoteKind.Tap).ToArray();
-        Require(crossedTaps.Length == 4 && crossedTaps.Skip(1).Select(input => input.Lane).SequenceEqual(new[] { -4.5f, -3.5f, -2.5f }),
+        Require(crossedTaps.Length == 7 && crossedTaps.Skip(1).Select(input => input.Lane).SequenceEqual(new[] { -4.75f, -4.25f, -3.75f, -3.25f, -2.75f, -2.25f }),
             "A rub must activate every newly entered slider cell exactly once");
 
         slider.Move(1, 1.1, -3.5f, inputs);
-        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 5 && Math.Abs(inputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 3.5f) < .0001,
-            "Leaving and re-entering a slider cell after debounce must reactivate it");
+        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 9 && Math.Abs(inputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 3.25f) < .0001,
+            "Leaving and re-entering a half-lane slider cell must reactivate it");
 
         slider.End(1, 1.11, -3.5f, inputs);
         slider.Begin(1, 2, 0, inputs);
-        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 6, "A new contact must activate its initial slider cell");
+        Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 10, "A new contact must activate its initial slider cell");
 
         var releaseInputs = new List<InputToken>();
         slider.Reset();
@@ -882,8 +885,8 @@ public static class RuntimeValidation
         slider.Begin(5, 3, -5.5f, reentryInputs);
         slider.Move(5, 3.005, -4.85f, reentryInputs);
         slider.Move(5, 3.010, -5.01f, reentryInputs);
-        Require(reentryInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 3 && Math.Abs(reentryInputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 5.5f) < .0001,
-            "Departing a slider cell by 0.15 lanes must permit its early reentry activation");
+        Require(reentryInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 3 && Math.Abs(reentryInputs.Last(input => input.Kind == RuntimeNoteKind.Tap).Lane + 5.25f) < .0001,
+            "A half-lane slider cell re-entry must emit a Tap");
 
         var flickThreshold = new List<InputToken>();
         slider.Reset();
@@ -928,9 +931,9 @@ public static class RuntimeValidation
 
         var rubNotes = new[]
         {
-            Note(10, 3.05, -4.5f),
-            Note(11, 3.10, -3.5f),
-            Note(12, 3.15, -2.5f),
+            Note(10, 3 + 1d / 30d, -4.75f),
+            Note(11, 3.10, -3.75f),
+            Note(12, 3 + 1d / 6d, -2.75f),
         };
         var rubInputs = new List<InputToken>();
         slider.Reset();
