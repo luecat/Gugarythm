@@ -225,6 +225,7 @@ namespace Gugarythm
         Toggle autoPlayToggle;
         Slider speedSlider;
         Material laneMaterial;
+        Material missedHoldMaterial;
         bool running;
         bool loading;
         bool musicLoadSucceeded;
@@ -286,6 +287,7 @@ namespace Gugarythm
 #endif
             if (EnhancedTouchSupport.enabled) EnhancedTouchSupport.Disable();
             if (laneMaterial != null) Destroy(laneMaterial);
+            if (missedHoldMaterial != null) Destroy(missedHoldMaterial);
         }
 
         void Update()
@@ -1011,6 +1013,7 @@ namespace Gugarythm
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
                     line.color = new Color(1, 1, 1, .62f);
                 }
+                line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : null;
                 SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
                 if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
                     holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root))
@@ -1047,6 +1050,17 @@ namespace Gugarythm
             var padding = height * (root.Critical ? 28f : 40f) / NoteTextureHeight;
             view.rectTransform.anchoredPosition = new Vector2(X(lane, screenProgress), HitY);
             view.rectTransform.sizeDelta = new Vector2(LaneWidth(lane, size, screenProgress) * HoldHeadWidthScale + padding * 2, height);
+        }
+
+        bool IsHoldCurrentlyMissed(RuntimeConnector connector)
+        {
+            if (connector?.Start == null || connector.Start.HoldRootIndex < 0) return false;
+            var latestGrade = holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root)
+                ? root.Grade : JudgmentGrade.Pending;
+            if (holdCheckpoints.TryGetValue(connector.Start.HoldRootIndex, out var checkpoints))
+                foreach (var checkpoint in checkpoints)
+                    if (checkpoint.Grade != JudgmentGrade.Pending) latestGrade = checkpoint.Grade;
+            return latestGrade == JudgmentGrade.Miss;
         }
 
         void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, double visualTime, float headApproach, float tailApproach)
@@ -1423,6 +1437,8 @@ namespace Gugarythm
                 laneMaterial = new Material(laneShader);
                 lane.GetComponent<RawImage>().material = laneMaterial;
             }
+            var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
+            if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
             guideLayer = Layer("Decoration Guides", stage);
             connectorLayer = Layer("Hold Connectors", stage);
             simLineLayer = Layer("Synchronization Lines", stage);
