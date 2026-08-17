@@ -872,8 +872,10 @@ public static class RuntimeValidation
         slider.Begin(4, 2.5, -5.5f, jitterInputs);
         slider.Move(4, 2.505, -4.99f, jitterInputs);
         slider.Move(4, 2.510, -5.01f, jitterInputs);
-        Require(jitterInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 2,
-            "A boundary jitter return inside 25 ms must not rearm its starting slider cell");
+        slider.Move(4, 2.550, -4.99f, jitterInputs);
+        slider.Move(4, 2.560, -5.01f, jitterInputs);
+        Require(jitterInputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 5,
+            "Every slider-cell re-entry must emit a Tap without time or departure throttling");
 
         var reentryInputs = new List<InputToken>();
         slider.Reset();
