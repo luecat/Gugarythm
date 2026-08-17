@@ -6,7 +6,9 @@ namespace Gugarythm
     /// <summary>
     /// Converts continuous touch motion into CHUNITHM-style virtual slider
     /// activations. A stationary contact only activates its initial cell;
-    /// rubbing across cell boundaries produces new Tap tokens.
+    /// rubbing across cell boundaries produces new Tap tokens. Cells extend
+    /// beyond the central visible track so perspective side lanes remain
+    /// playable without adding visual feedback there.
     /// </summary>
     public sealed class VirtualSliderInput
     {
@@ -40,21 +42,21 @@ namespace Gugarythm
             var direction = Math.Sign(lane - previousLane);
             var previousCell = CellAt(previousLane);
             var currentCell = CellAt(lane);
-            if (direction > 0 && previousLane < MaximumLane && lane >= MinimumLane)
+            if (direction > 0)
             {
-                var first = previousCell >= 0 ? previousCell + 1 : 0;
-                var last = currentCell >= 0 ? currentCell : CellCount - 1;
-                for (var cell = first; cell <= last && cell < CellCount; cell++)
+                var first = previousCell + 1;
+                var last = currentCell;
+                for (var cell = first; cell <= last; cell++)
                 {
                     var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
                     EmitCell(fingerId, cell, crossingTime, state, output);
                 }
             }
-            else if (direction < 0 && previousLane > MinimumLane && lane <= MaximumLane)
+            else if (direction < 0)
             {
-                var first = previousCell >= 0 ? previousCell - 1 : CellCount - 1;
-                var last = currentCell >= 0 ? currentCell : 0;
-                for (var cell = first; cell >= last && cell >= 0; cell--)
+                var first = previousCell - 1;
+                var last = currentCell;
+                for (var cell = first; cell >= last; cell--)
                 {
                     var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
                     EmitCell(fingerId, cell, crossingTime, state, output);
@@ -78,8 +80,8 @@ namespace Gugarythm
 
         public static int CellAt(float lane)
         {
-            if (lane < MinimumLane || lane > MaximumLane) return -1;
-            return Math.Clamp((int)Math.Floor((lane - MinimumLane) / CellWidth), 0, CellCount - 1);
+            if (Math.Abs(lane - MaximumLane) < .0001f) return CellCount - 1;
+            return (int)Math.Floor((lane - MinimumLane) / CellWidth);
         }
 
         public static float CellCenter(int cell) => MinimumLane + (cell + .5f) * CellWidth;
@@ -97,7 +99,7 @@ namespace Gugarythm
 
         static void EmitCell(int fingerId, int cell, double time, ContactState state, ICollection<InputToken> output)
         {
-            if (cell < 0 || output == null) return;
+            if (output == null) return;
             output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, CellCenter(cell)));
         }
 

@@ -27,6 +27,7 @@ public static class RuntimeValidation
         ValidateGgrUscHoldRoots();
         ValidateAttachedGgrPlayableCount();
         ValidateUscSlideRoleClassification();
+        ValidateUscSlideMidpointRoles();
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
@@ -313,6 +314,60 @@ public static class RuntimeValidation
             Array.Empty<ActiveContact>());
         Require(noneDirectionTail.Grade == JudgmentGrade.Pending && noneDirectionScore.Judged == 0 && noneDirectionScore.Combo == 0,
             "A directional judgeType:none Slide terminal must not be judged or add Combo");
+    }
+
+    static void ValidateUscSlideMidpointRoles()
+    {
+        const string usc = @"{
+            ""usc"": {
+                ""objects"": [
+                    { ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 10, ""judgeType"": ""normal"", ""lane"": 0, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 10.1, ""lane"": 1, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 10.2, ""critical"": false, ""lane"": 4, ""size"": 1, ""type"": ""attach"" },
+                        { ""beat"": 10.3, ""critical"": false, ""lane"": 2, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 10.4, ""judgeType"": ""trace"", ""lane"": 3, ""size"": 1, ""type"": ""end"" }
+                    ] }
+                ]
+            }
+        }";
+        var result = new UscChartImporter().Import("midpoint-roles.usc", System.Text.Encoding.UTF8.GetBytes(usc));
+        Require(result.Success, "Synthetic USC midpoint-role fixture must import: " + result.Error);
+        var chart = result.Chart;
+        var nodes = chart.Notes.Concat(chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End }))
+            .Distinct().ToArray();
+        RuntimeNote At(double beat) => nodes.Single(note => Math.Abs(note.Beat - beat) < 1e-9);
+        var bendOnly = At(10.1);
+        var particleOnly = At(10.2);
+        var bendAndParticle = At(10.3);
+
+        Require(!bendOnly.Visible && !bendOnly.Judged && !chart.Notes.Contains(bendOnly),
+            "A tick without critical must bend the Hold path without creating a particle or judgment");
+        Require(particleOnly.Visible && !particleOnly.Judged && chart.Notes.Contains(particleOnly),
+            "An attach must create a visible particle without becoming a judgment");
+        Require(Math.Abs(particleOnly.Lane - 1.5f) < .0001f,
+            "An attach particle must use the interpolated Hold trajectory instead of its own raw lane coordinate");
+        Require(particleOnly.HoldRootIndex == At(10).Index &&
+                !SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, .999f) &&
+                SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, 1f),
+            "An attach particle must belong to its Hold and retract at the same judgment-line threshold");
+        Require(bendAndParticle.Visible && !bendAndParticle.Judged && chart.Notes.Contains(bendAndParticle),
+            "A tick with critical must both bend the Hold path and create a visible particle");
+        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, bendOnly)) &&
+                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, bendOnly)),
+            "A bend-only tick must remain in the connector path");
+        Require(!chart.Connectors.Any(connector => ReferenceEquals(connector.Start, particleOnly) || ReferenceEquals(connector.End, particleOnly)),
+            "An attach particle must not create a Hold-path bend");
+        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, bendAndParticle)) &&
+                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, bendAndParticle)),
+            "A tick with critical must remain in the connector path");
+        Require(SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, true) &&
+                SonolusLandscapePrototype.ShouldShowNoteParticle(bendAndParticle, true),
+            "USC attach and critical tick particles must be visible even though they are not Trace notes");
+        Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(bendOnly, true) &&
+                !SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, false),
+            "Bend-only ticks and missing particle textures must remain hidden");
     }
 
     static void ValidateHoldSoundGate()
@@ -877,6 +932,12 @@ public static class RuntimeValidation
         slider.Begin(1, 2, 0, inputs);
         Require(inputs.Count(input => input.Kind == RuntimeNoteKind.Tap) == 10, "A new contact must activate its initial slider cell");
 
+        var extendedInputs = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(13, 2.1, -7f, extendedInputs);
+        Require(extendedInputs.Count == 1 && Math.Abs(extendedInputs[0].Lane + 6.75f) < .0001f,
+            "The virtual slider must emit taps for perspective lanes beyond the visible central track");
+
         var releaseInputs = new List<InputToken>();
         slider.Reset();
         slider.Begin(12, 2.2, -1.5f, releaseInputs);
@@ -942,8 +1003,8 @@ public static class RuntimeValidation
 
         var outsideSweep = new List<InputToken>();
         slider.Reset();
-        slider.Begin(3, 2.1, -7, outsideSweep);
-        slider.Move(3, 2.2, 7, outsideSweep);
+        slider.Begin(3, 2.1, -6, outsideSweep);
+        slider.Move(3, 2.2, 6, outsideSweep);
         Require(outsideSweep.Count(input => input.Kind == RuntimeNoteKind.Tap) == VirtualSliderInput.CellCount,
             "A low-frame-rate sweep across the whole slider must not skip cells");
 
@@ -1010,6 +1071,17 @@ public static class RuntimeValidation
             "Judgment debug grid must expose one cell for every half lane");
         Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCellWidth - .5f) < .0001f,
             "Judgment debug grid cells must remain half a lane wide");
+        foreach (var lane in new[] { -6f, -3f, 0f, 3f, 6f })
+            Require(Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(
+                    SonolusLandscapePrototype.JudgmentLaneCanvasX(lane)) - lane) < .0001f,
+                "Input lane conversion must invert the rendered perspective lane geometry");
+        Require(Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(-960f) + 6f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(960f) - 6f) < .0001f,
+            "The far left and right of the touch region must clamp to the -6 and +6 outer keys");
+        Require(SonolusLandscapePrototype.ShouldContinueTrackedContact(true, false) &&
+                SonolusLandscapePrototype.ShouldContinueTrackedContact(true, true) &&
+                !SonolusLandscapePrototype.ShouldContinueTrackedContact(false, false),
+            "A started Hold contact must continue outside the input band until it ends, while a new contact must begin inside it");
         Require(Math.Abs(SonolusLandscapePrototype.JudgmentInputBandHeight(732f) - 45f) < .0001f,
             "Each judgment input band must match the 45-pixel judgement strip");
         Require(SonolusLandscapePrototype.JudgmentInputGridRow(-111.5f, 732f) == 0 &&
@@ -1023,11 +1095,16 @@ public static class RuntimeValidation
                 !SonolusLandscapePrototype.IsJudgmentInputBand(-366.1f, 732f) &&
                 !SonolusLandscapePrototype.IsJudgmentInputBand(inputTop + .1f, 732f),
             "The input region must run from canvas bottom to three band heights above the judgment line");
-        Require(Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(-960f) + 6f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(960f) - 6f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(-6f) + 960f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(6f) - 960f) < .0001f,
-            "The visible input region must cover the canvas width through both outer lanes");
+        Require(SonolusLandscapePrototype.CanvasXAtInputLane(-6f) < -600f &&
+                SonolusLandscapePrototype.CanvasXAtInputLane(6f) > 600f &&
+                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(
+                    SonolusLandscapePrototype.CanvasXAtInputLane(-6f)) + 6f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(
+                    SonolusLandscapePrototype.CanvasXAtInputLane(6f)) - 6f) < .0001f,
+            "The visible input region must align with the rendered outer lanes");
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCanvasXAtLane(-6f) + 960f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.JudgmentDebugCanvasXAtLane(6f) - 960f) < .0001f,
+            "The purple judgment debug region must retain the full canvas width");
         Require(Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackDuration - .12f) < .0001f &&
                 Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackWidth - 1f) < .0001f &&
                 SonolusLandscapePrototype.InputLaneFeedbackCell(-6f) == 0 &&
