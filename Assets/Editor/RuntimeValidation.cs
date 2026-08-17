@@ -769,9 +769,12 @@ public static class RuntimeValidation
 
     static void ValidateLatencyCalibration()
     {
-        var audioOffset = SonolusLandscapePrototype.CalibrationAudioOffsetForElapsed(4.906077, .6);
+        var audioOffset = SonolusLandscapePrototype.CalibrationAudioOffsetForTap(4.906077, 4.8);
         Require(Math.Abs(audioOffset + .106077) < .000001,
-            "A late calibration tap must advance audio instead of shifting judgment input");
+            "A late tap must be compared with its assigned fourth audible beat");
+        var earlyOffset = SonolusLandscapePrototype.CalibrationAudioOffsetForTap(4.694, 4.8);
+        Require(Math.Abs(earlyOffset - .106) < .000001,
+            "An early tap must delay audio by its measured difference from the assigned beat");
         Require(SonolusLandscapePrototype.SanitizeAudioOffset(4.906077) == 0,
             "An impossible persisted audio offset must reset to zero");
         Require(Math.Abs(SonolusLandscapePrototype.SanitizeAudioOffset(.106077) - .106077) < .000001,
