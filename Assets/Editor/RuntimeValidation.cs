@@ -706,8 +706,8 @@ public static class RuntimeValidation
         var first = Note(732, 2.000, 0);
         var second = Note(733, 2.140, 0);
         engine = new JudgmentEngine(new[] { first, second }, new ScoreState());
-        engine.Process(2.110,
-            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.110, 0) },
+        engine.Process(2.190,
+            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.190, 0) },
             Array.Empty<ActiveContact>());
         Require(first.Grade == JudgmentGrade.Pending && second.Grade == JudgmentGrade.Good,
             "Post-midpoint Attack must route to later protected Tap");
@@ -758,10 +758,10 @@ public static class RuntimeValidation
             "Three-note same-lane protection must preserve the next adjacent route");
 
         var critical = Note(743, 7.000, 0); critical.Critical = true;
-        Require(JudgmentEngine.GradeFor(critical, -5.0 / 60.0) == JudgmentGrade.Perfect &&
-                JudgmentEngine.GradeFor(critical, 5.0 / 60.0) == JudgmentGrade.Perfect &&
-                JudgmentEngine.GradeFor(critical, -5.0 / 60.0 - .0001) == JudgmentGrade.Pending &&
-                JudgmentEngine.GradeFor(critical, 5.0 / 60.0 + .0001) == JudgmentGrade.Pending,
+        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0) == JudgmentGrade.Perfect &&
+                JudgmentEngine.GradeFor(critical, 6.0 / 60.0) == JudgmentGrade.Perfect &&
+                JudgmentEngine.GradeFor(critical, -6.0 / 60.0 - .0001) == JudgmentGrade.Pending &&
+                JudgmentEngine.GradeFor(critical, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending,
             "Critical Tap must never return Great or Good");
     }
 
