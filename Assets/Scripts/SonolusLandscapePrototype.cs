@@ -200,6 +200,7 @@ namespace Gugarythm
         AudioSource music;
         AudioSource effects;
         AudioSource holdEffects;
+        readonly AudioSource[] calibrationTickSources = new AudioSource[4];
         RectTransform canvasRoot;
         RectTransform stage;
         RectTransform safeAreaRoot;
@@ -220,6 +221,9 @@ namespace Gugarythm
         Text calibrationLabel;
         Text calibrationBeatLabel;
         Text calibrationOffsetLabel;
+        Button calibrationDecreaseOffsetButton;
+        Button calibrationIncreaseOffsetButton;
+        Button calibrationResetOffsetButton;
         Text resumeCountdownLabel;
         Text pauseTitle;
         Button startButton;
@@ -243,10 +247,11 @@ namespace Gugarythm
         double accumulatedPause;
         double lastObservedSongTime;
         double interruptedSongTime;
-        double inputOffsetSeconds;
+        double audioOffsetSeconds;
         double visualOffsetSeconds;
         double calibrationStartDsp;
         int calibrationLastPlayedBeat = int.MinValue;
+        int calibrationNextScheduledBeat;
         readonly List<double> calibrationOffsets = new();
         bool calibrationActive;
         float scrollSpeed = 8f;
@@ -274,11 +279,11 @@ namespace Gugarythm
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
             scrollSpeed = PlayerPrefs.GetFloat("gugarythm-scroll-speed", 8f);
-            var storedInputOffset = PlayerPrefs.GetFloat("gugarythm-input-offset-seconds", 0f);
-            inputOffsetSeconds = SanitizeInputOffset(storedInputOffset);
-            if (Math.Abs(inputOffsetSeconds - storedInputOffset) > .000001d)
+            var storedAudioOffset = PlayerPrefs.GetFloat("gugarythm-audio-offset-seconds", 0f);
+            audioOffsetSeconds = SanitizeAudioOffset(storedAudioOffset);
+            if (Math.Abs(audioOffsetSeconds - storedAudioOffset) > .000001d)
             {
-                PlayerPrefs.SetFloat("gugarythm-input-offset-seconds", (float)inputOffsetSeconds);
+                PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
                 PlayerPrefs.Save();
             }
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -295,6 +300,7 @@ namespace Gugarythm
         void OnDestroy()
         {
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
+            StopCalibrationTickAudio();
             ClearHoldSound();
 #if UNITY_EDITOR || UNITY_STANDALONE
             TouchSimulation.Disable();
@@ -416,11 +422,15 @@ namespace Gugarythm
         void StartLatencyCalibration()
         {
             if (running || calibrationPanel == null) return;
+            StopCalibrationTickAudio();
             calibrationOffsets.Clear();
             calibrationLastPlayedBeat = int.MinValue;
-            calibrationStartDsp = AudioSettings.dspTime + .8d;
+            calibrationNextScheduledBeat = 0;
+            calibrationStartDsp = AudioDeviceRecovery.ChartAnchorDspForAudioOffset(AudioSettings.dspTime + .8d, audioOffsetSeconds);
+            ScheduleCalibrationTicksThrough(CalibrationTickSourceCount - 1);
             calibrationActive = true;
             calibrationPanel.gameObject.SetActive(true);
+            RefreshManualAudioOffsetControls();
             calibrationLabel.text = "跟著節拍按 4 下\n第 4 拍是重音";
             calibrationBeatLabel.text = "準備";
             calibrationBeatLabel.color = new Color(.35f, .85f, 1f, 1f);
@@ -431,6 +441,8 @@ namespace Gugarythm
         void ReturnFromLatencyCalibration()
         {
             calibrationActive = false;
+            StopCalibrationTickAudio();
+            RefreshManualAudioOffsetControls();
             calibrationPanel?.gameObject.SetActive(false);
         }
 
@@ -444,7 +456,7 @@ namespace Gugarythm
         {
             if (!calibrationActive || calibrationPanel == null) return;
             const double beatDuration = .6d;
-            var elapsed = AudioSettings.dspTime - calibrationStartDsp;
+            var elapsed = AudioSettings.dspTime - calibrationStartDsp - audioOffsetSeconds;
             if (elapsed < 0)
             {
                 calibrationBeatLabel.text = "準備";
@@ -455,6 +467,8 @@ namespace Gugarythm
             if (elapsed >= 10d)
             {
                 calibrationActive = false;
+                StopCalibrationTickAudio();
+                RefreshManualAudioOffsetControls();
                 calibrationLabel.text = "本輪未完成，按 TAP 重新開始";
                 calibrationBeatLabel.text = "再試一次";
                 calibrationBeatLabel.color = new Color(1f, .78f, .18f, 1f);
@@ -466,7 +480,7 @@ namespace Gugarythm
             if (beat != calibrationLastPlayedBeat)
             {
                 calibrationLastPlayedBeat = beat;
-                if (perfectSound != null) effects.PlayOneShot(perfectSound, accented ? .95f : .45f);
+                ScheduleCalibrationTicksThrough(beat + CalibrationTickSourceCount);
             }
             calibrationBeatLabel.text = accented ? "4  ●" : beatInBar.ToString();
             calibrationBeatLabel.color = accented ? new Color(1f, .78f, .18f, 1f) : new Color(.35f, .85f, 1f, 1f);
@@ -481,44 +495,82 @@ namespace Gugarythm
                 return;
             }
             const double beatDuration = .6d;
-            var elapsed = AudioSettings.dspTime - calibrationStartDsp;
+            var elapsed = AudioSettings.dspTime - calibrationStartDsp - audioOffsetSeconds;
             if (elapsed < 0) return;
-            var offset = CalibrationOffsetForElapsed(elapsed, beatDuration);
+            var offset = CalibrationAudioOffsetForElapsed(elapsed, beatDuration);
             calibrationOffsets.Add(offset);
             calibrationLabel.text = $"已記錄 {calibrationOffsets.Count} / 4 拍";
             if (calibrationOffsets.Count < 4) return;
 
-            SetInputOffset(calibrationOffsets.Average());
+            SetAudioOffset(calibrationOffsets.Average());
             calibrationActive = false;
-            calibrationLabel.text = $"完成：{inputOffsetSeconds * 1000d:+0;-0;0} ms";
+            StopCalibrationTickAudio();
+            RefreshManualAudioOffsetControls();
+            calibrationLabel.text = $"完成：{audioOffsetSeconds * 1000d:+0;-0;0} ms";
             calibrationBeatLabel.text = "已套用";
             calibrationBeatLabel.color = new Color(.25f, 1f, .72f, 1f);
         }
 
-        public static double CalibrationOffsetForElapsed(double elapsed, double beatDuration)
+        public static double CalibrationAudioOffsetForElapsed(double elapsed, double beatDuration)
         {
             if (beatDuration <= 0 || double.IsNaN(elapsed) || double.IsInfinity(elapsed)) return 0;
             var nearestBeat = Math.Round(elapsed / beatDuration, MidpointRounding.AwayFromZero);
-            return elapsed - nearestBeat * beatDuration;
+            return nearestBeat * beatDuration - elapsed;
         }
 
-        public static double SanitizeInputOffset(double value) =>
+        public static double SanitizeAudioOffset(double value) =>
             !double.IsNaN(value) && !double.IsInfinity(value) && Math.Abs(value) <= .3d ? value : 0d;
 
-        void SetInputOffset(double value)
+        public static bool CanAdjustAudioOffsetManually(bool calibrationIsActive) => !calibrationIsActive;
+
+        void SetAudioOffset(double value)
         {
-            inputOffsetSeconds = Math.Clamp(value, -.3d, .3d);
-            PlayerPrefs.SetFloat("gugarythm-input-offset-seconds", (float)inputOffsetSeconds);
+            audioOffsetSeconds = double.IsNaN(value) || double.IsInfinity(value) ? 0d : Math.Clamp(value, -.3d, .3d);
+            PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
             PlayerPrefs.Save();
             RefreshCalibrationOffsetLabel();
         }
 
-        void AdjustInputOffset(double delta) => SetInputOffset(inputOffsetSeconds + delta);
+        void SetManualAudioOffset(double value)
+        {
+            if (!CanAdjustAudioOffsetManually(calibrationActive)) return;
+            SetAudioOffset(value);
+        }
+
+        void AdjustAudioOffset(double delta) => SetManualAudioOffset(audioOffsetSeconds + delta);
+
+        void RefreshManualAudioOffsetControls()
+        {
+            var interactable = CanAdjustAudioOffsetManually(calibrationActive);
+            if (calibrationDecreaseOffsetButton != null) calibrationDecreaseOffsetButton.interactable = interactable;
+            if (calibrationIncreaseOffsetButton != null) calibrationIncreaseOffsetButton.interactable = interactable;
+            if (calibrationResetOffsetButton != null) calibrationResetOffsetButton.interactable = interactable;
+        }
 
         void RefreshCalibrationOffsetLabel()
         {
             if (calibrationOffsetLabel != null)
-                calibrationOffsetLabel.text = $"目前延遲  {inputOffsetSeconds * 1000d:+0;-0;0} ms";
+                calibrationOffsetLabel.text = $"聲音偏移  {audioOffsetSeconds * 1000d:+0;-0;0} ms\n＋延後聲音／−提前聲音；不影響判定";
+        }
+
+        const int CalibrationTickSourceCount = 4;
+
+        void ScheduleCalibrationTicksThrough(int lastBeat)
+        {
+            if (perfectSound == null) return;
+            const double beatDuration = .6d;
+            while (calibrationNextScheduledBeat <= lastBeat)
+            {
+                var source = calibrationTickSources[calibrationNextScheduledBeat % CalibrationTickSourceCount];
+                source.PlayScheduled(calibrationStartDsp + calibrationNextScheduledBeat * beatDuration + audioOffsetSeconds);
+                calibrationNextScheduledBeat++;
+            }
+        }
+
+        void StopCalibrationTickAudio()
+        {
+            foreach (var source in calibrationTickSources)
+                if (source != null) source.Stop();
         }
 
         IEnumerator LoadMusic(byte[] bytes, string extension)
@@ -580,9 +632,9 @@ namespace Gugarythm
             lastObservedSongTime = -chart.BgmOffset;
             effects.UnPause();
             holdEffects.UnPause();
-            scheduledDsp = AudioSettings.dspTime + .25;
+            scheduledDsp = AudioDeviceRecovery.ChartAnchorDspForAudioOffset(AudioSettings.dspTime + .25d, audioOffsetSeconds);
             music.time = 0;
-            music.PlayScheduled(scheduledDsp);
+            music.PlayScheduled(scheduledDsp + audioOffsetSeconds);
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
             ShowJudgment("", Color.white);
         }
@@ -654,8 +706,8 @@ namespace Gugarythm
             if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
             {
                 var nextDsp = AudioSettings.dspTime + .25;
-                var clipTime = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, music.clip.length);
-                var playbackDsp = AudioDeviceRecovery.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset);
+                var clipTime = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
+                var playbackDsp = AudioDeviceRecovery.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds);
                 music.Stop();
                 music.time = clipTime;
                 scheduledDsp = AudioDeviceRecovery.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
@@ -771,18 +823,18 @@ namespace Gugarythm
                 if (touch.time > memory.LastInputRecordTime + 1e-7)
                 {
                     if (touch.phase == UnityEngine.InputSystem.TouchPhase.Began)
-                        virtualSlider.Begin(id, eventTime - inputOffsetSeconds, lane, inputBatch);
+                        virtualSlider.Begin(id, eventTime, lane, inputBatch);
                     else if (touch.phase == UnityEngine.InputSystem.TouchPhase.Moved && Vector2.SqrMagnitude(touch.screenPosition - memory.ScreenPosition) > .01f)
                     {
-                        virtualSlider.Move(id, eventTime - inputOffsetSeconds, lane, inputBatch);
-                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                        virtualSlider.Move(id, eventTime, lane, inputBatch);
+                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
                             memory.Lane, lane, false));
                     }
                     else if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
                     {
-                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
                             memory.Lane, lane, true));
-                        virtualSlider.End(id, eventTime - inputOffsetSeconds, lane, inputBatch);
+                        virtualSlider.End(id, eventTime, lane, inputBatch);
                     }
                     memory.LastInputRecordTime = touch.time;
                     memory.EventTime = eventTime;
@@ -791,7 +843,7 @@ namespace Gugarythm
                     touches[id] = memory;
                 }
                 if (touch.phase is not UnityEngine.InputSystem.TouchPhase.Ended and not UnityEngine.InputSystem.TouchPhase.Canceled)
-                    contacts.Add(new ActiveContact(id, lane, memory.StartTime - inputOffsetSeconds));
+                    contacts.Add(new ActiveContact(id, lane, memory.StartTime));
             }
 #if UNITY_EDITOR || UNITY_STANDALONE
             CollectMouseAsTouch(seen);
@@ -829,9 +881,9 @@ namespace Gugarythm
             var began = !touches.TryGetValue(MouseContactId, out var memory);
             if (endedThisFrame && !began)
             {
-                contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime, eventTime,
                     memory.Lane, lane, true));
-                virtualSlider.End(MouseContactId, eventTime - inputOffsetSeconds, lane, inputBatch);
+                virtualSlider.End(MouseContactId, eventTime, lane, inputBatch);
                 return;
             }
             if (began)
@@ -844,12 +896,12 @@ namespace Gugarythm
                     StartTime = eventTime,
                     LastInputRecordTime = eventTime,
                 };
-                virtualSlider.Begin(MouseContactId, eventTime - inputOffsetSeconds, lane, inputBatch);
+                virtualSlider.Begin(MouseContactId, eventTime, lane, inputBatch);
             }
             else if (Vector2.SqrMagnitude(position - memory.ScreenPosition) > .01f)
             {
-                virtualSlider.Move(MouseContactId, eventTime - inputOffsetSeconds, lane, inputBatch);
-                contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime - inputOffsetSeconds, eventTime - inputOffsetSeconds,
+                virtualSlider.Move(MouseContactId, eventTime, lane, inputBatch);
+                contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime, eventTime,
                     memory.Lane, lane, false));
                 memory.Lane = lane;
                 memory.ScreenPosition = position;
@@ -860,7 +912,7 @@ namespace Gugarythm
             touches[MouseContactId] = memory;
             if (!pressed) return;
             seen.Add(MouseContactId);
-            contacts.Add(new ActiveContact(MouseContactId, lane, memory.StartTime - inputOffsetSeconds));
+            contacts.Add(new ActiveContact(MouseContactId, lane, memory.StartTime));
         }
 #endif
 
@@ -1525,6 +1577,15 @@ namespace Gugarythm
             holdEffects.spatialBlend = 0;
             holdEffects.loop = true;
             holdEffects.volume = 0;
+            for (var index = 0; index < calibrationTickSources.Length; index++)
+            {
+                var source = gameObject.AddComponent<AudioSource>();
+                source.playOnAwake = false;
+                source.spatialBlend = 0;
+                source.volume = .65f;
+                source.clip = perfectSound;
+                calibrationTickSources[index] = source;
+            }
             var canvasObject = new GameObject("Rhythm Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             var eventSystemObject = new GameObject("Event System", typeof(EventSystem));
             // A module created entirely at runtime has no UI action asset until
@@ -1650,14 +1711,14 @@ namespace Gugarythm
             autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -36));
             startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -126), StartGame); startButton.interactable = false;
             MakeButton("匯入 GGR", menuPanel, new Vector2(0, -236), RequestImport);
-            MakeButton("自動調延遲", menuPanel, new Vector2(245, -126), StartLatencyCalibration, new Vector2(190, 54));
+            MakeButton("校正聲音偏移", menuPanel, new Vector2(245, -126), StartLatencyCalibration, new Vector2(190, 54));
         }
 
         void BuildLatencyCalibration(RectTransform root)
         {
             calibrationPanel = Panel("Latency Calibration", root, new Color(.04f, .06f, .14f, .98f), new Vector2(500, 530), Vector2.zero);
             Outline(calibrationPanel.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
-            var title = Label("自動調整延遲", calibrationPanel, 34);
+            var title = Label("校正聲音偏移", calibrationPanel, 34);
             title.rectTransform.sizeDelta = new Vector2(450, 62);
             title.rectTransform.anchoredPosition = new Vector2(0, 205);
             calibrationLabel = Label("跟著節拍按 4 下\n第 4 拍是重音", calibrationPanel, 24);
@@ -1667,15 +1728,16 @@ namespace Gugarythm
             calibrationBeatLabel.rectTransform.sizeDelta = new Vector2(260, 100);
             calibrationBeatLabel.rectTransform.anchoredPosition = new Vector2(0, 25);
             MakeButton("TAP", calibrationPanel, new Vector2(0, -65), RegisterCalibrationTap, new Vector2(300, 70));
-            calibrationOffsetLabel = Label("", calibrationPanel, 25);
-            calibrationOffsetLabel.rectTransform.sizeDelta = new Vector2(420, 42);
-            calibrationOffsetLabel.rectTransform.anchoredPosition = new Vector2(0, -125);
-            MakeButton("−10 ms", calibrationPanel, new Vector2(-150, -178), () => AdjustInputOffset(-.01d), new Vector2(140, 48));
-            MakeButton("＋10 ms", calibrationPanel, new Vector2(0, -178), () => AdjustInputOffset(.01d), new Vector2(140, 48));
-            MakeButton("歸零", calibrationPanel, new Vector2(150, -178), () => SetInputOffset(0), new Vector2(110, 48));
+            calibrationOffsetLabel = Label("", calibrationPanel, 20);
+            calibrationOffsetLabel.rectTransform.sizeDelta = new Vector2(470, 64);
+            calibrationOffsetLabel.rectTransform.anchoredPosition = new Vector2(0, -118);
+            calibrationDecreaseOffsetButton = MakeButton("−10 ms", calibrationPanel, new Vector2(-150, -184), () => AdjustAudioOffset(-.01d), new Vector2(140, 48));
+            calibrationIncreaseOffsetButton = MakeButton("＋10 ms", calibrationPanel, new Vector2(0, -184), () => AdjustAudioOffset(.01d), new Vector2(140, 48));
+            calibrationResetOffsetButton = MakeButton("歸零", calibrationPanel, new Vector2(150, -184), () => SetManualAudioOffset(0), new Vector2(110, 48));
             MakeButton("重新開始", calibrationPanel, new Vector2(-92, -240), RestartLatencyCalibration, new Vector2(170, 42));
             MakeButton("返回", calibrationPanel, new Vector2(92, -240), ReturnFromLatencyCalibration, new Vector2(170, 42));
             RefreshCalibrationOffsetLabel();
+            RefreshManualAudioOffsetControls();
             calibrationPanel.gameObject.SetActive(false);
         }
 
