@@ -767,7 +767,7 @@ namespace Gugarythm
             PlayJudgmentSound(judgment);
             if (judgment.Grade != JudgmentGrade.Miss)
             {
-                SpawnHitParticle(X(judgment.Note.Lane, 1f), judgment.Note.Critical ? "yellow" : IsTrace(judgment.Note) || judgment.Note.Kind == RuntimeNoteKind.Sustain ? "green" : judgment.Note.Kind == RuntimeNoteKind.Flick ? "pink" : "blue");
+                SpawnHitParticle(judgment.Note, judgment.Note.Critical ? "yellow" : IsTrace(judgment.Note) || judgment.Note.Kind == RuntimeNoteKind.Sustain ? "green" : judgment.Note.Kind == RuntimeNoteKind.Flick ? "pink" : "blue");
             }
         }
 
@@ -1722,7 +1722,7 @@ namespace Gugarythm
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
         void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
 
-        void SpawnHitParticle(float x, string color)
+        void SpawnHitParticle(RuntimeNote note, string color)
         {
             var tint = color switch
             {
@@ -1731,8 +1731,10 @@ namespace Gugarythm
                 "green" => new Color(.12f, 1f, .58f, .84f),
                 _ => new Color(.28f, .82f, 1f, .84f),
             };
+            var x = X(note.Lane, 1f);
+            var impactWidth = Mathf.Clamp(LaneWidth(note.Lane, note.Size, 1f), 48f, 96f);
             var particleRoot = new GameObject("Pixel Judgment Burst", typeof(RectTransform)).GetComponent<RectTransform>();
-            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(240, 240); particleRoot.anchoredPosition = new Vector2(x, HitY);
+            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(impactWidth * 2.2f, impactWidth * .8f); particleRoot.anchoredPosition = new Vector2(x, HitY);
             particleRoot.SetAsLastSibling();
             RawImage core = null;
             RawImage ring = null;
@@ -1746,7 +1748,7 @@ namespace Gugarythm
                 core.raycastTarget = false;
                 ring.raycastTarget = false;
             }
-            StartCoroutine(AnimateHitEffect(particleRoot, core, ring, tint));
+            StartCoroutine(AnimateHitEffect(particleRoot, core, ring, tint, impactWidth));
         }
 
         static Rect PixelParticleUv(int sprite)
@@ -1765,7 +1767,7 @@ namespace Gugarythm
                 spriteSize / atlasSize, spriteSize / atlasSize);
         }
 
-        IEnumerator AnimateHitEffect(RectTransform particleRoot, RawImage core, RawImage ring, Color tint)
+        IEnumerator AnimateHitEffect(RectTransform particleRoot, RawImage core, RawImage ring, Color tint, float impactWidth)
         {
             const float Duration = .38f;
             for (var elapsed = 0f; elapsed < Duration; elapsed += Time.unscaledDeltaTime)
@@ -1774,9 +1776,14 @@ namespace Gugarythm
                 var fade = 1 - Mathf.SmoothStep(0, 1, t);
                 if (core != null)
                 {
-                    core.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(48, 108, t);
+                    core.rectTransform.sizeDelta = new Vector2(
+                        impactWidth * Mathf.Lerp(.48f, 1.08f, t),
+                        impactWidth * Mathf.Lerp(.15f, .32f, t));
                     core.color = new Color(1, 1, 1, fade);
-                    ring.rectTransform.sizeDelta = Vector2.one * Mathf.Lerp(56, 196, Mathf.SmoothStep(0, 1, t));
+                    var ringProgress = Mathf.SmoothStep(0, 1, t);
+                    ring.rectTransform.sizeDelta = new Vector2(
+                        impactWidth * Mathf.Lerp(.56f, 1.96f, ringProgress),
+                        impactWidth * Mathf.Lerp(.18f, .58f, ringProgress));
                     ring.color = new Color(1, 1, 1, fade * .9f);
                 }
                 yield return null;
