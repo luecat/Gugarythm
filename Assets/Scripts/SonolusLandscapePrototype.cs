@@ -142,6 +142,7 @@ namespace Gugarythm
         // sprite leaves the viewport. Successful hits return to the pool at once.
         const float NoteExitMargin = 140f;
         const float JudgmentDisplayDuration = .35f;
+        public const float InputLaneFeedbackDuration = .12f;
         const float HoldLoopVolume = .55f;
         const float HoldLoopFadeDuration = .04f;
 
@@ -165,6 +166,8 @@ namespace Gugarythm
         readonly List<ActiveContact> contacts = new();
         readonly List<ContactPathSegment> contactPaths = new();
         readonly VirtualSliderInput virtualSlider = new();
+        readonly Image[] inputLaneFeedback = new Image[VirtualSliderInput.CellCount];
+        readonly float[] inputLaneFeedbackUntil = new float[VirtualSliderInput.CellCount];
         readonly float[] connectorPathSamples = new float[ConnectorPathSegments + 3];
         readonly ScoreState scoreState = new();
         readonly List<IChartImporter> importers = new() { new GgrChartImporter() };
@@ -279,6 +282,7 @@ namespace Gugarythm
         public static float CanvasXAtInputLane(float lane) => Mathf.Lerp(
             -ReferenceWidth * .5f, ReferenceWidth * .5f,
             Mathf.InverseLerp(VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane, lane));
+        public static int InputLaneFeedbackCell(float lane) => VirtualSliderInput.CellAt(lane);
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
@@ -341,6 +345,7 @@ namespace Gugarythm
 #endif
             PollNativeImport();
             UpdateSafeAreaLayout();
+            UpdateInputLaneFeedback();
             UpdateDesktopSpeedControls();
             UpdateLatencyCalibration();
             if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
@@ -354,6 +359,7 @@ namespace Gugarythm
             var songTime = CurrentSongTime();
             lastObservedSongTime = songTime;
             CollectInput();
+            foreach (var input in inputBatch) FlashInputLane(input.Lane);
             var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths, autoPlayToggle != null && autoPlayToggle.isOn);
             if (events.Count > 0)
             {
@@ -770,6 +776,7 @@ namespace Gugarythm
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
+            ClearInputLaneFeedback();
             ReleaseAllViews();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
@@ -796,6 +803,7 @@ namespace Gugarythm
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
+            ClearInputLaneFeedback();
             ReleaseAllViews();
             RefreshHud();
         }
@@ -1666,6 +1674,7 @@ namespace Gugarythm
             }
             var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
+            BuildInputLaneFeedback(stage);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             BuildJudgmentDebugGrid(stage);
 #endif
@@ -1680,6 +1689,49 @@ namespace Gugarythm
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
+        }
+
+        void BuildInputLaneFeedback(RectTransform root)
+        {
+            var layer = Layer("Input Lane Feedback", root);
+            for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
+            {
+                var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
+                var rightLane = leftLane + JudgmentDebugCellWidth;
+                var left = CanvasXAtInputLane(leftLane);
+                var right = CanvasXAtInputLane(rightLane);
+                var segment = Panel($"Input Lane Flash {cell + 1:00}", layer, new Color(.45f, .45f, .48f, .58f),
+                    new Vector2(right - left, CanvasHeight), new Vector2((left + right) * .5f, 0));
+                var image = segment.GetComponent<Image>();
+                image.raycastTarget = false;
+                image.gameObject.SetActive(false);
+                inputLaneFeedback[cell] = image;
+            }
+        }
+
+        void FlashInputLane(float lane)
+        {
+            var cell = InputLaneFeedbackCell(lane);
+            if (cell < 0 || cell >= inputLaneFeedback.Length || inputLaneFeedback[cell] == null) return;
+            inputLaneFeedbackUntil[cell] = Mathf.Max(inputLaneFeedbackUntil[cell], Time.unscaledTime + InputLaneFeedbackDuration);
+            inputLaneFeedback[cell].gameObject.SetActive(true);
+        }
+
+        void UpdateInputLaneFeedback()
+        {
+            for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
+                if (inputLaneFeedback[cell] != null && inputLaneFeedback[cell].gameObject.activeSelf &&
+                    Time.unscaledTime >= inputLaneFeedbackUntil[cell])
+                    inputLaneFeedback[cell].gameObject.SetActive(false);
+        }
+
+        void ClearInputLaneFeedback()
+        {
+            for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
+            {
+                inputLaneFeedbackUntil[cell] = 0;
+                if (inputLaneFeedback[cell] != null) inputLaneFeedback[cell].gameObject.SetActive(false);
+            }
         }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD

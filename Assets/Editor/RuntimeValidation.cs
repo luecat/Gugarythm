@@ -1010,6 +1010,10 @@ public static class RuntimeValidation
                 Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(-6f) + 960f) < .0001f &&
                 Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(6f) - 960f) < .0001f,
             "The visible input region must cover the canvas width through both outer lanes");
+        Require(Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackDuration - .12f) < .0001f &&
+                SonolusLandscapePrototype.InputLaneFeedbackCell(-6f) == 0 &&
+                SonolusLandscapePrototype.InputLaneFeedbackCell(6f) == VirtualSliderInput.CellCount - 1,
+            "Input feedback must flash every half lane including both outer lanes");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
