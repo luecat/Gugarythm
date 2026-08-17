@@ -566,10 +566,21 @@ public static class RuntimeValidation
         engine = new JudgmentEngine(new[] { earlyPath }, new ScoreState());
         engine.Process(6, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(), new[]
         {
-            new ContactPathSegment(1, 5.8, 5.9, -2, 2, false),
+            new ContactPathSegment(1, 5.7, 5.8, -2, 2, false),
         });
         Require(earlyPath.Grade == JudgmentGrade.Pending,
             "A Hold path that finishes before the checkpoint time must not be consumed early");
+
+        var recentRelease = Note(81, 6.5, 0);
+        recentRelease.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { recentRelease }, new ScoreState());
+        engine.Process(6.47, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(), new[]
+        {
+            new ContactPathSegment(1, 6.34, 6.47, 0, 0, true),
+        });
+        engine.Process(6.5, Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        Require(recentRelease.Grade == JudgmentGrade.Perfect,
+            "A Hold checkpoint must retain recent pre-tick coverage after the contact releases");
 
         var recoveryA = Note(9, 7, 0);
         recoveryA.Kind = RuntimeNoteKind.Sustain;

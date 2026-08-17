@@ -109,6 +109,7 @@ namespace Gugarythm
         const double JusticeWindow = 4.0 / 60.0;
         const double AttackWindow = 6.0 / 60.0;
         public const double SustainLateWindow = 5.0 / 60.0;
+        public const double SustainLookbackWindow = 9.0 / 60.0;
         public const double CommitGrace = .025;
         public const float LaneForgiveness = .85f;
         public bool JudgmentProtectionEnabled { get; set; } = true;
@@ -116,6 +117,7 @@ namespace Gugarythm
         readonly List<RuntimeNote> notes;
         readonly ScoreState score;
         readonly Dictionary<int, TapProtectionPair[]> tapProtectionPairs;
+        readonly List<ContactPathSegment> recentContactPaths = new();
 
         enum ProtectionBand
         {
@@ -168,6 +170,7 @@ namespace Gugarythm
                 ResolveAutoPlay(songTime, output);
                 return output;
             }
+            RecordContactPaths(songTime, contactPaths);
             MatchDiscreteInputs(inputBatch, output);
             ResolveContactNotes(songTime, contacts, contactPaths, output);
             CommitMisses(songTime, output);
@@ -274,12 +277,32 @@ namespace Gugarythm
             foreach (var note in notes)
             {
                 if (note.Grade != JudgmentGrade.Pending || !IsContactNote(note) || songTime < note.Time) continue;
-                var covered = contacts != null && contacts.Any(contact => LaneMatches(note, contact.Lane) && contact.StartTime <= songTime);
-                var crossed = contactPaths != null && contactPaths.Any(path =>
-                    FirstIntersectionTime(path, note, note.Time, note.Time + SustainLateWindow).HasValue);
-                if ((covered || crossed) && songTime - note.Time <= SustainLateWindow)
-                    Register(note, JudgmentGrade.Perfect, songTime - note.Time, output);
+                var coverageTime = LatestCoverageTime(note, songTime, contacts);
+                if (coverageTime.HasValue && songTime - note.Time <= SustainLateWindow)
+                    Register(note, JudgmentGrade.Perfect, coverageTime.Value - note.Time, output);
             }
+        }
+
+        void RecordContactPaths(double songTime, IReadOnlyList<ContactPathSegment> contactPaths)
+        {
+            if (contactPaths != null)
+                foreach (var path in contactPaths)
+                    if (path.EndTime >= path.StartTime) recentContactPaths.Add(path);
+            var oldestRelevantTime = songTime - SustainLookbackWindow;
+            recentContactPaths.RemoveAll(path => path.EndTime < oldestRelevantTime);
+        }
+
+        double? LatestCoverageTime(RuntimeNote note, double songTime, IReadOnlyList<ActiveContact> contacts)
+        {
+            double? latest = contacts != null && contacts.Any(contact =>
+                LaneMatches(note, contact.Lane) && contact.StartTime <= songTime) ? songTime : null;
+            var earliest = note.Time - SustainLookbackWindow;
+            foreach (var path in recentContactPaths)
+            {
+                var coveredAt = LastIntersectionTime(path, note, earliest, songTime);
+                if (coveredAt.HasValue && (!latest.HasValue || coveredAt.Value > latest.Value)) latest = coveredAt;
+            }
+            return latest;
         }
 
         void CommitMisses(double songTime, List<JudgmentEvent> output)
@@ -313,6 +336,27 @@ namespace Gugarythm
             var progress = (entryLane - startLane) / laneDelta;
             if (progress < 0 || progress > 1) return null;
             return startTime + (endTime - startTime) * progress;
+        }
+
+        static double? LastIntersectionTime(ContactPathSegment path, RuntimeNote note, double earliestTime, double latestTime)
+        {
+            var startTime = Math.Max(path.StartTime, earliestTime);
+            var endTime = Math.Min(path.EndTime, latestTime);
+            if (endTime < startTime) return null;
+
+            var startLane = LaneAt(path, startTime);
+            var endLane = LaneAt(path, endTime);
+            var minimum = note.Lane - note.Size - LaneForgiveness;
+            var maximum = note.Lane + note.Size + LaneForgiveness;
+            var laneDelta = endLane - startLane;
+            if (Math.Abs(laneDelta) < .0001f)
+                return startLane >= minimum && startLane <= maximum ? endTime : null;
+
+            var first = (minimum - startLane) / laneDelta;
+            var second = (maximum - startLane) / laneDelta;
+            var enter = Math.Max(0d, Math.Min(first, second));
+            var exit = Math.Min(1d, Math.Max(first, second));
+            return enter <= exit ? startTime + (endTime - startTime) * exit : null;
         }
 
         static float LaneAt(ContactPathSegment path, double time)
