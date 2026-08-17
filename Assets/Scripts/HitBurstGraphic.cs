@@ -3,12 +3,12 @@ using UnityEngine.UI;
 
 namespace Gugarythm
 {
-    // Multi-layer judgment burst measured from the reference gameplay: expanding
-    // diamond outlines plus small square fragments. It is geometry-only so the
-    // effect stays crisp at every Android resolution.
+    // A 15-frame judgment pulse: fixed-size perspective plates establish the
+    // impact while the upper fill follows note width and low shards move linearly.
     public sealed class HitBurstGraphic : MaskableGraphic
     {
         [Range(0, 1)] public float progress;
+        public float upperWidth = 96;
 
         public void SetProgress(float value)
         {
@@ -19,26 +19,46 @@ namespace Gugarythm
         protected override void OnPopulateMesh(VertexHelper helper)
         {
             helper.Clear();
-            var fade = 1 - progress;
-            for (var ring = 0; ring < 4; ring++)
+            var outlineFade = 1 - progress;
+            var fillFade = 1 - Mathf.Clamp01(progress / .4f);
+            var shardFade = 1 - Mathf.Clamp01((progress - .56f) / .44f);
+            for (var ring = 0; ring < 3; ring++)
             {
-                var delayed = Mathf.Clamp01(progress * 1.35f - ring * .09f);
-                var radius = Mathf.Lerp(28 + ring * 13, 118 + ring * 18, delayed);
-                var tint = ring % 2 == 0 ? color : Color.Lerp(color, Color.white, .62f);
-                tint.a *= fade * (.72f - ring * .11f);
-                AddDiamondRing(helper, radius * 1.35f, radius * .55f, Mathf.Lerp(3.2f, 1.2f, delayed), tint);
+                var startWidth = 58 + ring * 11;
+                var endWidth = 112 + ring * 15;
+                var width = Mathf.Lerp(startWidth, endWidth, progress);
+                var height = Mathf.Lerp(12 + ring * 3, 22 + ring * 4, progress);
+                var tint = color;
+                tint.a *= outlineFade * (.78f - ring * .14f);
+                AddDiamondRing(helper, width, height, Mathf.Lerp(2.4f, 1.1f, progress), tint);
             }
 
+            var fillTint = color;
+            fillTint.a *= fillFade * .68f;
+            AddDiamondFill(helper, Vector2.zero,
+                Mathf.Lerp(upperWidth * .34f, upperWidth * .52f, progress),
+                Mathf.Lerp(7, 11, progress), fillTint);
+            var innerTint = color;
+            innerTint.a *= fillFade * .32f;
+            AddDiamondFill(helper, Vector2.up * 3,
+                Mathf.Lerp(upperWidth * .22f, upperWidth * .39f, progress),
+                Mathf.Lerp(5, 8, progress), innerTint);
+
+            // Reference footage keeps its fragments opaque through the impact
+            // peak, then removes them quickly. Their positions remain linear so
+            // they read as a low splash rather than floating droplets.
             for (var index = 0; index < 10; index++)
             {
-                var phase = index / 9f;
-                var direction = new Vector2(Mathf.Lerp(-1.15f, 1.15f, phase), .25f + Mathf.Abs(.5f - phase) * .85f).normalized;
-                var distance = Mathf.Lerp(24, 150, progress) * (.72f + (index % 3) * .13f);
-                var center = direction * distance + Vector2.up * 18 * progress;
-                var size = Mathf.Lerp(9, 3, progress) * (index % 2 == 0 ? 1.2f : .8f);
-                var tint = index % 3 == 0 ? Color.Lerp(color, Color.white, .72f) : color;
-                tint.a *= fade * .7f;
-                AddDiamondFill(helper, center, size, tint);
+                var direction = Mathf.Lerp(-1f, 1f, index / 9f);
+                var rank = index % 3;
+                var arch = 1 - Mathf.Abs(direction);
+                var center = new Vector2(
+                    Mathf.Lerp(direction * 8, direction * (54 + rank * 9), progress),
+                    Mathf.Lerp(2 + rank, 26 + arch * 32 + rank * 5, progress));
+                var tint = color;
+                tint.a *= shardFade * (.92f - rank * .08f);
+                AddDiamondFill(helper, center, Mathf.Lerp(8, 4.5f, progress),
+                    Mathf.Lerp(3.8f, 2.2f, progress), tint);
             }
         }
 
@@ -61,9 +81,9 @@ namespace Gugarythm
             AddQuad(helper, start - normal, start + normal, end + normal, end - normal, tint);
         }
 
-        static void AddDiamondFill(VertexHelper helper, Vector2 center, float radius, Color32 tint) =>
-            AddQuad(helper, center + Vector2.up * radius, center + Vector2.right * radius,
-                center + Vector2.down * radius, center + Vector2.left * radius, tint);
+        static void AddDiamondFill(VertexHelper helper, Vector2 center, float radiusX, float radiusY, Color32 tint) =>
+            AddQuad(helper, center + Vector2.up * radiusY, center + Vector2.right * radiusX,
+                center + Vector2.down * radiusY, center + Vector2.left * radiusX, tint);
 
         static void AddQuad(VertexHelper helper, Vector2 a, Vector2 b, Vector2 c, Vector2 d, Color32 tint)
         {

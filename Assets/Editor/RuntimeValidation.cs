@@ -29,6 +29,7 @@ public static class RuntimeValidation
         ValidateUscSlideRoleClassification();
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
+        ValidateHitEffectColorRouting();
         var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
         if (!File.Exists(path)) throw new FileNotFoundException("Default SCP is missing", path);
         var bytes = File.ReadAllBytes(path);
@@ -355,6 +356,29 @@ public static class RuntimeValidation
         gate.Clear();
         Require(!gate.ShouldPlay && gate.ActiveCount == 0,
             "Repeated HoldSoundGate clearing must leave the gate stopped");
+    }
+
+    static void ValidateHitEffectColorRouting()
+    {
+        static bool Same(Color actual, Color expected) =>
+            Mathf.Approximately(actual.r, expected.r) && Mathf.Approximately(actual.g, expected.g) &&
+            Mathf.Approximately(actual.b, expected.b) && Mathf.Approximately(actual.a, expected.a);
+
+        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Tap }),
+                new Color(.28f, .82f, 1f, .84f)),
+            "Normal Tap hit effect must use the cyan button color");
+        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick }),
+                new Color(1f, .2f, .67f, .86f)),
+            "Normal Flick hit effect must use the pink button color");
+        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Sustain }),
+                new Color(.12f, 1f, .58f, .84f)),
+            "Normal Hold hit effect must use the mint button color");
+        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Tap, Archetype = "TraceNote" }),
+                new Color(.12f, 1f, .58f, .84f)),
+            "Trace hit effect must use the mint button color");
+        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick, Critical = true }),
+                new Color(1f, .82f, .12f, .9f)),
+            "Critical hit effect must use the yellow button color regardless of note kind");
     }
 
     static void ValidateHoldJudgmentAudioRouting()
