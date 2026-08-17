@@ -262,8 +262,7 @@ namespace Gugarythm
         static float HitY => TopY - HitSourceY / LaneTextureHeight * CanvasHeight;
         public static int JudgmentDebugCellCount => VirtualSliderInput.CellCount;
         public static float JudgmentDebugCellWidth => VirtualSliderInput.CellWidth;
-        public static float JudgmentDebugStripHeight(float canvasHeight) =>
-            JudgmentStripSourceHeight / LaneTextureHeight * canvasHeight;
+        public static float JudgmentDebugGridHeight(float canvasHeight) => canvasHeight;
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
@@ -1646,7 +1645,7 @@ namespace Gugarythm
         static void BuildJudgmentDebugGrid(RectTransform root)
         {
             var grid = Layer("Judgment Debug Grid", root);
-            var height = JudgmentDebugStripHeight(CanvasHeight);
+            var height = JudgmentDebugGridHeight(CanvasHeight);
             for (var cell = 0; cell < JudgmentDebugCellCount; cell++)
             {
                 var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
@@ -1654,7 +1653,7 @@ namespace Gugarythm
                 var left = X(leftLane, 1f);
                 var right = X(rightLane, 1f);
                 var segment = Panel($"Cell {cell + 1:00}", grid, new Color(.68f, .24f, 1f, .42f),
-                    new Vector2(Mathf.Max(1f, right - left - 2f), height), new Vector2((left + right) * .5f, HitY));
+                    new Vector2(Mathf.Max(1f, right - left - 2f), height), new Vector2((left + right) * .5f, 0));
                 segment.GetComponent<Image>().raycastTarget = false;
             }
         }

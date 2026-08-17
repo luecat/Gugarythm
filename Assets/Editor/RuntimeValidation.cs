@@ -994,8 +994,8 @@ public static class RuntimeValidation
             "Judgment debug grid must expose one cell for every half lane");
         Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCellWidth - .5f) < .0001f,
             "Judgment debug grid cells must remain half a lane wide");
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugStripHeight(732f) - 45f) < .0001f,
-            "Judgment debug grid must align to the 45-pixel judgement strip");
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugGridHeight(1080f) - 1080f) < .0001f,
+            "Judgment debug grid must cover the full canvas height");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
