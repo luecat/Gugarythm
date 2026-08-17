@@ -112,11 +112,13 @@ namespace Gugarythm
 
         readonly List<RuntimeNote> notes;
         readonly ScoreState score;
+        readonly Dictionary<int, RuntimeNote[]> tapProtectionNeighbors;
 
         public JudgmentEngine(IEnumerable<RuntimeNote> notes, ScoreState score)
         {
             this.notes = notes.Where(note => note.Judged).OrderBy(note => note.Time).ThenBy(note => note.Index).ToList();
             this.score = score;
+            tapProtectionNeighbors = BuildTapProtectionNeighbors(this.notes);
         }
 
         public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts)
@@ -163,7 +165,8 @@ namespace Gugarythm
                     if (!eventTime.HasValue) continue;
                     var grade = GradeFor(note, eventTime.Value - note.Time);
                     if (grade == JudgmentGrade.Pending) continue;
-                    if (JudgmentProtectionEnabled && grade != JudgmentGrade.Perfect && IsProtectedOuterWindow(note, eventTime.Value)) continue;
+                    if (JudgmentProtectionEnabled && grade != JudgmentGrade.Perfect &&
+                        IsProtectedOuterWindow(note, eventTime.Value, input.Lane)) continue;
                     var spatial = Math.Abs(input.Lane - note.Lane);
                     edges.Add(new Edge(inputIndex, note, eventTime.Value, grade, Math.Abs(eventTime.Value - note.Time), spatial));
                 }
@@ -296,24 +299,63 @@ namespace Gugarythm
         public static bool LaneMatches(RuntimeNote note, float lane) =>
             lane >= note.Lane - note.Size - LaneForgiveness && lane <= note.Lane + note.Size + LaneForgiveness;
 
-        bool IsProtectedOuterWindow(RuntimeNote note, double eventTime)
+        static Dictionary<int, RuntimeNote[]> BuildTapProtectionNeighbors(IReadOnlyList<RuntimeNote> notes)
         {
-            foreach (var other in notes)
+            var mutable = new Dictionary<int, List<RuntimeNote>>();
+            for (var i = 0; i < notes.Count; i++)
             {
-                if (ReferenceEquals(note, other) || other.Grade != JudgmentGrade.Pending || other.Kind != note.Kind) continue;
-                if (!GeometryOverlaps(note, other)) continue;
-                var earlier = note.Time < other.Time ? note : other;
-                var later = ReferenceEquals(earlier, note) ? other : note;
-                var distance = later.Time - earlier.Time;
-                if (distance <= 0 || distance >= OuterLateWindow(earlier) + OuterEarlyWindow(later)) continue;
-                var boundary = (earlier.Time + later.Time) * .5;
-                if ((ReferenceEquals(note, earlier) && eventTime > boundary) || (ReferenceEquals(note, later) && eventTime < boundary)) return true;
+                var earlier = notes[i];
+                if (earlier.Kind != RuntimeNoteKind.Tap) continue;
+                for (var j = i + 1; j < notes.Count; j++)
+                {
+                    var later = notes[j];
+                    var distance = later.Time - earlier.Time;
+                    if (distance >= OuterLateWindow(earlier) + OuterEarlyWindow(later)) break;
+                    if (distance <= 0 || later.Kind != RuntimeNoteKind.Tap || !HitGeometryOverlaps(earlier, later)) continue;
+
+                    AddProtectionNeighbor(mutable, earlier.Index, later);
+                    AddProtectionNeighbor(mutable, later.Index, earlier);
+                }
             }
-            return false;
+
+            return mutable.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
         }
 
-        static bool GeometryOverlaps(RuntimeNote a, RuntimeNote b) =>
-            a.Lane - a.Size <= b.Lane + b.Size && b.Lane - b.Size <= a.Lane + a.Size;
+        static void AddProtectionNeighbor(Dictionary<int, List<RuntimeNote>> map, int index, RuntimeNote neighbor)
+        {
+            if (!map.TryGetValue(index, out var neighbors))
+            {
+                neighbors = new List<RuntimeNote>();
+                map.Add(index, neighbors);
+            }
+            neighbors.Add(neighbor);
+        }
+
+        static bool HitGeometryOverlaps(RuntimeNote a, RuntimeNote b)
+        {
+            var aRadius = a.Size + LaneForgiveness;
+            var bRadius = b.Size + LaneForgiveness;
+            return a.Lane - aRadius <= b.Lane + bRadius &&
+                   b.Lane - bRadius <= a.Lane + aRadius;
+        }
+
+        bool IsProtectedOuterWindow(RuntimeNote note, double eventTime, float inputLane)
+        {
+            if (note.Kind != RuntimeNoteKind.Tap ||
+                !tapProtectionNeighbors.TryGetValue(note.Index, out var neighbors)) return false;
+
+            foreach (var other in neighbors)
+            {
+                if (!LaneMatches(other, inputLane)) continue;
+                var earlier = note.Time < other.Time ? note : other;
+                var later = ReferenceEquals(earlier, note) ? other : note;
+                var boundary = (earlier.Time + later.Time) * .5;
+                if ((ReferenceEquals(note, earlier) && eventTime > boundary) ||
+                    (ReferenceEquals(note, later) && eventTime < boundary)) return true;
+            }
+
+            return false;
+        }
 
         public static JudgmentGrade GradeFor(RuntimeNote note, double delta)
         {
