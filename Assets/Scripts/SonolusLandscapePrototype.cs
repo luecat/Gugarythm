@@ -217,10 +217,13 @@ namespace Gugarythm
         Text loadStatus;
         Text resultText;
         Text speedLabel;
+        Text calibrationLabel;
+        Text calibrationBeatLabel;
         Text resumeCountdownLabel;
         Text pauseTitle;
         Button startButton;
         Button pauseButton;
+        RectTransform calibrationPanel;
         Toggle autoPlayToggle;
         Slider speedSlider;
         Material laneMaterial;
@@ -241,6 +244,10 @@ namespace Gugarythm
         double interruptedSongTime;
         double inputOffsetSeconds;
         double visualOffsetSeconds;
+        double calibrationStartDsp;
+        int calibrationLastPlayedBeat = int.MinValue;
+        readonly List<double> calibrationOffsets = new();
+        bool calibrationActive;
         float scrollSpeed = 8f;
         float judgmentHideAt = -1f;
 
@@ -266,6 +273,7 @@ namespace Gugarythm
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
             scrollSpeed = PlayerPrefs.GetFloat("gugarythm-scroll-speed", 8f);
+            inputOffsetSeconds = PlayerPrefs.GetFloat("gugarythm-input-offset-seconds", 0f);
 #if UNITY_EDITOR || UNITY_STANDALONE
             // TouchSimulation can leave the real Mouse device disabled across
             // editor play sessions. Desktop input is adapted explicitly below.
@@ -302,6 +310,7 @@ namespace Gugarythm
             PollNativeImport();
             UpdateSafeAreaLayout();
             UpdateDesktopSpeedControls();
+            UpdateLatencyCalibration();
             if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
                 ShowJudgment("", Color.white);
             if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0)
@@ -395,6 +404,92 @@ namespace Gugarythm
             if (speedLabel != null)
                 speedLabel.text = $"流速  {value:F1}  ·  按鈕／← → 每次 0.1";
             PlayerPrefs.SetFloat("gugarythm-scroll-speed", value);
+        }
+
+        void StartLatencyCalibration()
+        {
+            if (running || calibrationPanel == null) return;
+            calibrationOffsets.Clear();
+            calibrationLastPlayedBeat = int.MinValue;
+            calibrationStartDsp = AudioSettings.dspTime + .8d;
+            calibrationActive = true;
+            calibrationPanel.gameObject.SetActive(true);
+            calibrationLabel.text = "跟著節拍按 4 下\n第 4 拍是重音";
+            calibrationBeatLabel.text = "準備";
+            calibrationBeatLabel.color = new Color(.35f, .85f, 1f, 1f);
+            calibrationBeatLabel.rectTransform.localScale = Vector3.one;
+        }
+
+        void ReturnFromLatencyCalibration()
+        {
+            calibrationActive = false;
+            calibrationPanel?.gameObject.SetActive(false);
+        }
+
+        void RestartLatencyCalibration()
+        {
+            calibrationActive = false;
+            StartLatencyCalibration();
+        }
+
+        void UpdateLatencyCalibration()
+        {
+            if (!calibrationActive || calibrationPanel == null) return;
+            const double beatDuration = .6d;
+            var elapsed = AudioSettings.dspTime - calibrationStartDsp;
+            if (elapsed < 0)
+            {
+                calibrationBeatLabel.text = "準備";
+                return;
+            }
+
+            var beat = (int)Math.Floor(elapsed / beatDuration);
+            if (elapsed >= 10d)
+            {
+                calibrationActive = false;
+                calibrationLabel.text = "本輪未完成，按 TAP 重新開始";
+                calibrationBeatLabel.text = "再試一次";
+                calibrationBeatLabel.color = new Color(1f, .78f, .18f, 1f);
+                calibrationBeatLabel.rectTransform.localScale = Vector3.one;
+                return;
+            }
+            var beatInBar = beat % 4 + 1;
+            var accented = beatInBar == 4;
+            if (beat != calibrationLastPlayedBeat)
+            {
+                calibrationLastPlayedBeat = beat;
+                if (perfectSound != null) effects.PlayOneShot(perfectSound, accented ? .95f : .45f);
+            }
+            calibrationBeatLabel.text = accented ? "4  ●" : beatInBar.ToString();
+            calibrationBeatLabel.color = accented ? new Color(1f, .78f, .18f, 1f) : new Color(.35f, .85f, 1f, 1f);
+            calibrationBeatLabel.rectTransform.localScale = accented ? Vector3.one * 1.22f : Vector3.one;
+        }
+
+        void RegisterCalibrationTap()
+        {
+            if (!calibrationActive)
+            {
+                StartLatencyCalibration();
+                return;
+            }
+            const double beatDuration = .6d;
+            var elapsed = AudioSettings.dspTime - calibrationStartDsp;
+            if (elapsed < 0) return;
+            // Every tap is intentionally kept: calibration must be able to
+            // measure a large input delay instead of treating it as invalid.
+            var expectedBeat = calibrationOffsets.Count;
+            var offset = elapsed - expectedBeat * beatDuration;
+            calibrationOffsets.Add(offset);
+            calibrationLabel.text = $"已記錄 {calibrationOffsets.Count} / 4 拍";
+            if (calibrationOffsets.Count < 4) return;
+
+            inputOffsetSeconds = calibrationOffsets.Average();
+            PlayerPrefs.SetFloat("gugarythm-input-offset-seconds", (float)inputOffsetSeconds);
+            PlayerPrefs.Save();
+            calibrationActive = false;
+            calibrationLabel.text = $"完成：{inputOffsetSeconds * 1000d:+0;-0;0} ms";
+            calibrationBeatLabel.text = "已套用";
+            calibrationBeatLabel.color = new Color(.25f, 1f, .72f, 1f);
         }
 
         IEnumerator LoadMusic(byte[] bytes, string extension)
@@ -1444,6 +1539,7 @@ namespace Gugarythm
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
             BuildMenu(safeAreaRoot);
+            BuildLatencyCalibration(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
@@ -1483,6 +1579,7 @@ namespace Gugarythm
                 ReferenceWidth * safe.width / Screen.width,
                 CanvasHeight * safe.height / Screen.height);
             FitOverlayPanel(menuPanel, new Vector2(760, 570), logicalSafeSize);
+            FitOverlayPanel(calibrationPanel, new Vector2(500, 430), logicalSafeSize);
             FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
         }
@@ -1524,6 +1621,26 @@ namespace Gugarythm
             autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -36));
             startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -126), StartGame); startButton.interactable = false;
             MakeButton("匯入 GGR", menuPanel, new Vector2(0, -236), RequestImport);
+            MakeButton("自動調延遲", menuPanel, new Vector2(245, -126), StartLatencyCalibration, new Vector2(190, 54));
+        }
+
+        void BuildLatencyCalibration(RectTransform root)
+        {
+            calibrationPanel = Panel("Latency Calibration", root, new Color(.04f, .06f, .14f, .98f), new Vector2(500, 430), Vector2.zero);
+            Outline(calibrationPanel.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
+            var title = Label("自動調整延遲", calibrationPanel, 34);
+            title.rectTransform.sizeDelta = new Vector2(450, 62);
+            title.rectTransform.anchoredPosition = new Vector2(0, 155);
+            calibrationLabel = Label("跟著節拍按 4 下\n第 4 拍是重音", calibrationPanel, 24);
+            calibrationLabel.rectTransform.sizeDelta = new Vector2(440, 80);
+            calibrationLabel.rectTransform.anchoredPosition = new Vector2(0, 82);
+            calibrationBeatLabel = Label("準備", calibrationPanel, 72);
+            calibrationBeatLabel.rectTransform.sizeDelta = new Vector2(260, 100);
+            calibrationBeatLabel.rectTransform.anchoredPosition = new Vector2(0, -22);
+            MakeButton("TAP", calibrationPanel, new Vector2(0, -112), RegisterCalibrationTap, new Vector2(300, 70));
+            MakeButton("重新開始", calibrationPanel, new Vector2(-92, -178), RestartLatencyCalibration, new Vector2(170, 42));
+            MakeButton("返回", calibrationPanel, new Vector2(92, -178), ReturnFromLatencyCalibration, new Vector2(170, 42));
+            calibrationPanel.gameObject.SetActive(false);
         }
 
         void BuildResult(RectTransform root)
