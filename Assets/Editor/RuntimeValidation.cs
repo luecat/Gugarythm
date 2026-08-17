@@ -483,6 +483,10 @@ public static class RuntimeValidation
 
     static void ValidateJudgmentRules()
     {
+        ValidateChunithmJudgmentWindows();
+        ValidateTapJackProtection();
+        ValidateLatencyCalibration();
+
         var score = new ScoreState();
         score.Register(JudgmentGrade.Good);
         Require(score.Combo == 1 && Math.Abs(score.AccuracyPercent(1) - 50) < .0001, "Good must preserve combo and score 50%");
@@ -646,6 +650,134 @@ public static class RuntimeValidation
         ValidateVirtualSlider();
     }
 
+    static void ValidateChunithmJudgmentWindows()
+    {
+        var tap = Note(720, 1, 0);
+        Require(JudgmentEngine.GradeFor(tap, -2.0 / 60.0) == JudgmentGrade.Perfect, "Tap JC early edge");
+        Require(JudgmentEngine.GradeFor(tap, 2.0 / 60.0) == JudgmentGrade.Perfect, "Tap JC late edge");
+        Require(JudgmentEngine.GradeFor(tap, -2.0 / 60.0 - .0001) == JudgmentGrade.Great, "Tap Justice begins early");
+        Require(JudgmentEngine.GradeFor(tap, 2.0 / 60.0 + .0001) == JudgmentGrade.Great, "Tap Justice begins late");
+        Require(JudgmentEngine.GradeFor(tap, -4.0 / 60.0) == JudgmentGrade.Great, "Tap Justice edge early");
+        Require(JudgmentEngine.GradeFor(tap, 4.0 / 60.0) == JudgmentGrade.Great, "Tap Justice edge late");
+        Require(JudgmentEngine.GradeFor(tap, -4.0 / 60.0 - .0001) == JudgmentGrade.Good, "Tap Attack begins early");
+        Require(JudgmentEngine.GradeFor(tap, 4.0 / 60.0 + .0001) == JudgmentGrade.Good, "Tap Attack begins late");
+        Require(JudgmentEngine.GradeFor(tap, -6.0 / 60.0) == JudgmentGrade.Good, "Tap Attack edge early");
+        Require(JudgmentEngine.GradeFor(tap, 6.0 / 60.0) == JudgmentGrade.Good, "Tap Attack edge late");
+        Require(JudgmentEngine.GradeFor(tap, -6.0 / 60.0 - .0001) == JudgmentGrade.Pending, "Tap outside Attack early");
+        Require(JudgmentEngine.GradeFor(tap, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending, "Tap outside Attack late");
+
+        var critical = Note(721, 2, 0);
+        critical.Critical = true;
+        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0) == JudgmentGrade.Perfect, "Critical Tap early edge");
+        Require(JudgmentEngine.GradeFor(critical, 6.0 / 60.0) == JudgmentGrade.Perfect, "Critical Tap late edge");
+        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0 - .0001) == JudgmentGrade.Pending, "Critical Tap outside early");
+        Require(JudgmentEngine.GradeFor(critical, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending, "Critical Tap outside late");
+
+        var flick = Note(722, 3, 0);
+        flick.Kind = RuntimeNoteKind.Flick;
+        Require(JudgmentEngine.GradeFor(flick, -6.0 / 60.0) == JudgmentGrade.Perfect, "Flick early edge");
+        Require(JudgmentEngine.GradeFor(flick, 2.0 / 60.0) == JudgmentGrade.Perfect, "Flick JC edge");
+        Require(JudgmentEngine.GradeFor(flick, 4.0 / 60.0) == JudgmentGrade.Great, "Flick Justice edge");
+        Require(JudgmentEngine.GradeFor(flick, 6.0 / 60.0) == JudgmentGrade.Good, "Flick Attack edge");
+        Require(JudgmentEngine.GradeFor(flick, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending, "Flick outside Attack");
+    }
+
+    static void ValidateTapJackProtection()
+    {
+        var intervalFirst = Note(740, 3.000, 0);
+        var intervalMiddle = Note(741, 3.100, 0);
+        var intervalLast = Note(742, 3.200, 0);
+        var engine = new JudgmentEngine(new[] { intervalFirst, intervalMiddle, intervalLast }, new ScoreState());
+        engine.Process(3.040, new[] { new InputToken(6, RuntimeNoteKind.Tap, 3.040, 0) }, Array.Empty<ActiveContact>());
+        engine.Process(3.100, new[] { new InputToken(7, RuntimeNoteKind.Tap, 3.100, .6f) }, Array.Empty<ActiveContact>());
+        engine.Process(3.160, new[] { new InputToken(8, RuntimeNoteKind.Tap, 3.160, 0) }, Array.Empty<ActiveContact>());
+        Require(intervalFirst.Grade == JudgmentGrade.Great && intervalMiddle.Grade == JudgmentGrade.Perfect && intervalLast.Grade == JudgmentGrade.Great,
+            "Three-note midpoint intervals must consume the first, middle, and last Tap exactly once");
+
+        var left = Note(730, 1.000, 0); left.Size = 1;
+        var right = Note(731, 1.120, 4f); right.Size = 1;
+        engine = new JudgmentEngine(new[] { left, right }, new ScoreState());
+        engine.Process(1.075, new[] { new InputToken(1, RuntimeNoteKind.Tap, 1.075, 0) }, Array.Empty<ActiveContact>());
+        Require(left.Grade == JudgmentGrade.Good, "Lane forgiveness alone must not form a protection pair");
+
+        left = Note(744, 1.300, 0); left.Size = 1;
+        right = Note(745, 1.420, 3.1f); right.Size = 1;
+        engine = new JudgmentEngine(new[] { left, right }, new ScoreState());
+        engine.Process(1.375, new[] { new InputToken(8, RuntimeNoteKind.Tap, 1.375, 1.3f) }, Array.Empty<ActiveContact>());
+        Require(left.Grade == JudgmentGrade.Pending && right.Grade == JudgmentGrade.Great,
+            "Forgiveness overlap without authored span overlap must not protect the later Tap");
+
+        var edgeLeft = Note(732, 2.000, 0); edgeLeft.Size = 1;
+        var edgeRight = Note(733, 2.120, 2); edgeRight.Size = 1;
+        engine = new JudgmentEngine(new[] { edgeLeft, edgeRight }, new ScoreState());
+        engine.Process(2.055, new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.055, 2.5f) }, Array.Empty<ActiveContact>());
+        Require(edgeLeft.Grade == JudgmentGrade.Pending && edgeRight.Grade == JudgmentGrade.Great,
+            "Touching authored edges must not form a protection pair");
+
+        var wideEarly = Note(734, 3.000, 0); wideEarly.Size = 2;
+        var narrowLate = Note(735, 3.120, 2.5f); narrowLate.Size = 1;
+        engine = new JudgmentEngine(new[] { wideEarly, narrowLate }, new ScoreState());
+        engine.Process(3.055, new[] { new InputToken(3, RuntimeNoteKind.Tap, 3.055, 3.1f) }, Array.Empty<ActiveContact>());
+        Require(wideEarly.Grade == JudgmentGrade.Pending && narrowLate.Grade == JudgmentGrade.Pending,
+            "Justice before midpoint must be protected across the whole later Tap width");
+
+        wideEarly = Note(746, 3.500, 0); wideEarly.Size = 2;
+        narrowLate = Note(747, 3.660, 2.5f); narrowLate.Size = 1;
+        engine = new JudgmentEngine(new[] { wideEarly, narrowLate }, new ScoreState());
+        engine.Process(3.575, new[] { new InputToken(9, RuntimeNoteKind.Tap, 3.575, 3.1f) }, Array.Empty<ActiveContact>());
+        Require(wideEarly.Grade == JudgmentGrade.Pending && narrowLate.Grade == JudgmentGrade.Pending,
+            "Attack before midpoint must be protected across the whole later Tap width");
+
+        var jcEarly = Note(736, 4.000, 0); jcEarly.Size = 2;
+        var jcLate = Note(737, 4.040, 2.5f); jcLate.Size = 1;
+        engine = new JudgmentEngine(new[] { jcEarly, jcLate }, new ScoreState());
+        engine.Process(4.015, new[] { new InputToken(4, RuntimeNoteKind.Tap, 4.015, 3.1f) }, Array.Empty<ActiveContact>());
+        Require(jcEarly.Grade == JudgmentGrade.Pending && jcLate.Grade == JudgmentGrade.Perfect,
+            "JC outside the shared span must preserve the later Tap's full interval");
+
+        var sharedEarly = Note(738, 5.000, 0); sharedEarly.Size = 2;
+        var sharedLate = Note(739, 5.040, 2.5f); sharedLate.Size = 1;
+        engine = new JudgmentEngine(new[] { sharedEarly, sharedLate }, new ScoreState());
+        engine.Process(5.015, new[] { new InputToken(5, RuntimeNoteKind.Tap, 5.015, 1.75f) }, Array.Empty<ActiveContact>());
+        Require(sharedEarly.Grade == JudgmentGrade.Perfect && sharedLate.Grade == JudgmentGrade.Pending,
+            "JC inside the shared span must be trimmed at the midpoint");
+
+        var criticalEarly = Note(750, 6.000, 0); criticalEarly.Size = 2;
+        var criticalLate = Note(751, 6.120, 2.5f); criticalLate.Size = 1; criticalLate.Critical = true;
+        engine = new JudgmentEngine(new[] { criticalEarly, criticalLate }, new ScoreState());
+        engine.Process(6.055, new[] { new InputToken(10, RuntimeNoteKind.Tap, 6.055, 3.1f) }, Array.Empty<ActiveContact>());
+        Require(criticalEarly.Grade == JudgmentGrade.Pending && criticalLate.Grade == JudgmentGrade.Pending,
+            "Critical Tap's hidden Justice band must be protected across its whole width");
+
+        var flickEarly = Note(752, 7.000, 0); flickEarly.Size = 2;
+        var flickLate = Note(753, 7.120, 2.5f); flickLate.Size = 1; flickLate.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { flickEarly, flickLate }, new ScoreState());
+        engine.Process(7.055, new[] { new InputToken(11, RuntimeNoteKind.Flick, 7.055, 3.1f, 2.8f, 7.055) }, Array.Empty<ActiveContact>());
+        Require(flickEarly.Grade == JudgmentGrade.Pending && flickLate.Grade == JudgmentGrade.Pending,
+            "Early Flick's hidden Justice band must be protected across its whole width");
+
+        var resolvedEarly = Note(754, 8.000, 0); resolvedEarly.Size = 1;
+        var resolvedLate = Note(755, 8.120, 0); resolvedLate.Size = 1;
+        engine = new JudgmentEngine(new[] { resolvedEarly, resolvedLate }, new ScoreState());
+        engine.Process(8.000, new[] { new InputToken(12, RuntimeNoteKind.Tap, 8.000, 0) }, Array.Empty<ActiveContact>());
+        engine.Process(8.055, new[] { new InputToken(13, RuntimeNoteKind.Tap, 8.055, 0) }, Array.Empty<ActiveContact>());
+        Require(resolvedEarly.Grade == JudgmentGrade.Perfect && resolvedLate.Grade == JudgmentGrade.Pending,
+            "A resolved earlier Tap must keep protecting the later Tap's early Justice interval");
+    }
+
+    static void ValidateLatencyCalibration()
+    {
+        var measured = SonolusLandscapePrototype.CalibrationOffsetForElapsed(4.906077, .6);
+        Require(Math.Abs(measured - .106077) < .000001,
+            "Latency calibration must measure against the nearest beat instead of the first four beats");
+        Require(SonolusLandscapePrototype.SanitizeInputOffset(4.906077) == 0,
+            "An impossible persisted input offset must reset to zero");
+        Require(Math.Abs(SonolusLandscapePrototype.SanitizeInputOffset(.106077) - .106077) < .000001,
+            "A plausible persisted input offset must be preserved");
+        Require(SonolusLandscapePrototype.SanitizeInputOffset(.31) == 0,
+            "Manual input offset must not exceed the 300 ms safety limit");
+    }
+
     static void ValidateAutoPlay()
     {
         var tap = Note(500, 1, 0);
@@ -796,6 +928,31 @@ public static class RuntimeValidation
         rubEngine.Process(3.2, rubInputs, Array.Empty<ActiveContact>());
         Require(rubNotes.All(note => note.Grade == JudgmentGrade.Perfect),
             "A timed rub must match Tap notes in every crossed slider cell");
+
+        var forgivenessPriority = Note(13, 5, 0);
+        var priorityEngine = new JudgmentEngine(new[] { forgivenessPriority }, new ScoreState());
+        priorityEngine.Process(5.070,
+            new[]
+            {
+                new InputToken(10, RuntimeNoteKind.Tap, 5.000, 1.2f),
+                new InputToken(11, RuntimeNoteKind.Tap, 5.070, 0),
+            },
+            Array.Empty<ActiveContact>());
+        Require(forgivenessPriority.Grade == JudgmentGrade.Perfect,
+            "A better forgiveness candidate must not be discarded for a worse authored-span candidate in the same batch");
+
+        var multiFingerA = Note(14, 6, 0);
+        var multiFingerB = Note(15, 6, 0);
+        var multiFingerEngine = new JudgmentEngine(new[] { multiFingerA, multiFingerB }, new ScoreState());
+        multiFingerEngine.Process(6,
+            new[]
+            {
+                new InputToken(20, RuntimeNoteKind.Tap, 6, 0),
+                new InputToken(21, RuntimeNoteKind.Tap, 6, 1.2f),
+            },
+            Array.Empty<ActiveContact>());
+        Require(multiFingerA.Grade == JudgmentGrade.Perfect && multiFingerB.Grade == JudgmentGrade.Perfect,
+            "An authored candidate from one finger must not remove another finger's forgiveness candidate");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
