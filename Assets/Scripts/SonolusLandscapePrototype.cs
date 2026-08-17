@@ -1507,9 +1507,9 @@ namespace Gugarythm
             });
             MakeButton("−", menuPanel, new Vector2(-320, 42), () => AdjustScrollSpeed(-.1f), new Vector2(88, 58));
             MakeButton("＋", menuPanel, new Vector2(320, 42), () => AdjustScrollSpeed(.1f), new Vector2(88, 58));
-            autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -8));
-            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -98), StartGame); startButton.interactable = false;
-            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -208), RequestImport);
+            autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -36));
+            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -126), StartGame); startButton.interactable = false;
+            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -236), RequestImport);
         }
 
         void BuildResult(RectTransform root)
