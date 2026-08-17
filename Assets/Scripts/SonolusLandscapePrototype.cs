@@ -273,6 +273,12 @@ namespace Gugarythm
         {
             return canvasY >= -canvasHeight * .5f && canvasY <= JudgmentInputTop(canvasHeight);
         }
+        public static float InputLaneAtCanvasX(float canvasX) => Mathf.Lerp(
+            VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane,
+            Mathf.InverseLerp(-ReferenceWidth * .5f, ReferenceWidth * .5f, canvasX));
+        public static float CanvasXAtInputLane(float lane) => Mathf.Lerp(
+            -ReferenceWidth * .5f, ReferenceWidth * .5f,
+            Mathf.InverseLerp(VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane, lane));
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
@@ -960,9 +966,10 @@ namespace Gugarythm
                 lane = default;
                 return false;
             }
-            // Invert the same background-derived geometry used for rendering.
+            // The visible input region intentionally fills the canvas width:
+            // canvas left/right are the two outer virtual-slider lanes.
             var canvasX = (screenPosition.x / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
-            lane = ScreenXToLane(canvasX, 1f);
+            lane = InputLaneAtCanvasX(canvasX);
             return true;
         }
 
@@ -1686,8 +1693,8 @@ namespace Gugarythm
             {
                 var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
                 var rightLane = leftLane + JudgmentDebugCellWidth;
-                var left = X(leftLane, 1f);
-                var right = X(rightLane, 1f);
+                var left = CanvasXAtInputLane(leftLane);
+                var right = CanvasXAtInputLane(rightLane);
                 var segmentLeft = left + (cell == 0 ? 0f : 1f);
                 var segmentRight = right - (cell == JudgmentDebugCellCount - 1 ? 0f : 1f);
                 var segment = Panel($"Cell {cell + 1:00}", grid, new Color(.68f, .24f, 1f, .42f),

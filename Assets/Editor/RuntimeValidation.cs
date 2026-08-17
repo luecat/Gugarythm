@@ -1005,6 +1005,11 @@ public static class RuntimeValidation
                 !SonolusLandscapePrototype.IsJudgmentInputBand(-366.1f, 732f) &&
                 !SonolusLandscapePrototype.IsJudgmentInputBand(inputTop + .1f, 732f),
             "The input region must run from canvas bottom to three band heights above the judgment line");
+        Require(Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(-960f) + 6f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(960f) - 6f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(-6f) + 960f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(6f) - 960f) < .0001f,
+            "The visible input region must cover the canvas width through both outer lanes");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
