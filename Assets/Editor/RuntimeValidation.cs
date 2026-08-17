@@ -838,9 +838,11 @@ public static class RuntimeValidation
     {
         var slider = new VirtualSliderInput();
         var inputs = new List<InputToken>();
-        Require(VirtualSliderInput.CellCount == 24 && VirtualSliderInput.CellAt(-5.5f) == 1 &&
+        Require(VirtualSliderInput.CellCount == 24 && VirtualSliderInput.CellAt(VirtualSliderInput.MinimumLane) == 0 &&
+                VirtualSliderInput.CellAt(VirtualSliderInput.MaximumLane) == VirtualSliderInput.CellCount - 1 &&
+                VirtualSliderInput.CellAt(-5.5f) == 1 &&
                 Math.Abs(VirtualSliderInput.CellCenter(1) + 5.25f) < .0001,
-            "The 12-lane slider must split each lane into two 0.5-lane cells");
+            "The 12-lane slider must split each lane into two 0.5-lane cells including both outer edges");
         slider.Begin(1, 1, -5.5f, inputs);
         Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.25f) < .0001,
             "Initial slider contact must emit one Tap activation");
@@ -994,8 +996,15 @@ public static class RuntimeValidation
             "Judgment debug grid must expose one cell for every half lane");
         Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCellWidth - .5f) < .0001f,
             "Judgment debug grid cells must remain half a lane wide");
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugGridHeight(1080f) - 1080f) < .0001f,
-            "Judgment debug grid must cover the full canvas height");
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentInputBandHeight(732f) - 45f) < .0001f,
+            "Each judgment input band must match the 45-pixel judgement strip");
+        var inputTop = SonolusLandscapePrototype.JudgmentInputTop(732f);
+        Require(Math.Abs(inputTop - 1f) < .001f &&
+                SonolusLandscapePrototype.IsJudgmentInputBand(-366f, 732f) &&
+                SonolusLandscapePrototype.IsJudgmentInputBand(inputTop, 732f) &&
+                !SonolusLandscapePrototype.IsJudgmentInputBand(-366.1f, 732f) &&
+                !SonolusLandscapePrototype.IsJudgmentInputBand(inputTop + .1f, 732f),
+            "The input region must run from canvas bottom to three band heights above the judgment line");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()

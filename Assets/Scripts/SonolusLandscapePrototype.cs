@@ -262,7 +262,17 @@ namespace Gugarythm
         static float HitY => TopY - HitSourceY / LaneTextureHeight * CanvasHeight;
         public static int JudgmentDebugCellCount => VirtualSliderInput.CellCount;
         public static float JudgmentDebugCellWidth => VirtualSliderInput.CellWidth;
-        public static float JudgmentDebugGridHeight(float canvasHeight) => canvasHeight;
+        public static float JudgmentInputBandHeight(float canvasHeight) =>
+            JudgmentStripSourceHeight / LaneTextureHeight * canvasHeight;
+        public static float JudgmentInputTop(float canvasHeight)
+        {
+            var hitY = canvasHeight * .5f - HitSourceY / LaneTextureHeight * canvasHeight;
+            return hitY + 3f * JudgmentInputBandHeight(canvasHeight);
+        }
+        public static bool IsJudgmentInputBand(float canvasY, float canvasHeight)
+        {
+            return canvasY >= -canvasHeight * .5f && canvasY <= JudgmentInputTop(canvasHeight);
+        }
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
@@ -815,29 +825,38 @@ namespace Gugarythm
             foreach (var touch in Touch.activeTouches)
             {
                 var id = touch.touchId;
-                seen.Add(id);
                 var eventTime = InputEventSongTime(touch.time);
-                var lane = ScreenToLane(touch.screenPosition);
-                if (!touches.TryGetValue(id, out var memory))
+                if (!TryScreenToLane(touch.screenPosition, out var lane))
                 {
-                    memory = new TouchMemory { Lane = lane, EventTime = eventTime, StartTime = eventTime, LastInputRecordTime = double.NegativeInfinity };
-                    touches[id] = memory;
+                    if (touches.TryGetValue(id, out var outsideMemory))
+                    {
+                        virtualSlider.End(id, eventTime, outsideMemory.Lane, inputBatch);
+                        touches.Remove(id);
+                    }
+                    continue;
                 }
+                seen.Add(id);
+                var entering = !touches.TryGetValue(id, out var memory);
+                if (entering)
+                    memory = new TouchMemory { Lane = lane, EventTime = eventTime, StartTime = eventTime, LastInputRecordTime = double.NegativeInfinity };
                 if (touch.time > memory.LastInputRecordTime + 1e-7)
                 {
-                    if (touch.phase == UnityEngine.InputSystem.TouchPhase.Began)
+                    if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
+                    {
+                        if (!entering)
+                        {
+                            contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                                memory.Lane, lane, true));
+                            virtualSlider.End(id, eventTime, lane, inputBatch);
+                        }
+                    }
+                    else if (entering || touch.phase == UnityEngine.InputSystem.TouchPhase.Began)
                         virtualSlider.Begin(id, eventTime, lane, inputBatch);
                     else if (touch.phase == UnityEngine.InputSystem.TouchPhase.Moved && Vector2.SqrMagnitude(touch.screenPosition - memory.ScreenPosition) > .01f)
                     {
                         virtualSlider.Move(id, eventTime, lane, inputBatch);
                         contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
                             memory.Lane, lane, false));
-                    }
-                    else if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
-                    {
-                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
-                            memory.Lane, lane, true));
-                        virtualSlider.End(id, eventTime, lane, inputBatch);
                     }
                     memory.LastInputRecordTime = touch.time;
                     memory.EventTime = eventTime;
@@ -879,8 +898,16 @@ namespace Gugarythm
             if (!pressed && !beganThisFrame && !endedThisFrame) return;
 
             var position = mouse.position.ReadValue();
-            var lane = ScreenToLane(position);
             var eventTime = CurrentSongTime();
+            if (!TryScreenToLane(position, out var lane))
+            {
+                if (touches.TryGetValue(MouseContactId, out var outsideMemory))
+                {
+                    virtualSlider.End(MouseContactId, eventTime, outsideMemory.Lane, inputBatch);
+                    touches.Remove(MouseContactId);
+                }
+                return;
+            }
             var began = !touches.TryGetValue(MouseContactId, out var memory);
             if (endedThisFrame && !began)
             {
@@ -925,11 +952,18 @@ namespace Gugarythm
             return eventDsp - scheduledDsp - accumulatedPause - chart.BgmOffset;
         }
 
-        float ScreenToLane(Vector2 screenPosition)
+        bool TryScreenToLane(Vector2 screenPosition, out float lane)
         {
+            var canvasY = (screenPosition.y / Math.Max(1, Screen.height) - .5f) * CanvasHeight;
+            if (!IsJudgmentInputBand(canvasY, CanvasHeight))
+            {
+                lane = default;
+                return false;
+            }
             // Invert the same background-derived geometry used for rendering.
             var canvasX = (screenPosition.x / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
-            return ScreenXToLane(canvasX, 1f);
+            lane = ScreenXToLane(canvasX, 1f);
+            return true;
         }
 
         void OnJudgment(JudgmentEvent judgment)
@@ -1645,15 +1679,19 @@ namespace Gugarythm
         static void BuildJudgmentDebugGrid(RectTransform root)
         {
             var grid = Layer("Judgment Debug Grid", root);
-            var height = JudgmentDebugGridHeight(CanvasHeight);
+            var bottom = -CanvasHeight * .5f;
+            var top = JudgmentInputTop(CanvasHeight);
+            var height = top - bottom;
             for (var cell = 0; cell < JudgmentDebugCellCount; cell++)
             {
                 var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
                 var rightLane = leftLane + JudgmentDebugCellWidth;
                 var left = X(leftLane, 1f);
                 var right = X(rightLane, 1f);
+                var segmentLeft = left + (cell == 0 ? 0f : 1f);
+                var segmentRight = right - (cell == JudgmentDebugCellCount - 1 ? 0f : 1f);
                 var segment = Panel($"Cell {cell + 1:00}", grid, new Color(.68f, .24f, 1f, .42f),
-                    new Vector2(Mathf.Max(1f, right - left - 2f), height), new Vector2((left + right) * .5f, 0));
+                    new Vector2(Mathf.Max(1f, segmentRight - segmentLeft), height), new Vector2((segmentLeft + segmentRight) * .5f, (top + bottom) * .5f));
                 segment.GetComponent<Image>().raycastTarget = false;
             }
         }
