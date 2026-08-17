@@ -112,13 +112,33 @@ namespace Gugarythm
 
         readonly List<RuntimeNote> notes;
         readonly ScoreState score;
-        readonly Dictionary<int, RuntimeNote[]> tapProtectionNeighbors;
+        readonly Dictionary<int, TapProtectionPair[]> tapProtectionPairs;
+
+        readonly struct TapProtectionPair
+        {
+            public readonly RuntimeNote Earlier;
+            public readonly RuntimeNote Later;
+            public readonly double Boundary;
+            public readonly float SharedMinimum;
+            public readonly float SharedMaximum;
+
+            public TapProtectionPair(RuntimeNote earlier, RuntimeNote later, float sharedMinimum, float sharedMaximum)
+            {
+                Earlier = earlier;
+                Later = later;
+                Boundary = (earlier.Time + later.Time) * .5;
+                SharedMinimum = sharedMinimum;
+                SharedMaximum = sharedMaximum;
+            }
+
+            public bool ContainsSharedLane(float lane) => lane >= SharedMinimum && lane <= SharedMaximum;
+        }
 
         public JudgmentEngine(IEnumerable<RuntimeNote> notes, ScoreState score)
         {
             this.notes = notes.Where(note => note.Judged).OrderBy(note => note.Time).ThenBy(note => note.Index).ToList();
             this.score = score;
-            tapProtectionNeighbors = BuildTapProtectionNeighbors(this.notes);
+            tapProtectionPairs = BuildTapProtectionPairs(this.notes);
         }
 
         public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts)
@@ -299,59 +319,55 @@ namespace Gugarythm
         public static bool LaneMatches(RuntimeNote note, float lane) =>
             lane >= note.Lane - note.Size - LaneForgiveness && lane <= note.Lane + note.Size + LaneForgiveness;
 
-        static Dictionary<int, RuntimeNote[]> BuildTapProtectionNeighbors(IReadOnlyList<RuntimeNote> notes)
+        static Dictionary<int, TapProtectionPair[]> BuildTapProtectionPairs(IReadOnlyList<RuntimeNote> notes)
         {
-            var mutable = new Dictionary<int, List<RuntimeNote>>();
+            var mutable = new Dictionary<int, List<TapProtectionPair>>();
             for (var i = 0; i < notes.Count; i++)
             {
                 var earlier = notes[i];
-                if (earlier.Kind != RuntimeNoteKind.Tap) continue;
+                if (!IsTapProtectionKind(earlier.Kind)) continue;
                 for (var j = i + 1; j < notes.Count; j++)
                 {
                     var later = notes[j];
                     var distance = later.Time - earlier.Time;
                     if (distance >= OuterLateWindow(earlier) + OuterEarlyWindow(later)) break;
-                    if (distance <= 0 || later.Kind != RuntimeNoteKind.Tap || !HitGeometryOverlaps(earlier, later)) continue;
+                    if (distance <= 0 || !IsTapProtectionKind(later.Kind)) continue;
 
-                    AddProtectionNeighbor(mutable, earlier.Index, later);
-                    AddProtectionNeighbor(mutable, later.Index, earlier);
+                    var sharedMinimum = Math.Max(earlier.Lane - earlier.Size, later.Lane - later.Size);
+                    var sharedMaximum = Math.Min(earlier.Lane + earlier.Size, later.Lane + later.Size);
+                    if (sharedMinimum > sharedMaximum) continue;
+
+                    var pair = new TapProtectionPair(earlier, later, sharedMinimum, sharedMaximum);
+                    AddProtectionPair(mutable, earlier.Index, pair);
+                    AddProtectionPair(mutable, later.Index, pair);
                 }
             }
 
             return mutable.ToDictionary(pair => pair.Key, pair => pair.Value.ToArray());
         }
 
-        static void AddProtectionNeighbor(Dictionary<int, List<RuntimeNote>> map, int index, RuntimeNote neighbor)
-        {
-            if (!map.TryGetValue(index, out var neighbors))
-            {
-                neighbors = new List<RuntimeNote>();
-                map.Add(index, neighbors);
-            }
-            neighbors.Add(neighbor);
-        }
+        static bool IsTapProtectionKind(RuntimeNoteKind kind) => kind is RuntimeNoteKind.Tap or RuntimeNoteKind.Flick;
 
-        static bool HitGeometryOverlaps(RuntimeNote a, RuntimeNote b)
+        static void AddProtectionPair(Dictionary<int, List<TapProtectionPair>> map, int index, TapProtectionPair pair)
         {
-            var aRadius = a.Size + LaneForgiveness;
-            var bRadius = b.Size + LaneForgiveness;
-            return a.Lane - aRadius <= b.Lane + bRadius &&
-                   b.Lane - bRadius <= a.Lane + aRadius;
+            if (!map.TryGetValue(index, out var pairs))
+            {
+                pairs = new List<TapProtectionPair>();
+                map.Add(index, pairs);
+            }
+            pairs.Add(pair);
         }
 
         bool IsProtectedOuterWindow(RuntimeNote note, double eventTime, float inputLane)
         {
-            if (note.Kind != RuntimeNoteKind.Tap ||
-                !tapProtectionNeighbors.TryGetValue(note.Index, out var neighbors)) return false;
+            if (!IsTapProtectionKind(note.Kind) ||
+                !tapProtectionPairs.TryGetValue(note.Index, out var pairs)) return false;
 
-            foreach (var other in neighbors)
+            foreach (var pair in pairs)
             {
-                if (!LaneMatches(other, inputLane)) continue;
-                var earlier = note.Time < other.Time ? note : other;
-                var later = ReferenceEquals(earlier, note) ? other : note;
-                var boundary = (earlier.Time + later.Time) * .5;
-                if ((ReferenceEquals(note, earlier) && eventTime > boundary) ||
-                    (ReferenceEquals(note, later) && eventTime < boundary)) return true;
+                if (!pair.ContainsSharedLane(inputLane)) continue;
+                if ((ReferenceEquals(note, pair.Earlier) && eventTime > pair.Boundary) ||
+                    (ReferenceEquals(note, pair.Later) && eventTime < pair.Boundary)) return true;
             }
 
             return false;
