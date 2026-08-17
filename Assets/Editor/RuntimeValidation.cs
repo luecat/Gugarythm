@@ -485,6 +485,7 @@ public static class RuntimeValidation
     {
         ValidateChunithmJudgmentWindows();
         ValidateTapJackProtection();
+        Validate225BpmEighthProtection();
         ValidateLatencyCalibration();
 
         var score = new ScoreState();
@@ -648,6 +649,7 @@ public static class RuntimeValidation
             "A Flick Hold tail must resolve from a 0.35-lane Flick activation");
 
         ValidateVirtualSlider();
+        ValidateJudgmentDebugGrid();
     }
 
     static void ValidateChunithmJudgmentWindows()
@@ -968,6 +970,32 @@ public static class RuntimeValidation
             Array.Empty<ActiveContact>());
         Require(multiFingerA.Grade == JudgmentGrade.Perfect && multiFingerB.Grade == JudgmentGrade.Perfect,
             "An authored candidate from one finger must not remove another finger's forgiveness candidate");
+    }
+
+    static void Validate225BpmEighthProtection()
+    {
+        var eighthInterval = 60d / 225d / 2d;
+        foreach (var inputOffset in new[] { .040d, .090d })
+        {
+            var first = Note(780, 10, 0);
+            var second = Note(781, 10 + eighthInterval, 0);
+            var engine = new JudgmentEngine(new[] { first, second }, new ScoreState());
+            var results = engine.Process(10 + inputOffset,
+                new[] { new InputToken(1, RuntimeNoteKind.Tap, 10 + inputOffset, 0) }, Array.Empty<ActiveContact>());
+            Require(results.All(result => result.Grade != JudgmentGrade.Good) &&
+                    first.Grade != JudgmentGrade.Good && second.Grade != JudgmentGrade.Good,
+                "225 BPM eighth-note Tap protection must not produce Good inside the overlapping same-lane windows");
+        }
+    }
+
+    static void ValidateJudgmentDebugGrid()
+    {
+        Require(SonolusLandscapePrototype.JudgmentDebugCellCount == 24,
+            "Judgment debug grid must expose one cell for every half lane");
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCellWidth - .5f) < .0001f,
+            "Judgment debug grid cells must remain half a lane wide");
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugStripHeight(732f) - 45f) < .0001f,
+            "Judgment debug grid must align to the 45-pixel judgement strip");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
