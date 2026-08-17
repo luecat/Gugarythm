@@ -371,10 +371,14 @@ namespace Gugarythm
                 return absolute <= good ? JudgmentGrade.Good : JudgmentGrade.Pending;
             }
 
-            var perfectTap = note.Critical ? 3.3 / 60.0 : 2.5 / 60.0;
-            var greatTap = note.Critical ? 4.5 / 60.0 : 5.0 / 60.0;
+            if (note.Kind == RuntimeNoteKind.Tap && note.Critical)
+                return absolute <= 7.5 / 60.0
+                    ? JudgmentGrade.Perfect
+                    : JudgmentGrade.Pending;
+
+            const double perfectTap = 2.5 / 60.0;
             if (absolute <= perfectTap) return JudgmentGrade.Perfect;
-            if (absolute <= greatTap) return JudgmentGrade.Great;
+            if (absolute <= 5.0 / 60.0) return JudgmentGrade.Great;
             return absolute <= 7.5 / 60.0 ? JudgmentGrade.Good : JudgmentGrade.Pending;
         }
 

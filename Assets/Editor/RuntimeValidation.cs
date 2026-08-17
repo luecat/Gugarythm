@@ -700,6 +700,23 @@ public static class RuntimeValidation
             Array.Empty<ActiveContact>());
         Require(pendingB.Grade == JudgmentGrade.Pending,
             "Resolving the earlier Tap must not reopen the later Tap's protected early outer window");
+
+        var critical = Note(710, 6.000, 0); critical.Critical = true;
+        Require(JudgmentEngine.GradeFor(critical, -7.5 / 60.0) == JudgmentGrade.Perfect,
+            "Critical Tap must be Perfect at the early edge of its full valid window");
+        Require(JudgmentEngine.GradeFor(critical, 7.5 / 60.0) == JudgmentGrade.Perfect,
+            "Critical Tap must be Perfect at the late edge of its full valid window");
+        Require(JudgmentEngine.GradeFor(critical, 7.5 / 60.0 + .0001) == JudgmentGrade.Pending,
+            "Critical Tap outside its full valid window must remain Pending until Miss commits");
+
+        var criticalScore = new ScoreState();
+        var criticalMiss = Note(711, 7.000, 0); criticalMiss.Critical = true;
+        engine = new JudgmentEngine(new[] { criticalMiss }, criticalScore);
+        engine.Process(7.000 + 7.5 / 60.0 + JudgmentEngine.CommitGrace + .001,
+            Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        Require(criticalMiss.Grade == JudgmentGrade.Miss &&
+                criticalScore.Great == 0 && criticalScore.Good == 0,
+            "Critical Tap outside the valid window must commit Miss without Great or Good");
     }
 
     static void ValidateAutoPlay()
