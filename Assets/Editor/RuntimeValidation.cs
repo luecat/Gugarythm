@@ -483,6 +483,8 @@ public static class RuntimeValidation
 
     static void ValidateJudgmentRules()
     {
+        ValidateTapJackProtection();
+
         var score = new ScoreState();
         score.Register(JudgmentGrade.Good);
         Require(score.Combo == 1 && Math.Abs(score.AccuracyPercent(1) - 50) < .0001, "Good must preserve combo and score 50%");
@@ -644,6 +646,60 @@ public static class RuntimeValidation
             "A Flick Hold tail must resolve from a 0.35-lane Flick activation");
 
         ValidateVirtualSlider();
+    }
+
+    static void ValidateTapJackProtection()
+    {
+        // A resolved earlier neighbor still owns the early side of a later Great window.
+        var greatA = Note(700, 1.000, 0); greatA.Grade = JudgmentGrade.Perfect;
+        var greatB = Note(701, 1.130, 0);
+        var engine = new JudgmentEngine(new[] { greatA, greatB }, new ScoreState());
+        engine.Process(1.050,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, 1.050, 0) },
+            Array.Empty<ActiveContact>());
+        Require(greatB.Grade == JudgmentGrade.Pending,
+            "A resolved earlier Tap must protect the later Tap's early Great window before the midpoint");
+
+        // Perfect windows overlap: the midpoint can only resolve as Perfect.
+        var perfectA = Note(702, 2.000, 0);
+        var perfectB = Note(703, 2.060, 0);
+        engine = new JudgmentEngine(new[] { perfectA, perfectB }, new ScoreState());
+        engine.Process(2.030,
+            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.030, 0) },
+            Array.Empty<ActiveContact>());
+        var perfectResolved = new[] { perfectA, perfectB }.Count(note => note.Grade != JudgmentGrade.Pending);
+        Require(perfectResolved == 1 && new[] { perfectA, perfectB }.Single(note => note.Grade != JudgmentGrade.Pending).Grade == JudgmentGrade.Perfect,
+            "A midpoint input across overlapping Perfect windows must resolve exactly one note as Perfect");
+
+        // Partial-width overlap: only the shared lane receives protection.
+        var partialA = Note(704, 3.000, 0); partialA.Size = 1;
+        var partialB = Note(705, 3.160, 1.5f); partialB.Size = 1;
+        engine = new JudgmentEngine(new[] { partialA, partialB }, new ScoreState());
+        engine.Process(3.090,
+            new[] { new InputToken(3, RuntimeNoteKind.Tap, 3.090, -1f) },
+            Array.Empty<ActiveContact>());
+        Require(partialA.Grade == JudgmentGrade.Good && partialB.Grade == JudgmentGrade.Pending,
+            "A non-shared lane must retain the earlier Tap's original Good window");
+
+        partialA = Note(706, 4.000, 0); partialA.Size = 1;
+        partialB = Note(707, 4.160, 1.5f); partialB.Size = 1;
+        engine = new JudgmentEngine(new[] { partialA, partialB }, new ScoreState());
+        engine.Process(4.090,
+            new[] { new InputToken(4, RuntimeNoteKind.Tap, 4.090, 0) },
+            Array.Empty<ActiveContact>());
+        Require(partialA.Grade == JudgmentGrade.Pending &&
+                partialB.Grade is JudgmentGrade.Perfect or JudgmentGrade.Great,
+            "A shared lane must route the protected overlap to the later Tap after the midpoint");
+
+        // Protection is chart-defined and must not disappear after the earlier note resolves.
+        var resolvedA = Note(708, 5.000, 0); resolvedA.Grade = JudgmentGrade.Perfect;
+        var pendingB = Note(709, 5.160, 0);
+        engine = new JudgmentEngine(new[] { resolvedA, pendingB }, new ScoreState());
+        engine.Process(5.070,
+            new[] { new InputToken(5, RuntimeNoteKind.Tap, 5.070, 0) },
+            Array.Empty<ActiveContact>());
+        Require(pendingB.Grade == JudgmentGrade.Pending,
+            "Resolving the earlier Tap must not reopen the later Tap's protected early outer window");
     }
 
     static void ValidateAutoPlay()
