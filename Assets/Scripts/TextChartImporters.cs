@@ -121,6 +121,7 @@ namespace Gugarythm
         static void AddSlide(RuntimeChart chart, JObject slide, JArray connections, BeatTimeMap tempo, ref int index)
         {
             RuntimeNote previousPoint = null;
+            RuntimeNote holdRoot = null;
             var previousEase = 0;
             var sourceConnections = connections.OfType<JObject>().ToArray();
             var firstJudgedConnection = true;
@@ -134,38 +135,71 @@ namespace Gugarythm
                 var trace = judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase);
                 var judged = !judgeType.Equals("none", StringComparison.OrdinalIgnoreCase);
                 var terminal = connectionIndex == sourceConnections.Length - 1;
+                // USC middle connections encode independent path and particle
+                // roles: tick changes the path, attach is particle-only, and
+                // a tick carrying critical does both.
+                var isAttach = connectionType == "attach";
+                var isPathPoint = !isAttach;
+                var hasParticle = isAttach || connection["critical"] != null;
+                var lane = (float?)connection["lane"] ?? 0;
+                var size = Math.Max(.25f, (float?)connection["size"] ?? 1);
+                if (isAttach && previousPoint != null && TryFindNextPathConnection(sourceConnections, connectionIndex + 1, out var nextPath))
+                {
+                    var nextBeat = (double?)nextPath["beat"] ?? beat;
+                    var span = nextBeat - previousPoint.Beat;
+                    var progress = span <= 1e-7 ? 0f : (float)Math.Clamp((beat - previousPoint.Beat) / span, 0, 1);
+                    progress = EaseProgress(progress, previousEase);
+                    lane = previousPoint.Lane + (((float?)nextPath["lane"] ?? previousPoint.Lane) - previousPoint.Lane) * progress;
+                    size = previousPoint.Size + (Math.Max(.25f, (float?)nextPath["size"] ?? previousPoint.Size) - previousPoint.Size) * progress;
+                }
                 var kind = !judged ? RuntimeNoteKind.Sustain :
                     firstJudgedConnection ? RuntimeNoteKind.Tap :
                     terminal && flick ? RuntimeNoteKind.Flick : RuntimeNoteKind.Sustain;
                 if (judged) firstJudgedConnection = false;
-                var visibleMidpoint = (connectionType is "tick" or "attach") && connection["critical"] != null;
                 var archetype = trace ? "USC Trace Slide " + connectionType :
                     (connectionType is "tick" or "attach") ? "USC SlideTickNote" : "USC Slide " + connectionType;
                 if (flick) archetype += " Flick";
                 var point = new RuntimeNote
                 {
                     Index = index++, SourceId = "usc-slide:" + index, Archetype = archetype,
-                    Beat = beat, Time = tempo.SecondsAt(beat), Lane = (float?)connection["lane"] ?? 0,
-                    Size = Math.Max(.25f, (float?)connection["size"] ?? 1), Critical = (bool?)connection["critical"] ?? (bool?)slide["critical"] ?? false,
+                    Beat = beat, Time = tempo.SecondsAt(beat), Lane = lane,
+                    Size = size, Critical = (bool?)connection["critical"] ?? (bool?)slide["critical"] ?? false,
                     Direction = FlickDirection(connection["direction"]),
                     Kind = kind,
-                    Visible = judged || visibleMidpoint,
+                    Visible = judged || hasParticle,
                     Judged = judged,
                     HoldCheckpointSource = judged && !terminal && kind == RuntimeNoteKind.Sustain
                         ? HoldCheckpointSource.Mid : HoldCheckpointSource.None,
                     TimeScaleGroup = TimeScaleGroupKey(chart, connection["timeScaleGroup"]),
                 };
+                if (isAttach && holdRoot != null) point.HoldRootIndex = holdRoot.Index;
                 if (point.Visible) chart.Notes.Add(point);
-                if (previousPoint != null) chart.Connectors.Add(new RuntimeConnector
+                if (isPathPoint && previousPoint != null) chart.Connectors.Add(new RuntimeConnector
                 {
                     Start = previousPoint,
                     End = point,
                     Critical = point.Critical,
                     Ease = previousEase,
                 });
-                previousPoint = point;
-                previousEase = EaseType(connection["ease"]);
+                if (isPathPoint)
+                {
+                    previousPoint = point;
+                    holdRoot ??= point;
+                    previousEase = EaseType(connection["ease"]);
+                }
             }
+        }
+
+        static bool TryFindNextPathConnection(JObject[] connections, int startIndex, out JObject pathConnection)
+        {
+            for (var index = startIndex; index < connections.Length; index++)
+                if (!string.Equals((string)connections[index]["type"], "attach", StringComparison.OrdinalIgnoreCase))
+                {
+                    pathConnection = connections[index];
+                    return true;
+                }
+            pathConnection = null;
+            return false;
         }
 
         static void BuildTimeScaleGroups(RuntimeChart chart, JArray objects, BeatTimeMap tempo)
@@ -261,6 +295,14 @@ namespace Gugarythm
             if (string.Equals(value, "inout", StringComparison.OrdinalIgnoreCase)) return 3;
             return 0;
         }
+
+        static float EaseProgress(float progress, int ease) => ease switch
+        {
+            1 => 1f - (float)Math.Cos(progress * Math.PI * .5),
+            2 => (float)Math.Sin(progress * Math.PI * .5),
+            3 => progress < .5f ? 2 * progress * progress : 1 - (float)Math.Pow(-2 * progress + 2, 2) * .5f,
+            _ => progress,
+        };
 
         static int GuideColor(string value) => value?.ToLowerInvariant() switch
         {

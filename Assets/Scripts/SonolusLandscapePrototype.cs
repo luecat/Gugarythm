@@ -282,12 +282,17 @@ namespace Gugarythm
         }
         public static int JudgmentInputGridRow(float canvasY, float canvasHeight) =>
             Mathf.FloorToInt((canvasY - JudgmentInputGridStripTop(canvasHeight)) / JudgmentInputBandHeight(canvasHeight));
-        public static float InputLaneAtCanvasX(float canvasX) => Mathf.Lerp(
-            VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane,
-            Mathf.InverseLerp(-ReferenceWidth * .5f, ReferenceWidth * .5f, canvasX));
-        public static float CanvasXAtInputLane(float lane) => Mathf.Lerp(
+        public static float InputLaneAtCanvasX(float canvasX) => Mathf.Clamp(
+            ScreenXToLane(canvasX, 1f), VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane);
+        // Gray input feedback deliberately stops at the visible central track.
+        // Touches beyond its two outer divider lines remain on -6 or +6.
+        public static float CanvasXAtInputLane(float lane) => X(lane, 1f);
+        public static float JudgmentDebugCanvasXAtLane(float lane) => Mathf.Lerp(
             -ReferenceWidth * .5f, ReferenceWidth * .5f,
             Mathf.InverseLerp(VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane, lane));
+        public static float JudgmentLaneCanvasX(float lane) => X(lane, 1f);
+        public static bool ShouldContinueTrackedContact(bool wasTracking, bool isInInputBand) =>
+            wasTracking || isInInputBand;
         public static int InputLaneFeedbackCell(float lane) => VirtualSliderInput.CellAt(lane);
         // LaneWidth takes a half-width, while the visual feedback is authored
         // as one full button-width across the track.
@@ -834,17 +839,37 @@ namespace Gugarythm
             {
                 var id = touch.touchId;
                 var eventTime = InputEventSongTime(touch.time);
-                if (!TryScreenToLane(touch.screenPosition, out var lane, out var gridRow))
+                var isInInputBand = TryScreenToLane(touch.screenPosition, out var lane, out var gridRow);
+                var wasTracking = touches.TryGetValue(id, out var memory);
+                if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) continue;
+                if (!isInInputBand)
                 {
-                    if (touches.TryGetValue(id, out var outsideMemory))
+                    seen.Add(id);
+                    lane = InputLaneAtCanvasX(ScreenToCanvasX(touch.screenPosition.x));
+                    if (touch.time > memory.LastInputRecordTime + 1e-7)
                     {
-                        virtualSlider.End(id, eventTime, outsideMemory.Lane, inputBatch);
-                        touches.Remove(id);
+                        if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
+                        {
+                            contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                                memory.Lane, lane, true));
+                            virtualSlider.End(id, eventTime, lane, inputBatch);
+                            touches.Remove(id);
+                            continue;
+                        }
+                        if (Vector2.SqrMagnitude(touch.screenPosition - memory.ScreenPosition) > .01f)
+                            contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                                memory.Lane, lane, false));
+                        memory.LastInputRecordTime = touch.time;
+                        memory.EventTime = eventTime;
+                        memory.Lane = lane;
+                        memory.ScreenPosition = touch.screenPosition;
+                        touches[id] = memory;
                     }
+                    contacts.Add(new ActiveContact(id, lane, memory.StartTime));
                     continue;
                 }
                 seen.Add(id);
-                var entering = !touches.TryGetValue(id, out var memory);
+                var entering = !wasTracking;
                 if (entering)
                     memory = new TouchMemory { Lane = lane, GridRow = gridRow, EventTime = eventTime, StartTime = eventTime, LastInputRecordTime = double.NegativeInfinity };
                 if (touch.time > memory.LastInputRecordTime + 1e-7)
@@ -910,16 +935,36 @@ namespace Gugarythm
 
             var position = mouse.position.ReadValue();
             var eventTime = CurrentSongTime();
-            if (!TryScreenToLane(position, out var lane, out var gridRow))
+            var isInInputBand = TryScreenToLane(position, out var lane, out var gridRow);
+            var wasTracking = touches.TryGetValue(MouseContactId, out var memory);
+            if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) return;
+            if (!isInInputBand)
             {
-                if (touches.TryGetValue(MouseContactId, out var outsideMemory))
+                lane = InputLaneAtCanvasX(ScreenToCanvasX(position.x));
+                if (endedThisFrame)
                 {
-                    virtualSlider.End(MouseContactId, eventTime, outsideMemory.Lane, inputBatch);
+                    contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime, eventTime,
+                        memory.Lane, lane, true));
+                    virtualSlider.End(MouseContactId, eventTime, lane, inputBatch);
                     touches.Remove(MouseContactId);
+                    return;
+                }
+                if (Vector2.SqrMagnitude(position - memory.ScreenPosition) > .01f)
+                    contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime, eventTime,
+                        memory.Lane, lane, false));
+                memory.Lane = lane;
+                memory.ScreenPosition = position;
+                memory.EventTime = eventTime;
+                memory.LastInputRecordTime = eventTime;
+                touches[MouseContactId] = memory;
+                if (pressed)
+                {
+                    seen.Add(MouseContactId);
+                    contacts.Add(new ActiveContact(MouseContactId, lane, memory.StartTime));
                 }
                 return;
             }
-            var began = !touches.TryGetValue(MouseContactId, out var memory);
+            var began = !wasTracking;
             if (endedThisFrame && !began)
             {
                 contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime, eventTime,
@@ -968,6 +1013,7 @@ namespace Gugarythm
             InputEventDspTime(inputTime) - scheduledDsp - accumulatedPause - chart.BgmOffset;
 
         static float ScreenToCanvasY(float screenY) => (screenY / Math.Max(1, Screen.height) - .5f) * CanvasHeight;
+        static float ScreenToCanvasX(float screenX) => (screenX / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
 
         bool TryScreenToLane(Vector2 screenPosition, out float lane, out int gridRow)
         {
@@ -980,7 +1026,7 @@ namespace Gugarythm
             }
             // The visible input region intentionally fills the canvas width:
             // canvas left/right are the two outer virtual-slider lanes.
-            var canvasX = (screenPosition.x / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
+            var canvasX = ScreenToCanvasX(screenPosition.x);
             lane = InputLaneAtCanvasX(canvasX);
             gridRow = JudgmentInputGridRow(canvasY, CanvasHeight);
             return true;
@@ -1472,8 +1518,12 @@ namespace Gugarythm
         public static bool HasVisibleDecorationSegment(float leadingApproach, float trailingApproach) => trailingApproach < 1f;
         public static bool ShouldHideJudgedVisual(JudgmentGrade grade, float approachProgress) =>
             approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
+        public static bool ShouldHideAttachedHoldParticle(RuntimeNote note, float approachProgress) =>
+            note != null && IsHoldMid(note) && !note.Judged && note.HoldRootIndex >= 0 && approachProgress >= 1f;
         static bool ShouldHideHoldHead(RuntimeNote note, float approachProgress) =>
-            note.IsHoldTerminal
+            ShouldHideAttachedHoldParticle(note, approachProgress)
+                ? true
+                : note.IsHoldTerminal
                 ? approachProgress >= 1f
                 : note.HoldRootIndex == note.Index
                 ? approachProgress >= 1f
@@ -1542,6 +1592,14 @@ namespace Gugarythm
 
         static bool IsHoldMid(RuntimeNote note) =>
             (note.Archetype ?? string.Empty).EndsWith("SlideTickNote", StringComparison.OrdinalIgnoreCase);
+
+        /// <summary>
+        /// Both Trace notes and USC Slide tick/attach particles use the child
+        /// particle image. A hold mid deliberately has no parent body, so it
+        /// must not be gated by the Trace-only visibility rule.
+        /// </summary>
+        public static bool ShouldShowNoteParticle(RuntimeNote note, bool hasParticleTexture) =>
+            hasParticleTexture && note.Visible && (IsTrace(note) || IsHoldMid(note));
 
         static bool IsDamage(RuntimeNote note) =>
             (note.Archetype ?? string.Empty).IndexOf("Damage", StringComparison.OrdinalIgnoreCase) >= 0;
@@ -1727,7 +1785,7 @@ namespace Gugarythm
         void FlashInputLane(float lane)
         {
             var inputCell = InputLaneFeedbackCell(lane);
-            if (inputCell < 0) return;
+            if (inputCell < 0 || inputCell >= VirtualSliderInput.CellCount) return;
             var inputLeftLane = VirtualSliderInput.MinimumLane + inputCell * VirtualSliderInput.CellWidth;
             var inputRightLane = inputLeftLane + VirtualSliderInput.CellWidth;
             var inputLeft = CanvasXAtInputLane(inputLeftLane);
@@ -1779,8 +1837,8 @@ namespace Gugarythm
             {
                 var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
                 var rightLane = leftLane + JudgmentDebugCellWidth;
-                var left = CanvasXAtInputLane(leftLane);
-                var right = CanvasXAtInputLane(rightLane);
+                var left = JudgmentDebugCanvasXAtLane(leftLane);
+                var right = JudgmentDebugCanvasXAtLane(rightLane);
                 var segmentLeft = left + (cell == 0 ? 0f : 1f);
                 var segmentRight = right - (cell == JudgmentDebugCellCount - 1 ? 0f : 1f);
                 for (var row = firstRow; row <= lastRow; row++)
@@ -2020,7 +2078,7 @@ namespace Gugarythm
                     ? note.Critical ? holdMidYellowTexture : holdMidMintTexture
                     : traceKey == "yellow" ? traceDiamondYellowTexture :
                     traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture;
-                particle.gameObject.SetActive(trace && !holdMid && particle.texture != null);
+                particle.gameObject.SetActive(ShouldShowNoteParticle(note, particle.texture != null));
             }
             var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
             if (flickArrow != null)
