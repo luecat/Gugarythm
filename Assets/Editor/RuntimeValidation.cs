@@ -998,6 +998,10 @@ public static class RuntimeValidation
             "Judgment debug grid cells must remain half a lane wide");
         Require(Math.Abs(SonolusLandscapePrototype.JudgmentInputBandHeight(732f) - 45f) < .0001f,
             "Each judgment input band must match the 45-pixel judgement strip");
+        Require(SonolusLandscapePrototype.JudgmentInputGridRow(-111.5f, 732f) == 0 &&
+                SonolusLandscapePrototype.JudgmentInputGridRow(-111.6f, 732f) == -1 &&
+                SonolusLandscapePrototype.JudgmentInputGridRow(-156.6f, 732f) == -2,
+            "Virtual touch rows must advance once per purple judgment-strip height");
         var inputTop = SonolusLandscapePrototype.JudgmentInputTop(732f);
         Require(Math.Abs(inputTop - 1f) < .001f &&
                 SonolusLandscapePrototype.IsJudgmentInputBand(-366f, 732f) &&
@@ -1011,9 +1015,14 @@ public static class RuntimeValidation
                 Math.Abs(SonolusLandscapePrototype.CanvasXAtInputLane(6f) - 960f) < .0001f,
             "The visible input region must cover the canvas width through both outer lanes");
         Require(Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackDuration - .12f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackWidth - 1f) < .0001f &&
                 SonolusLandscapePrototype.InputLaneFeedbackCell(-6f) == 0 &&
-                SonolusLandscapePrototype.InputLaneFeedbackCell(6f) == VirtualSliderInput.CellCount - 1,
-            "Input feedback must flash every half lane including both outer lanes");
+                SonolusLandscapePrototype.InputLaneFeedbackCell(6f) == VirtualSliderInput.CellCount - 1 &&
+                SonolusLandscapePrototype.InputLaneFeedbackGridCell(0) == 0 &&
+                SonolusLandscapePrototype.InputLaneFeedbackGridCell(1) == 0 &&
+                SonolusLandscapePrototype.InputLaneFeedbackGridCell(2) == 1 &&
+                SonolusLandscapePrototype.InputLaneFeedbackGridCell(VirtualSliderInput.CellCount - 1) == 11,
+            "Input feedback must flash one perspective-aligned button grid for each pair of input half-cells");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
