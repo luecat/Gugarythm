@@ -260,6 +260,10 @@ namespace Gugarythm
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
         static float TopY => CanvasHeight * .5f;
         static float HitY => TopY - HitSourceY / LaneTextureHeight * CanvasHeight;
+        public static int JudgmentDebugCellCount => VirtualSliderInput.CellCount;
+        public static float JudgmentDebugCellWidth => VirtualSliderInput.CellWidth;
+        public static float JudgmentDebugStripHeight(float canvasHeight) =>
+            JudgmentStripSourceHeight / LaneTextureHeight * canvasHeight;
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
@@ -1622,6 +1626,9 @@ namespace Gugarythm
             }
             var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            BuildJudgmentDebugGrid(stage);
+#endif
             guideLayer = Layer("Decoration Guides", stage);
             connectorLayer = Layer("Hold Connectors", stage);
             simLineLayer = Layer("Synchronization Lines", stage);
@@ -1634,6 +1641,24 @@ namespace Gugarythm
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
         }
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        static void BuildJudgmentDebugGrid(RectTransform root)
+        {
+            var grid = Layer("Judgment Debug Grid", root);
+            var height = JudgmentDebugStripHeight(CanvasHeight);
+            for (var cell = 0; cell < JudgmentDebugCellCount; cell++)
+            {
+                var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
+                var rightLane = leftLane + JudgmentDebugCellWidth;
+                var left = X(leftLane, 1f);
+                var right = X(rightLane, 1f);
+                var segment = Panel($"Cell {cell + 1:00}", grid, new Color(.68f, .24f, 1f, .42f),
+                    new Vector2(Mathf.Max(1f, right - left - 2f), height), new Vector2((left + right) * .5f, HitY));
+                segment.GetComponent<Image>().raycastTarget = false;
+            }
+        }
+#endif
 
         void BuildHud(RectTransform root, RectTransform canvasRoot)
         {
