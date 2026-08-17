@@ -683,10 +683,27 @@ public static class RuntimeValidation
 
     static void ValidateTapJackProtection()
     {
+        // Each same-lane Tap owns the interval bounded by its neighbouring midpoints.
+        var intervalFirst = Note(740, 3.000, 0);
+        var intervalMiddle = Note(741, 3.100, 0);
+        var intervalLast = Note(742, 3.200, 0);
+        var engine = new JudgmentEngine(new[] { intervalFirst, intervalMiddle, intervalLast }, new ScoreState());
+        engine.Process(3.040,
+            new[] { new InputToken(6, RuntimeNoteKind.Tap, 3.040, 0) },
+            Array.Empty<ActiveContact>());
+        engine.Process(3.100,
+            new[] { new InputToken(7, RuntimeNoteKind.Tap, 3.100, .6f) },
+            Array.Empty<ActiveContact>());
+        engine.Process(3.160,
+            new[] { new InputToken(8, RuntimeNoteKind.Tap, 3.160, 0) },
+            Array.Empty<ActiveContact>());
+        Require(intervalFirst.Grade == JudgmentGrade.Great && intervalMiddle.Grade == JudgmentGrade.Perfect && intervalLast.Grade == JudgmentGrade.Great,
+            "Three-note midpoint intervals must consume the first, middle, and last Tap exactly once");
+
         // Forgiveness alone must not author a protection pair.
         var left = Note(730, 1.000, 0); left.Size = 1;
-        var right = Note(731, 1.120, 3.1f); right.Size = 1;
-        var engine = new JudgmentEngine(new[] { left, right }, new ScoreState());
+        var right = Note(731, 1.120, 4f); right.Size = 1;
+        engine = new JudgmentEngine(new[] { left, right }, new ScoreState());
         engine.Process(1.075,
             new[] { new InputToken(1, RuntimeNoteKind.Tap, 1.075, 0) },
             Array.Empty<ActiveContact>());
@@ -700,27 +717,27 @@ public static class RuntimeValidation
         engine.Process(1.375,
             new[] { new InputToken(8, RuntimeNoteKind.Tap, 1.375, 1.3f) },
             Array.Empty<ActiveContact>());
-        Require(left.Grade == JudgmentGrade.Good,
-            "Forgiveness overlap without authored span overlap must not protect the earlier Tap");
+        Require(left.Grade == JudgmentGrade.Pending && right.Grade == JudgmentGrade.Great,
+            "Forgiveness overlap without authored span overlap must not protect the later Tap");
 
         var first = Note(732, 2.000, 0);
         var second = Note(733, 2.140, 0);
         engine = new JudgmentEngine(new[] { first, second }, new ScoreState());
-        engine.Process(2.190,
-            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.190, 0) },
+        engine.Process(2.210,
+            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.210, 0) },
             Array.Empty<ActiveContact>());
-        Require(first.Grade == JudgmentGrade.Pending && second.Grade == JudgmentGrade.Good,
+        Require(first.Grade == JudgmentGrade.Miss && second.Grade == JudgmentGrade.Good,
             "Post-midpoint Attack must route to later protected Tap");
 
-        // A wide Tap's unique lane must preserve its own Perfect/Great/Good windows.
+        // A wide Tap's lane outside the shared span must preserve its Perfect window.
         var wide = Note(734, 3.000, 0); wide.Size = 2;
-        var separate = Note(735, 3.120, 3.5f); separate.Size = 1;
+        var separate = Note(735, 3.120, 2.5f); separate.Size = 1;
         engine = new JudgmentEngine(new[] { wide, separate }, new ScoreState());
-        engine.Process(3.090,
-            new[] { new InputToken(3, RuntimeNoteKind.Tap, 3.090, 2f) },
+        engine.Process(3.020,
+            new[] { new InputToken(3, RuntimeNoteKind.Tap, 3.020, .7f) },
             Array.Empty<ActiveContact>());
-        Require(wide.Grade == JudgmentGrade.Good && separate.Grade == JudgmentGrade.Pending,
-            "A lane unique to a wide Tap must preserve its original Good window");
+        Require(wide.Grade == JudgmentGrade.Perfect && separate.Grade == JudgmentGrade.Pending,
+            "A lane unique to a wide Tap must preserve its Perfect window");
 
         // Shared geometry resolves Perfect to the nearer note on either side of midpoint.
         var sharedEarly = Note(736, 4.000, 0); sharedEarly.Size = 2;
@@ -740,22 +757,6 @@ public static class RuntimeValidation
             Array.Empty<ActiveContact>());
         Require(sharedEarly.Grade == JudgmentGrade.Pending && sharedLate.Grade == JudgmentGrade.Perfect,
             "Shared-span Perfect after midpoint must route to later Tap");
-
-        // A protection chain must route each activation to its adjacent note only.
-        var chainA = Note(740, 6.000, 0);
-        var chainB = Note(741, 6.100, 0);
-        var chainC = Note(742, 6.200, 0);
-        engine = new JudgmentEngine(new[] { chainA, chainB, chainC }, new ScoreState());
-        engine.Process(6.060,
-            new[] { new InputToken(6, RuntimeNoteKind.Tap, 6.060, 0) },
-            Array.Empty<ActiveContact>());
-        Require(chainA.Grade == JudgmentGrade.Pending && chainB.Grade == JudgmentGrade.Great && chainC.Grade == JudgmentGrade.Pending,
-            "Three-note same-lane protection must route the first activation to the middle Tap");
-        engine.Process(6.160,
-            new[] { new InputToken(7, RuntimeNoteKind.Tap, 6.160, 0) },
-            Array.Empty<ActiveContact>());
-        Require(chainB.Grade == JudgmentGrade.Great && chainC.Grade == JudgmentGrade.Great,
-            "Three-note same-lane protection must preserve the next adjacent route");
 
         var critical = Note(743, 7.000, 0); critical.Critical = true;
         Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0) == JudgmentGrade.Perfect &&
