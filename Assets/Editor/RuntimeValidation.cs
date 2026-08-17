@@ -483,6 +483,7 @@ public static class RuntimeValidation
 
     static void ValidateJudgmentRules()
     {
+        ValidateChunithmJudgmentWindows();
         ValidateTapJackProtection();
 
         var score = new ScoreState();
@@ -648,6 +649,38 @@ public static class RuntimeValidation
         ValidateVirtualSlider();
     }
 
+    static void ValidateChunithmJudgmentWindows()
+    {
+        var tap = Note(720, 1, 0);
+        Require(JudgmentEngine.GradeFor(tap, -2.0 / 60.0) == JudgmentGrade.Perfect, "Tap JC early edge");
+        Require(JudgmentEngine.GradeFor(tap, 2.0 / 60.0) == JudgmentGrade.Perfect, "Tap JC late edge");
+        Require(JudgmentEngine.GradeFor(tap, -2.0 / 60.0 - .0001) == JudgmentGrade.Great, "Tap Justice begins early");
+        Require(JudgmentEngine.GradeFor(tap, 2.0 / 60.0 + .0001) == JudgmentGrade.Great, "Tap Justice begins late");
+        Require(JudgmentEngine.GradeFor(tap, -4.0 / 60.0) == JudgmentGrade.Great, "Tap Justice edge early");
+        Require(JudgmentEngine.GradeFor(tap, 4.0 / 60.0) == JudgmentGrade.Great, "Tap Justice edge late");
+        Require(JudgmentEngine.GradeFor(tap, -4.0 / 60.0 - .0001) == JudgmentGrade.Good, "Tap Attack begins early");
+        Require(JudgmentEngine.GradeFor(tap, 4.0 / 60.0 + .0001) == JudgmentGrade.Good, "Tap Attack begins late");
+        Require(JudgmentEngine.GradeFor(tap, -6.0 / 60.0) == JudgmentGrade.Good, "Tap Attack edge early");
+        Require(JudgmentEngine.GradeFor(tap, 6.0 / 60.0) == JudgmentGrade.Good, "Tap Attack edge late");
+        Require(JudgmentEngine.GradeFor(tap, -6.0 / 60.0 - .0001) == JudgmentGrade.Pending, "Tap outside Attack early");
+        Require(JudgmentEngine.GradeFor(tap, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending, "Tap outside Attack late");
+
+        var critical = Note(721, 2, 0);
+        critical.Critical = true;
+        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0) == JudgmentGrade.Perfect, "Critical Tap early edge");
+        Require(JudgmentEngine.GradeFor(critical, 6.0 / 60.0) == JudgmentGrade.Perfect, "Critical Tap late edge");
+        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0 - .0001) == JudgmentGrade.Pending, "Critical Tap outside early");
+        Require(JudgmentEngine.GradeFor(critical, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending, "Critical Tap outside late");
+
+        var flick = Note(722, 3, 0);
+        flick.Kind = RuntimeNoteKind.Flick;
+        Require(JudgmentEngine.GradeFor(flick, -6.0 / 60.0) == JudgmentGrade.Perfect, "Flick early edge");
+        Require(JudgmentEngine.GradeFor(flick, 2.0 / 60.0) == JudgmentGrade.Perfect, "Flick JC edge");
+        Require(JudgmentEngine.GradeFor(flick, 4.0 / 60.0) == JudgmentGrade.Great, "Flick Justice edge");
+        Require(JudgmentEngine.GradeFor(flick, 6.0 / 60.0) == JudgmentGrade.Good, "Flick Attack edge");
+        Require(JudgmentEngine.GradeFor(flick, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending, "Flick outside Attack");
+    }
+
     static void ValidateTapJackProtection()
     {
         // A resolved earlier neighbor still owns the early side of a later Great window.
@@ -688,7 +721,7 @@ public static class RuntimeValidation
             new[] { new InputToken(4, RuntimeNoteKind.Tap, 4.090, 0) },
             Array.Empty<ActiveContact>());
         Require(partialA.Grade == JudgmentGrade.Pending &&
-                partialB.Grade is JudgmentGrade.Perfect or JudgmentGrade.Great,
+                partialB.Grade != JudgmentGrade.Pending,
             "A shared lane must route the protected overlap to the later Tap after the midpoint");
 
         // Protection is chart-defined and must not disappear after the earlier note resolves.
@@ -702,17 +735,17 @@ public static class RuntimeValidation
             "Resolving the earlier Tap must not reopen the later Tap's protected early outer window");
 
         var critical = Note(710, 6.000, 0); critical.Critical = true;
-        Require(JudgmentEngine.GradeFor(critical, -7.5 / 60.0) == JudgmentGrade.Perfect,
+        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0) == JudgmentGrade.Perfect,
             "Critical Tap must be Perfect at the early edge of its full valid window");
-        Require(JudgmentEngine.GradeFor(critical, 7.5 / 60.0) == JudgmentGrade.Perfect,
+        Require(JudgmentEngine.GradeFor(critical, 6.0 / 60.0) == JudgmentGrade.Perfect,
             "Critical Tap must be Perfect at the late edge of its full valid window");
-        Require(JudgmentEngine.GradeFor(critical, 7.5 / 60.0 + .0001) == JudgmentGrade.Pending,
+        Require(JudgmentEngine.GradeFor(critical, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending,
             "Critical Tap outside its full valid window must remain Pending until Miss commits");
 
         var criticalScore = new ScoreState();
         var criticalMiss = Note(711, 7.000, 0); criticalMiss.Critical = true;
         engine = new JudgmentEngine(new[] { criticalMiss }, criticalScore);
-        engine.Process(7.000 + 7.5 / 60.0 + JudgmentEngine.CommitGrace + .001,
+        engine.Process(7.000 + 6.0 / 60.0 + JudgmentEngine.CommitGrace + .001,
             Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
         Require(criticalMiss.Grade == JudgmentGrade.Miss &&
                 criticalScore.Great == 0 && criticalScore.Good == 0,

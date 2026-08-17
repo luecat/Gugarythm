@@ -361,29 +361,29 @@ namespace Gugarythm
         {
             var early = delta < 0;
             var absolute = Math.Abs(delta);
+            const double jc = 2.0 / 60.0;
+            const double justice = 4.0 / 60.0;
+            const double attack = 6.0 / 60.0;
             if (note.Kind == RuntimeNoteKind.Flick)
             {
-                var perfect = note.Critical ? 3.5 / 60.0 : 2.5 / 60.0;
-                if (absolute <= perfect) return JudgmentGrade.Perfect;
-                var great = early ? 6.5 / 60.0 : 7.5 / 60.0;
-                if (absolute <= great) return JudgmentGrade.Great;
-                var good = early ? 7.5 / 60.0 : 8.5 / 60.0;
-                return absolute <= good ? JudgmentGrade.Good : JudgmentGrade.Pending;
+                if (early && absolute <= attack) return JudgmentGrade.Perfect;
+                if (absolute <= jc) return JudgmentGrade.Perfect;
+                if (absolute <= justice) return JudgmentGrade.Great;
+                return absolute <= attack ? JudgmentGrade.Good : JudgmentGrade.Pending;
             }
 
             if (note.Kind == RuntimeNoteKind.Tap && note.Critical)
-                return absolute <= 7.5 / 60.0
+                return absolute <= attack
                     ? JudgmentGrade.Perfect
                     : JudgmentGrade.Pending;
 
-            const double perfectTap = 2.5 / 60.0;
-            if (absolute <= perfectTap) return JudgmentGrade.Perfect;
-            if (absolute <= 5.0 / 60.0) return JudgmentGrade.Great;
-            return absolute <= 7.5 / 60.0 ? JudgmentGrade.Good : JudgmentGrade.Pending;
+            if (absolute <= jc) return JudgmentGrade.Perfect;
+            if (absolute <= justice) return JudgmentGrade.Great;
+            return absolute <= attack ? JudgmentGrade.Good : JudgmentGrade.Pending;
         }
 
-        static double OuterLateWindow(RuntimeNote note) => note.Kind == RuntimeNoteKind.Flick ? 8.5 / 60.0 : 7.5 / 60.0;
-        static double OuterEarlyWindow(RuntimeNote note) => 7.5 / 60.0;
+        static double OuterLateWindow(RuntimeNote note) => 6.0 / 60.0;
+        static double OuterEarlyWindow(RuntimeNote note) => 6.0 / 60.0;
         static int GradeRank(JudgmentGrade grade) => grade switch { JudgmentGrade.Perfect => 0, JudgmentGrade.Great => 1, JudgmentGrade.Good => 2, _ => 3 };
 
         void Register(RuntimeNote note, JudgmentGrade grade, double delta, List<JudgmentEvent> output)
