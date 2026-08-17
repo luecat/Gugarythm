@@ -13,8 +13,6 @@ namespace Gugarythm
         public const int CellCount = 12;
         public const float MinimumLane = -6f;
         public const float MaximumLane = 6f;
-        public const double RearmSeconds = .025;
-        public const float DepartureMargin = .15f;
         public const float FlickActivationDistance = .35f;
 
         readonly Dictionary<int, ContactState> contacts = new();
@@ -38,8 +36,6 @@ namespace Gugarythm
 
             var previousLane = state.Lane;
             var previousTime = state.Time;
-            UpdateDepartures(state, previousLane, lane);
-
             var direction = Math.Sign(lane - previousLane);
             var previousCell = CellAt(previousLane);
             var currentCell = CellAt(lane);
@@ -99,24 +95,7 @@ namespace Gugarythm
         static void EmitCell(int fingerId, int cell, double time, ContactState state, ICollection<InputToken> output)
         {
             if (cell < 0 || output == null) return;
-            if (time - state.LastActivation[cell] < RearmSeconds && !state.DepartedSinceActivation[cell]) return;
-            state.LastActivation[cell] = time;
-            state.DepartedSinceActivation[cell] = false;
             output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, CellCenter(cell)));
-        }
-
-        static void UpdateDepartures(ContactState state, float startLane, float endLane)
-        {
-            var minimum = Math.Min(startLane, endLane);
-            var maximum = Math.Max(startLane, endLane);
-            for (var cell = 0; cell < CellCount; cell++)
-            {
-                if (double.IsNegativeInfinity(state.LastActivation[cell]) || state.DepartedSinceActivation[cell]) continue;
-                var lowerDeparture = MinimumLane + cell - DepartureMargin;
-                var upperDeparture = MinimumLane + cell + 1 + DepartureMargin;
-                if (minimum <= lowerDeparture || maximum >= upperDeparture)
-                    state.DepartedSinceActivation[cell] = true;
-            }
         }
 
         static void EmitFlicks(int fingerId, float lane, double time, ContactState state, ICollection<InputToken> output)
@@ -148,8 +127,6 @@ namespace Gugarythm
         {
             public float Lane;
             public double Time;
-            public readonly double[] LastActivation = new double[CellCount];
-            public readonly bool[] DepartedSinceActivation = new bool[CellCount];
             public float FlickAnchorLane;
             public double FlickAnchorTime;
 
@@ -159,7 +136,6 @@ namespace Gugarythm
                 Time = time;
                 FlickAnchorLane = lane;
                 FlickAnchorTime = time;
-                for (var i = 0; i < LastActivation.Length; i++) LastActivation[i] = double.NegativeInfinity;
             }
         }
     }
