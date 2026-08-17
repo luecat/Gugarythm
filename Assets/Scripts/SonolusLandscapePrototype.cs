@@ -188,7 +188,6 @@ namespace Gugarythm
         Texture2D traceDiamondMintTexture;
         Texture2D traceDiamondPinkTexture;
         Texture2D traceDiamondYellowTexture;
-        Texture2D pixelParticleAtlas;
         AudioClip perfectSound;
         AudioClip greatSound;
         AudioClip goodSound;
@@ -767,7 +766,7 @@ namespace Gugarythm
             PlayJudgmentSound(judgment);
             if (judgment.Grade != JudgmentGrade.Miss)
             {
-                SpawnHitParticle(judgment.Note, judgment.Note.Critical ? "yellow" : IsTrace(judgment.Note) || judgment.Note.Kind == RuntimeNoteKind.Sustain ? "green" : judgment.Note.Kind == RuntimeNoteKind.Flick ? "pink" : "blue");
+                SpawnHitParticle(judgment.Note);
             }
         }
 
@@ -1371,7 +1370,6 @@ namespace Gugarythm
             traceDiamondMintTexture = Resources.Load<Texture2D>("NeonRhythm/official/particles/trace-diamond-mint");
             traceDiamondPinkTexture = Resources.Load<Texture2D>("NeonRhythm/official/particles/trace-diamond-pink");
             traceDiamondYellowTexture = Resources.Load<Texture2D>("NeonRhythm/official/particles/trace-diamond-yellow");
-            pixelParticleAtlas = Resources.Load<Texture2D>("NeonRhythm/package/particles/pixel-atlas");
             perfectSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/perfect");
             greatSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/great");
             goodSound = Resources.Load<AudioClip>("NeonRhythm/package/audio/good");
@@ -1722,70 +1720,37 @@ namespace Gugarythm
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
         void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
 
-        void SpawnHitParticle(RuntimeNote note, string color)
+        void SpawnHitParticle(RuntimeNote note)
         {
-            var tint = color switch
-            {
-                "yellow" => new Color(1f, .82f, .12f, .9f),
-                "pink" => new Color(1f, .2f, .67f, .86f),
-                "green" => new Color(.12f, 1f, .58f, .84f),
-                _ => new Color(.28f, .82f, 1f, .84f),
-            };
+            var tint = ResolveHitEffectColor(note);
             var x = X(note.Lane, 1f);
-            var impactWidth = Mathf.Clamp(LaneWidth(note.Lane, note.Size, 1f), 48f, 96f);
-            var particleRoot = new GameObject("Pixel Judgment Burst", typeof(RectTransform)).GetComponent<RectTransform>();
-            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(impactWidth * 2.2f, impactWidth * .8f); particleRoot.anchoredPosition = new Vector2(x, HitY);
+            var noteWidth = Mathf.Clamp(LaneWidth(note.Lane, note.Size, 1f), 64f, 154f);
+            var particleRoot = new GameObject("Judgment Pulse", typeof(RectTransform), typeof(CanvasRenderer), typeof(HitBurstGraphic)).GetComponent<RectTransform>();
+            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(310, 150); particleRoot.anchoredPosition = new Vector2(x, HitY);
             particleRoot.SetAsLastSibling();
-            RawImage core = null;
-            RawImage ring = null;
-            if (pixelParticleAtlas != null)
-            {
-                var sprite = color switch { "yellow" => 4, "pink" => 5, "green" => 2, _ => 3 };
-                core = RawPanel("Pixel Core", particleRoot, pixelParticleAtlas, Color.white, new Vector2(52, 52), Vector2.zero).GetComponent<RawImage>();
-                ring = RawPanel("Pixel Ring", particleRoot, pixelParticleAtlas, Color.white, new Vector2(62, 62), Vector2.zero).GetComponent<RawImage>();
-                core.uvRect = PixelParticleUv(sprite);
-                ring.uvRect = PixelParticleUv(sprite + 7);
-                core.raycastTarget = false;
-                ring.raycastTarget = false;
-            }
-            StartCoroutine(AnimateHitEffect(particleRoot, core, ring, tint, impactWidth));
+            var burst = particleRoot.GetComponent<HitBurstGraphic>();
+            burst.raycastTarget = false;
+            burst.color = tint;
+            burst.upperWidth = noteWidth;
+            burst.SetProgress(0);
+            StartCoroutine(AnimateHitEffect(particleRoot, burst));
         }
 
-        static Rect PixelParticleUv(int sprite)
+        public static Color ResolveHitEffectColor(RuntimeNote note)
         {
-            var position = sprite switch
-            {
-                0 => new Vector2(391, 261), 1 => new Vector2(1, 1), 2 => new Vector2(131, 1),
-                3 => new Vector2(261, 261), 4 => new Vector2(1, 521), 5 => new Vector2(651, 1),
-                6 => new Vector2(521, 131), 7 => new Vector2(1, 261), 8 => new Vector2(261, 391),
-                9 => new Vector2(131, 521), 10 => new Vector2(1, 651), 11 => new Vector2(1, 131),
-                12 => new Vector2(261, 1), 13 => new Vector2(131, 131), _ => Vector2.zero,
-            };
-            const float atlasSize = 1024f;
-            const float spriteSize = 128f;
-            return new Rect(position.x / atlasSize, (atlasSize - position.y - spriteSize) / atlasSize,
-                spriteSize / atlasSize, spriteSize / atlasSize);
+            if (note.Critical) return new Color(1f, .82f, .12f, .9f);
+            if (IsTrace(note) || note.Kind == RuntimeNoteKind.Sustain) return new Color(.12f, 1f, .58f, .84f);
+            return note.Kind == RuntimeNoteKind.Flick
+                ? new Color(1f, .2f, .67f, .86f)
+                : new Color(.28f, .82f, 1f, .84f);
         }
 
-        IEnumerator AnimateHitEffect(RectTransform particleRoot, RawImage core, RawImage ring, Color tint, float impactWidth)
+        IEnumerator AnimateHitEffect(RectTransform particleRoot, HitBurstGraphic burst)
         {
-            const float Duration = .38f;
+            const float Duration = 15f / 60f;
             for (var elapsed = 0f; elapsed < Duration; elapsed += Time.unscaledDeltaTime)
             {
-                var t = elapsed / Duration;
-                var fade = 1 - Mathf.SmoothStep(0, 1, t);
-                if (core != null)
-                {
-                    core.rectTransform.sizeDelta = new Vector2(
-                        impactWidth * Mathf.Lerp(.48f, 1.08f, t),
-                        impactWidth * Mathf.Lerp(.15f, .32f, t));
-                    core.color = new Color(1, 1, 1, fade);
-                    var ringProgress = Mathf.SmoothStep(0, 1, t);
-                    ring.rectTransform.sizeDelta = new Vector2(
-                        impactWidth * Mathf.Lerp(.56f, 1.96f, ringProgress),
-                        impactWidth * Mathf.Lerp(.18f, .58f, ringProgress));
-                    ring.color = new Color(1, 1, 1, fade * .9f);
-                }
+                burst.SetProgress(elapsed / Duration);
                 yield return null;
             }
             Destroy(particleRoot.gameObject);
