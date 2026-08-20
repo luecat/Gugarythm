@@ -1354,7 +1354,7 @@ namespace Gugarythm
             view.rectTransform.sizeDelta = new Vector2(ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress), height);
         }
 
-        float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
+        static float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
         {
             // Authored notes may deliberately extend beyond the playable lanes.
             // Only constrain heads whose authored body is fully inside the
@@ -1521,7 +1521,7 @@ namespace Gugarythm
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
             var bodyWidth = LaneWidth(lane, size, screenProgress);
-            var renderWidth = HoldConnectorRenderWidth(bodyWidth);
+            var renderWidth = HoldConnectorRenderWidth(bodyWidth, lane, size, screenProgress);
             line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), renderWidth);
         }
 
@@ -1670,6 +1670,13 @@ namespace Gugarythm
 
         public static float HoldConnectorRenderWidth(float bodyWidth) =>
             bodyWidth * HoldConnectorTextureWidth / HoldConnectorVisibleTextureWidth;
+
+        public static float HoldConnectorRenderWidth(float bodyWidth, float lane, float size, float screenProgress)
+        {
+            var headQuadWidth = HoldHeadRenderQuadWidth(bodyWidth, 0, false);
+            var clippedHeadQuadWidth = ClampInBoundsHoldHeadWidth(headQuadWidth, lane, size, screenProgress);
+            return HoldConnectorRenderWidth(HoldHeadVisibleCoreWidth(clippedHeadQuadWidth));
+        }
 
         public static float HoldConnectorVisibleBodyWidth(float renderWidth) =>
             renderWidth * HoldConnectorVisibleTextureWidth / HoldConnectorTextureWidth;
