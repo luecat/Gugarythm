@@ -239,6 +239,12 @@ public static class RuntimeValidation
             "A surface-projected note must follow the sloped lane edges instead of remaining axis aligned");
         Require(quad.UpperRight.x > quad.UpperLeft.x && quad.LowerRight.x > quad.LowerLeft.x,
             "A surface-projected note must keep its left-to-right lane ordering at both edges");
+
+        var judgmentHeight = SonolusLandscapePrototype.NoteSurfaceHeight(1f);
+        var midHeight = SonolusLandscapePrototype.NoteSurfaceHeight(.75f);
+        var farHeight = SonolusLandscapePrototype.NoteSurfaceHeight(.1f);
+        Require(farHeight > 0 && farHeight < midHeight && midHeight < judgmentHeight,
+            "Note height must grow continuously from the vanishing point to the judgment edge");
     }
 
     // This fixture deliberately has no .5-beat interior spans, so PlayableCount
