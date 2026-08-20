@@ -28,6 +28,7 @@ public static class RuntimeValidation
         ValidateAttachedGgrPlayableCount();
         ValidateUscSlideRoleClassification();
         ValidateUscSlideMidpointRoles();
+        ValidateHeadlessCriticalSlideStart();
         ValidateNoteRenderWidths();
         ValidateNoteSurfaceProjection();
         ValidateHeadlessHoldRendering();
@@ -447,6 +448,28 @@ public static class RuntimeValidation
         Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(bendOnly, true) &&
                 !SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, false),
             "Bend-only ticks and missing particle textures must remain hidden");
+    }
+
+    static void ValidateHeadlessCriticalSlideStart()
+    {
+        const string usc = @"{
+            ""usc"": {
+                ""objects"": [
+                    { ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 0, ""judgeType"": ""none"", ""critical"": true, ""lane"": 0, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 1, ""judgeType"": ""trace"", ""critical"": true, ""lane"": 2, ""size"": 1, ""type"": ""end"" }
+                    ] }
+                ]
+            }
+        }";
+        var result = new UscChartImporter().Import("headless-critical.usc", System.Text.Encoding.UTF8.GetBytes(usc));
+        Require(result.Success, "A headless critical USC Slide fixture must import: " + result.Error);
+        var nodes = result.Chart.Notes.Concat(result.Chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End }))
+            .Distinct().ToArray();
+        var head = nodes.Single(note => Math.Abs(note.Beat) < 1e-9);
+        Require(!head.Visible && !head.Judged && !result.Chart.Notes.Contains(head),
+            "A critical judgeType:none Slide start must remain a headless path anchor, not render as a yellow button");
     }
 
     static void ValidateHoldSoundGate()

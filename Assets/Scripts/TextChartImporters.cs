@@ -140,7 +140,12 @@ namespace Gugarythm
                 // a tick carrying critical does both.
                 var isAttach = connectionType == "attach";
                 var isPathPoint = !isAttach;
-                var hasParticle = isAttach || connection["critical"] != null;
+                // A critical value on a Slide start may only describe the
+                // eventual Trace tail.  It is not a yellow head when the
+                // start has judgeType:none.  Only middle-role connections
+                // can create the particle-only visual.
+                var hasParticle = isAttach ||
+                    (connectionType.Equals("tick", StringComparison.OrdinalIgnoreCase) && connection["critical"] != null);
                 var lane = (float?)connection["lane"] ?? 0;
                 var size = Math.Max(.25f, (float?)connection["size"] ?? 1);
                 if (isAttach && previousPoint != null && TryFindNextPathConnection(sourceConnections, connectionIndex + 1, out var nextPath))
