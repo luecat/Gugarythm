@@ -18,6 +18,22 @@ namespace Gugarythm
 {
     public sealed class SonolusLandscapePrototype : MonoBehaviour
     {
+        public readonly struct NoteSurfaceQuad
+        {
+            public readonly Vector2 UpperLeft;
+            public readonly Vector2 UpperRight;
+            public readonly Vector2 LowerRight;
+            public readonly Vector2 LowerLeft;
+
+            public NoteSurfaceQuad(Vector2 upperLeft, Vector2 upperRight, Vector2 lowerRight, Vector2 lowerLeft)
+            {
+                UpperLeft = upperLeft;
+                UpperRight = upperRight;
+                LowerRight = lowerRight;
+                LowerLeft = lowerLeft;
+            }
+        }
+
         public enum HoldConnectorRenderMode { AnchorClipped, NaturalPassThrough }
 
         [Flags]
@@ -127,9 +143,10 @@ namespace Gugarythm
             -.8379661f, -.7036342f, -.5590519f, -.4198532f, -.2774788f, -.1406074f, .0000444f,
             .1412126f, .2827021f, .4205463f, .5611308f, .7017399f, .8439814f,
         };
-        // Note height is independent of note.Size, but follows the same depth
-        // scale as lane width. This preserves the source video's perspective
-        // without making wide notes uniformly taller.
+        // Note height is independent of note.Size.  The original game makes a
+        // falling note read as a flat sticker on the lane rather than a
+        // billboard: its upper and lower edges sample their own lane depth, but
+        // their screen-space separation remains the judgment-edge height.
         // At the judgment edge the lane artwork's purple judgment strip is
         // about 45 px tall while a size-1 note spans about 147.5 px. The atlas
         // note sprites include transparent glow padding; Next SEKAI expands
@@ -1241,20 +1258,16 @@ namespace Gugarythm
                     ApplyNoteTexture(view, note);
                 }
                 var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
-                // The source engine applies the same perspective depth to both
-                // axes. Slim Trace/Damage bodies use a full-height atlas quad;
-                // their texture's transparent rows create the thin visible line.
-                var depthLaneWidth = LaneWidth(0, 1f, screenProgress);
-                var height = depthLaneWidth * ButtonHeightRatio;
+                var height = FixedNoteSurfaceHeight;
                 // HorizontalSlicedRawImage preserves each cap's pixel aspect,
                 // so compensate the atlas's transparent outer pixels in screen
                 // space. The visible note edges—not the PNG bounds—then meet
                 // the exact same lane edges as Hold and Guide geometry.
-                view.rectTransform.anchoredPosition = new Vector2(X(note.Lane, screenProgress), y);
                 var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
                 if (note.HoldRootIndex == note.Index)
                     renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, note.Lane, note.Size, screenProgress);
-                view.rectTransform.sizeDelta = new Vector2(renderWidth, height);
+                var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
+                ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
                 view.color = IsHoldMid(note) ? Color.clear : Color.white;
                 var traceParticle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
                 if (traceParticle != null)
@@ -1348,10 +1361,11 @@ namespace Gugarythm
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = PerspectiveProgress(1f);
-            var height = LaneWidth(0, 1f, screenProgress) * ButtonHeightRatio;
-            view.rectTransform.anchoredPosition = new Vector2(X(lane, screenProgress), HitY);
+            var height = FixedNoteSurfaceHeight;
             var renderWidth = HoldHeadRenderQuadWidth(LaneWidth(lane, size, screenProgress), height, root.Critical);
-            view.rectTransform.sizeDelta = new Vector2(ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress), height);
+            renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress);
+            var bodyWidth = LaneWidth(lane, size, screenProgress);
+            ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(lane, size * renderWidth / Mathf.Max(.001f, bodyWidth), screenProgress, height));
         }
 
         static float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
@@ -1551,6 +1565,33 @@ namespace Gugarythm
         }
 
         static float ScreenY(float screenProgress) => Mathf.LerpUnclamped(TopY, HitY, screenProgress);
+        static float FixedNoteSurfaceHeight => LaneWidth(0, 1f, 1f) * ButtonHeightRatio;
+
+        public static NoteSurfaceQuad BuildNoteSurfaceQuad(float lane, float size, float screenProgress, float height)
+        {
+            var centerY = ScreenY(screenProgress);
+            var upperY = centerY + height * .5f;
+            var lowerY = centerY - height * .5f;
+            var upperProgress = ScreenProgressAtY(upperY);
+            var lowerProgress = ScreenProgressAtY(lowerY);
+            return new NoteSurfaceQuad(
+                new Vector2(X(lane - size, upperProgress), upperY),
+                new Vector2(X(lane + size, upperProgress), upperY),
+                new Vector2(X(lane + size, lowerProgress), lowerY),
+                new Vector2(X(lane - size, lowerProgress), lowerY));
+        }
+
+        static void ApplyNoteSurfaceQuad(HorizontalSlicedRawImage view, NoteSurfaceQuad quad)
+        {
+            var center = (quad.UpperLeft + quad.UpperRight + quad.LowerRight + quad.LowerLeft) * .25f;
+            var width = Mathf.Max(quad.UpperRight.x - quad.UpperLeft.x, quad.LowerRight.x - quad.LowerLeft.x);
+            var height = Mathf.Max(quad.UpperLeft.y - quad.LowerLeft.y, quad.UpperRight.y - quad.LowerRight.y);
+            view.rectTransform.anchoredPosition = center;
+            view.rectTransform.sizeDelta = new Vector2(width, height);
+            view.SetSurfaceQuad(quad.UpperLeft - center, quad.UpperRight - center, quad.LowerRight - center, quad.LowerLeft - center);
+        }
+
+        static float ScreenProgressAtY(float y) => (TopY - y) / (TopY - HitY);
         public static bool HasVisibleDecorationSegment(float leadingApproach, float trailingApproach) => trailingApproach < 1f;
         public static bool ShouldHideJudgedVisual(JudgmentGrade grade, float approachProgress) =>
             approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
