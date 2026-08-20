@@ -28,6 +28,7 @@ public static class RuntimeValidation
         ValidateAttachedGgrPlayableCount();
         ValidateUscSlideRoleClassification();
         ValidateUscSlideMidpointRoles();
+        ValidateNoteRenderWidths();
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
@@ -49,6 +50,9 @@ public static class RuntimeValidation
         var hiddenRootConnector = chart.Connectors.FirstOrDefault(value => value.Start.Archetype == "HiddenSlideStartNote");
         Require(hiddenRootConnector != null && SonolusLandscapePrototype.ShouldClipHoldConnector(hiddenRootConnector),
             "Hidden-head Hold connectors must remain clipped at the judgment line");
+        Require(chart.Connectors.Where(value => value.Start.HoldRootIndex >= 0 || value.End.HoldRootIndex >= 0)
+                    .All(SonolusLandscapePrototype.ShouldClipHoldConnector),
+            "Every segment attached to a Hold must stop at its head instead of continuing below it");
         Require(chart.TimeScaleGroups.Count == 3, $"Expected 3 time-scale layers, got {chart.TimeScaleGroups.Count}");
         Require(chart.Notes.Any(note => note.TimeScaleGroup == "tsg:1") && chart.Notes.Any(note => note.TimeScaleGroup == "tsg:2"),
             "Notes from secondary time-scale layers were not preserved");
@@ -188,6 +192,26 @@ public static class RuntimeValidation
         Require(result.Success, "Attached GGR must import successfully: " + result.Error);
         Require(result.Chart.PlayableCount == 5579,
             $"Attached GGR must contain 5579 playable notes after judged Slide tails are restored, got {result.Chart.PlayableCount}");
+    }
+
+    static void ValidateNoteRenderWidths()
+    {
+        var normalTap = new RuntimeNote { Kind = RuntimeNoteKind.Tap };
+        var tapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, normalTap);
+        Require(Math.Abs(SonolusLandscapePrototype.NoteBodyWidth(tapQuadWidth, 104.7f, normalTap) - 147.5f) < .0001f,
+            "A normal Tap's visible body must span exactly one authored note track");
+        var holdHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, 104.7f, false);
+        var criticalHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, 104.7f, true);
+        Require(Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(holdHeadQuadWidth) - 147.5f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(criticalHoldHeadQuadWidth) - 147.5f) < .0001f,
+            "Mint and yellow Hold heads' solid cores must each span one authored note track");
+        var descendingHoldHead = new RuntimeNote { Index = 7, HoldRootIndex = 7, Kind = RuntimeNoteKind.Sustain };
+        Require(Math.Abs(SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, descendingHoldHead) - holdHeadQuadWidth) < .0001f,
+            "A descending Hold head must use the same quad width as its persistent judgment-line head");
+        var connectorVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(
+            SonolusLandscapePrototype.HoldConnectorRenderWidth(147.5f));
+        Require(Math.Abs(connectorVisibleWidth - 147.5f) < .0001f,
+            "A Hold ribbon's visible fill must align with its USC-authored head width");
     }
 
     // This fixture deliberately has no .5-beat interior spans, so PlayableCount
@@ -1107,6 +1131,12 @@ public static class RuntimeValidation
             "The purple judgment debug region must retain the full canvas width");
         Require(Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackDuration - .12f) < .0001f &&
                 Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackWidth - 1f) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackTop(732f) -
+                         SonolusLandscapePrototype.InputLaneFeedbackBottom(732f) -
+                         SonolusLandscapePrototype.JudgmentInputBandHeight(732f)) < .0001f &&
+                Math.Abs((SonolusLandscapePrototype.InputLaneFeedbackTop(732f) +
+                          SonolusLandscapePrototype.InputLaneFeedbackBottom(732f)) * .5f -
+                         (732f * .5f - 500f)) < .0001f &&
                 SonolusLandscapePrototype.InputLaneFeedbackCell(-6f) == 0 &&
                 SonolusLandscapePrototype.InputLaneFeedbackCell(6f) == VirtualSliderInput.CellCount - 1 &&
                 SonolusLandscapePrototype.InputLaneFeedbackGridCell(0) == 0 &&
