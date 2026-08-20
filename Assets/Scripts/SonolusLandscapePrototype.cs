@@ -269,7 +269,6 @@ namespace Gugarythm
         Slider speedSlider;
         Material laneMaterial;
         Material missedHoldMaterial;
-        Material smoothHoldMaterial;
         bool running;
         bool loading;
         bool musicLoadSucceeded;
@@ -387,7 +386,6 @@ namespace Gugarythm
             if (EnhancedTouchSupport.enabled) EnhancedTouchSupport.Disable();
             if (laneMaterial != null) Destroy(laneMaterial);
             if (missedHoldMaterial != null) Destroy(missedHoldMaterial);
-            if (smoothHoldMaterial != null) Destroy(smoothHoldMaterial);
         }
 
         void Update()
@@ -1329,11 +1327,9 @@ namespace Gugarythm
                     // The atlas already carries 0.8 center / 0.4 shoulder
                     // alpha. The reference recording applies a further slide
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
-                    line.color = connector.Critical
-                        ? new Color(1f, .82f, .12f, .62f)
-                        : new Color(.12f, 1f, .58f, .62f);
+                    line.color = new Color(1, 1, 1, .62f);
                 }
-                line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : smoothHoldMaterial;
+                line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : null;
                 SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
                 if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
                     holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root) &&
@@ -1547,9 +1543,11 @@ namespace Gugarythm
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
-            var bodyWidth = LaneWidth(lane, size, screenProgress);
-            var renderWidth = HoldConnectorRenderWidth(bodyWidth, lane, size, screenProgress);
-            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), renderWidth);
+            // A Hold belongs to exactly its authored lane span.  Expanding the
+            // connector for its texture's transparent shoulder made adjacent
+            // Hold ribbons overlap even when their chart lanes did not.
+            var laneWidth = HoldConnectorLaneWidth(LaneWidth(lane, size, screenProgress));
+            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), laneWidth);
         }
 
         static float EaseConnector(float progress, int ease) => ease switch
@@ -1738,6 +1736,8 @@ namespace Gugarythm
         public static float HoldConnectorRenderWidth(float bodyWidth) =>
             bodyWidth * HoldConnectorTextureWidth / HoldConnectorVisibleTextureWidth;
 
+        public static float HoldConnectorLaneWidth(float bodyWidth) => bodyWidth;
+
         public static float HoldConnectorRenderWidth(float bodyWidth, float lane, float size, float screenProgress)
         {
             var headQuadWidth = HoldHeadRenderQuadWidth(bodyWidth, 0, false);
@@ -1789,11 +1789,8 @@ namespace Gugarythm
                 flickCriticalCenterTextures[index] = Resources.Load<Texture2D>("Gugarhythm/flicks/flick-critical-center-" + suffix);
                 flickCriticalSideTextures[index] = Resources.Load<Texture2D>("Gugarhythm/flicks/flick-critical-side-" + suffix);
             }
-            // The original 306x4 strips cannot retain a smooth alpha shoulder
-            // once a wide Hold is magnified.  These are linearly resampled
-            // versions of the same artwork, with the original kept intact.
-            holdGreenConnectorTexture = Resources.Load<Texture2D>("Gugarhythm/connectors/hold-green-smooth");
-            holdYellowConnectorTexture = Resources.Load<Texture2D>("Gugarhythm/connectors/hold-yellow-smooth");
+            holdGreenConnectorTexture = Resources.Load<Texture2D>("Gugarhythm/connectors/hold-green");
+            holdYellowConnectorTexture = Resources.Load<Texture2D>("Gugarhythm/connectors/hold-yellow");
             holdMidMintTexture = Resources.Load<Texture2D>("Gugarhythm/official/particles/slide-tick-mint") ??
                 Resources.Load<Texture2D>("Gugarhythm/particles/hold-mid-mint");
             holdMidYellowTexture = Resources.Load<Texture2D>("Gugarhythm/official/particles/slide-tick-yellow") ??
@@ -1877,8 +1874,6 @@ namespace Gugarythm
             }
             var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
-            var smoothHoldShader = Shader.Find("Gugarythm/Smooth Hold Ribbon UI");
-            if (smoothHoldShader != null) smoothHoldMaterial = new Material(smoothHoldShader);
             BuildInputLaneFeedback(stage);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             BuildJudgmentDebugGrid(stage);
