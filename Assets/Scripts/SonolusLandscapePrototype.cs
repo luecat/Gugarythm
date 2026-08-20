@@ -2285,14 +2285,12 @@ namespace Gugarythm
         }
         static void ConfigureGuideGraphic(TaperedConnectorGraphic graphic)
         {
-            // A filled guide reaches the judgment area as a broad translucent
-            // wedge, which reads as a reflection beneath Hold heads. Keep the
-            // path cue but render only its two slim boundaries.
+            // USC guides are colored lane-surface regions, not merely their
+            // outlines.  SetGuidePath already samples each point's left and
+            // right lane boundaries, so retain that filled projection.
             graphic.texture = null;
-            graphic.drawGlow = false; graphic.drawEdges = true;
-            graphic.fillAlphaScale = 0; graphic.fillAlphaLimit = 0;
-            graphic.edgeAlphaScale = 1; graphic.edgeAlphaLimit = 1;
-            graphic.edgeWidth = 2;
+            graphic.drawGlow = false; graphic.drawEdges = false;
+            graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
         }
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
         void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
