@@ -1329,7 +1329,9 @@ namespace Gugarythm
                     // The atlas already carries 0.8 center / 0.4 shoulder
                     // alpha. The reference recording applies a further slide
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
-                    line.color = new Color(1, 1, 1, .62f);
+                    line.color = connector.Critical
+                        ? new Color(1f, .82f, .12f, .62f)
+                        : new Color(.12f, 1f, .58f, .62f);
                 }
                 line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : smoothHoldMaterial;
                 SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
