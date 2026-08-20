@@ -29,6 +29,7 @@ public static class RuntimeValidation
         ValidateUscSlideRoleClassification();
         ValidateUscSlideMidpointRoles();
         ValidateNoteRenderWidths();
+        ValidateNoteSurfaceProjection();
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
@@ -222,6 +223,22 @@ public static class RuntimeValidation
         var clippedVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(clippedRenderWidth);
         Require(clippedVisibleWidth < 1000f,
             "An edge-clamped Hold connector must shrink with its head instead of retaining its authored full width");
+    }
+
+    static void ValidateNoteSurfaceProjection()
+    {
+        // A projected note stays a fixed-height sticker on the lane surface:
+        // its top and bottom edges sample the lane separately, instead of
+        // scaling an axis-aligned UI rectangle by depth.
+        var quad = SonolusLandscapePrototype.BuildNoteSurfaceQuad(3f, 1f, .5f, 48f);
+        Require(Math.Abs(quad.UpperLeft.y - quad.LowerLeft.y - 48f) < .0001f &&
+                Math.Abs(quad.UpperRight.y - quad.LowerRight.y - 48f) < .0001f,
+            "A surface-projected note must retain its authored screen-space height");
+        Require(Math.Abs(quad.UpperLeft.x - quad.LowerLeft.x) > .01f &&
+                Math.Abs(quad.UpperRight.x - quad.LowerRight.x) > .01f,
+            "A surface-projected note must follow the sloped lane edges instead of remaining axis aligned");
+        Require(quad.UpperRight.x > quad.UpperLeft.x && quad.LowerRight.x > quad.LowerLeft.x,
+            "A surface-projected note must keep its left-to-right lane ordering at both edges");
     }
 
     // This fixture deliberately has no .5-beat interior spans, so PlayableCount
