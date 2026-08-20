@@ -105,6 +105,9 @@ namespace Gugarythm
         const float HitSourceY = 500f;
         const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
+        // ±6 are the centres of the outermost buttons; their normal half-size
+        // reaches the visible lane boundary at ±6.5.
+        const float VisibleTrackLaneEdge = CentralHalfLanes + .5f;
         const float PerspectiveDepthRatio = 3.2f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
         // keeps curved ribbons smooth, while stable boundaries prevent the
@@ -136,7 +139,18 @@ namespace Gugarythm
         const float ButtonHeightRatio = 45f / 147.5f * ButtonSpriteTransform;
         const float NoteCapRatio = 93f / 354f;
         const float NoteTextureHeight = 186f;
-        const float HoldHeadWidthScale = 1.275f;
+        // hold-green/yellow are 306px wide with a 240px opaque center.
+        // Convert the USC-authored button body width to the ribbon's quad width
+        // so their visible (non-transparent) edges meet exactly.
+        const float HoldConnectorTextureWidth = 306f;
+        const float HoldConnectorVisibleTextureWidth = 240f;
+        const float HoldHeadTextureWidth = 354f;
+        // Both Hold head atlases and both connector atlases use a 240px solid
+        // center.  Match those cores rather than their soft outer glow.
+        const float HoldHeadCoreTextureWidth = 240f;
+        // Button sprites begin their visible antialiased edge at pixel 44.
+        // Using the old 40px glow bound made every normal Tap visibly narrow.
+        const float NormalButtonVisibleEdgePaddingPixels = 44f;
         const int MouseContactId = int.MinValue;
         // Missed notes keep travelling beyond the judgment line until their
         // sprite leaves the viewport. Successful hits return to the pool at once.
@@ -266,6 +280,13 @@ namespace Gugarythm
         public static float JudgmentDebugCellWidth => VirtualSliderInput.CellWidth;
         public static float JudgmentInputBandHeight(float canvasHeight) =>
             JudgmentStripSourceHeight / LaneTextureHeight * canvasHeight;
+        public static float InputLaneFeedbackBottom(float canvasHeight)
+        {
+            var hitY = canvasHeight * .5f - HitSourceY / LaneTextureHeight * canvasHeight;
+            return hitY - JudgmentInputBandHeight(canvasHeight) * .5f;
+        }
+        public static float InputLaneFeedbackTop(float canvasHeight) =>
+            InputLaneFeedbackBottom(canvasHeight) + JudgmentInputBandHeight(canvasHeight);
         public static float JudgmentInputTop(float canvasHeight)
         {
             var hitY = canvasHeight * .5f - HitSourceY / LaneTextureHeight * canvasHeight;
@@ -375,7 +396,9 @@ namespace Gugarythm
             var songTime = CurrentSongTime();
             lastObservedSongTime = songTime;
             CollectInput();
-            foreach (var input in inputBatch) FlashInputLane(input.Lane);
+            // Input remains fully routed to JudgmentEngine below.  Do not draw
+            // a full-depth lane flash here: it reads as a reflected Hold bar
+            // beneath the button rather than input feedback.
             var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths, autoPlayToggle != null && autoPlayToggle.isOn);
             if (events.Count > 0)
             {
@@ -1217,9 +1240,7 @@ namespace Gugarythm
                     noteViews[note.Index] = view;
                     ApplyNoteTexture(view, note);
                 }
-                var width = LaneWidth(note.Lane, note.Size, screenProgress) *
-                    (note.HoldRootIndex == note.Index ? HoldHeadWidthScale : 1f);
-                view.rectTransform.anchoredPosition = new Vector2(X(note.Lane, screenProgress), y);
+                var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
                 // The source engine applies the same perspective depth to both
                 // axes. Slim Trace/Damage bodies use a full-height atlas quad;
                 // their texture's transparent rows create the thin visible line.
@@ -1229,8 +1250,11 @@ namespace Gugarythm
                 // so compensate the atlas's transparent outer pixels in screen
                 // space. The visible note edges—not the PNG bounds—then meet
                 // the exact same lane edges as Hold and Guide geometry.
-                var horizontalPadding = height * NoteOuterPaddingPixels(note) / NoteTextureHeight;
-                view.rectTransform.sizeDelta = new Vector2(width + horizontalPadding * 2, height);
+                view.rectTransform.anchoredPosition = new Vector2(X(note.Lane, screenProgress), y);
+                var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
+                if (note.HoldRootIndex == note.Index)
+                    renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, note.Lane, note.Size, screenProgress);
+                view.rectTransform.sizeDelta = new Vector2(renderWidth, height);
                 view.color = IsHoldMid(note) ? Color.clear : Color.white;
                 var traceParticle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
                 if (traceParticle != null)
@@ -1325,9 +1349,22 @@ namespace Gugarythm
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = PerspectiveProgress(1f);
             var height = LaneWidth(0, 1f, screenProgress) * ButtonHeightRatio;
-            var padding = height * (root.Critical ? 28f : 40f) / NoteTextureHeight;
             view.rectTransform.anchoredPosition = new Vector2(X(lane, screenProgress), HitY);
-            view.rectTransform.sizeDelta = new Vector2(LaneWidth(lane, size, screenProgress) * HoldHeadWidthScale + padding * 2, height);
+            var renderWidth = HoldHeadRenderQuadWidth(LaneWidth(lane, size, screenProgress), height, root.Critical);
+            view.rectTransform.sizeDelta = new Vector2(ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress), height);
+        }
+
+        float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
+        {
+            // Authored notes may deliberately extend beyond the playable lanes.
+            // Only constrain heads whose authored body is fully inside the
+            // visible ±6.5 track bounds.  Deliberate chart out-of-bounds paths
+            // retain their original extent.
+            if (lane - size < -VisibleTrackLaneEdge || lane + size > VisibleTrackLaneEdge) return renderWidth;
+            var center = X(lane, screenProgress);
+            var left = X(-VisibleTrackLaneEdge, screenProgress);
+            var right = X(VisibleTrackLaneEdge, screenProgress);
+            return Mathf.Min(renderWidth, 2f * Mathf.Min(center - left, right - center));
         }
 
         bool IsHoldCurrentlyMissed(RuntimeConnector connector)
@@ -1483,10 +1520,9 @@ namespace Gugarythm
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
-            // The official connector sprite expands its target quad by 1.275,
-            // while its baked transparent shoulders bring the visible fill
-            // back to the note's exact left/right edges.
-            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), LaneWidth(lane, size, screenProgress) * 1.275f);
+            var bodyWidth = LaneWidth(lane, size, screenProgress);
+            var renderWidth = HoldConnectorRenderWidth(bodyWidth);
+            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), renderWidth);
         }
 
         static float EaseConnector(float progress, int ease) => ease switch
@@ -1531,7 +1567,9 @@ namespace Gugarythm
         public static HoldConnectorRenderMode ResolveHoldConnectorRenderMode(bool rootSucceeded, JudgmentGrade nextCheckpointGrade) =>
             HoldConnectorRenderMode.AnchorClipped;
         public static bool ShouldClipHoldConnector(RuntimeConnector connector) =>
-            connector?.Start != null && connector.Start.HoldRootIndex >= 0;
+            connector != null &&
+            ((connector.Start != null && connector.Start.HoldRootIndex >= 0) ||
+             (connector.End != null && connector.End.HoldRootIndex >= 0));
 
         HoldConnectorRenderMode ResolveConnectorRenderMode(RuntimeConnector connector)
         {
@@ -1608,8 +1646,33 @@ namespace Gugarythm
         {
             if (IsDamage(note)) return 21f;
             if (IsTrace(note)) return note.Critical ? 30f : 41f;
-            return note.Critical ? 28f : 40f;
+            return note.Critical ? 28f : NormalButtonVisibleEdgePaddingPixels;
         }
+
+        public static float NoteRenderQuadWidth(float bodyWidth, float height, RuntimeNote note)
+        {
+            if (note.HoldRootIndex == note.Index)
+                return HoldHeadRenderQuadWidth(bodyWidth, height, note.Critical);
+            var padding = height * NoteOuterPaddingPixels(note) / NoteTextureHeight;
+            return bodyWidth + padding * 2;
+        }
+
+        public static float NoteBodyWidth(float quadWidth, float height, RuntimeNote note) =>
+            quadWidth - height * NoteOuterPaddingPixels(note) / NoteTextureHeight * 2;
+
+        public static float HoldHeadRenderQuadWidth(float bodyWidth, float height, bool critical)
+        {
+            return bodyWidth * HoldHeadTextureWidth / HoldHeadCoreTextureWidth;
+        }
+
+        public static float HoldHeadVisibleCoreWidth(float renderWidth) =>
+            renderWidth * HoldHeadCoreTextureWidth / HoldHeadTextureWidth;
+
+        public static float HoldConnectorRenderWidth(float bodyWidth) =>
+            bodyWidth * HoldConnectorTextureWidth / HoldConnectorVisibleTextureWidth;
+
+        public static float HoldConnectorVisibleBodyWidth(float renderWidth) =>
+            renderWidth * HoldConnectorVisibleTextureWidth / HoldConnectorTextureWidth;
 
         void FinishGame()
         {
@@ -1772,11 +1835,14 @@ namespace Gugarythm
 
                 var lane = VirtualSliderInput.MinimumLane + (cell + .5f) * InputLaneFeedbackWidth;
                 var halfWidth = InputLaneFeedbackWidth * .5f;
+                // A press only illuminates its judgment cell.  Drawing the
+                // same track from the vanishing point to the foreground made
+                // the feedback read as a large translucent reflection.
+                var width = X(lane + halfWidth, 1f) - X(lane - halfWidth, 1f);
                 flash.SetGeometry(
-                    new Vector2(X(lane, 0), ScreenY(0)),
-                    new Vector2(X(lane, NearTrackProgress), ScreenY(NearTrackProgress)),
-                    X(lane + halfWidth, 0) - X(lane - halfWidth, 0),
-                    X(lane + halfWidth, NearTrackProgress) - X(lane - halfWidth, NearTrackProgress));
+                    new Vector2(X(lane, 1f), InputLaneFeedbackBottom(CanvasHeight)),
+                    new Vector2(X(lane, 1f), InputLaneFeedbackTop(CanvasHeight)),
+                    width, width);
                 flash.gameObject.SetActive(false);
                 inputLaneFeedback[cell] = flash;
             }
@@ -2131,11 +2197,11 @@ namespace Gugarythm
         {
             if (guidePool.Count > 0)
             {
-                var pooled = guidePool.Pop(); pooled.gameObject.SetActive(true); ConfigureGuideGraphic(pooled); return pooled;
+                var pooled = guidePool.Pop(); pooled.gameObject.SetActive(true); ConfigureGuideGraphic(pooled); pooled.material = null; return pooled;
             }
             var go = new GameObject("Decoration Guide", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var rect = go.GetComponent<RectTransform>(); rect.SetParent(guideLayer, false); Fill(rect);
-            var graphic = go.GetComponent<TaperedConnectorGraphic>(); graphic.raycastTarget = false; ConfigureGuideGraphic(graphic); return graphic;
+            var graphic = go.GetComponent<TaperedConnectorGraphic>(); graphic.raycastTarget = false; ConfigureGuideGraphic(graphic); graphic.material = null; return graphic;
         }
         static void ConfigureHoldGraphic(TaperedConnectorGraphic graphic)
         {
@@ -2147,11 +2213,14 @@ namespace Gugarythm
         }
         static void ConfigureGuideGraphic(TaperedConnectorGraphic graphic)
         {
-            // Guides are a single flat-color pass, with no Hold-style glow or
-            // bright edge. Their reference-video opacity is applied by color.
+            // A filled guide reaches the judgment area as a broad translucent
+            // wedge, which reads as a reflection beneath Hold heads. Keep the
+            // path cue but render only its two slim boundaries.
             graphic.texture = null;
-            graphic.drawGlow = false; graphic.drawEdges = false;
-            graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
+            graphic.drawGlow = false; graphic.drawEdges = true;
+            graphic.fillAlphaScale = 0; graphic.fillAlphaLimit = 0;
+            graphic.edgeAlphaScale = 1; graphic.edgeAlphaLimit = 1;
+            graphic.edgeWidth = 2;
         }
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
         void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
