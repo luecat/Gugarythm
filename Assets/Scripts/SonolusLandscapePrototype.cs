@@ -1259,10 +1259,16 @@ namespace Gugarythm
                     ApplyNoteTexture(view, note);
                 }
                 var height = NoteSurfaceHeight(screenProgress);
-                // Keep each note's complete textured quad inside its authored
-                // lane span.  Expanding the geometry to compensate transparent
-                // atlas padding made adjacent Hold heads physically overlap.
-                ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, note.Size, screenProgress, height));
+                // The sprite has transparent side padding.  Expand only the
+                // quad required for its visible body to meet the authored left
+                // and right lane boundaries; centering the complete bitmap in
+                // the lane made the visible key look too narrow.
+                var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
+                var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
+                if (note.HoldRootIndex == note.Index)
+                    renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, note.Lane, note.Size, screenProgress);
+                var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
+                ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
                 view.color = IsHoldMid(note) ? Color.clear : Color.white;
                 var traceParticle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
                 if (traceParticle != null)
@@ -1362,10 +1368,13 @@ namespace Gugarythm
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = PerspectiveProgress(1f);
             var height = NoteSurfaceHeight(screenProgress);
-            // Use the same authored lane span as a descending note.  The old
-            // atlas-padding expansion caused neighboring persistent heads to
-            // press into each other at the judgment line.
-            ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(lane, size, screenProgress, height));
+            // Match the descending head's visible body to the same pair of
+            // lane boundaries at the judgment line.
+            var bodyWidth = LaneWidth(lane, size, screenProgress);
+            var renderWidth = HoldHeadRenderQuadWidth(bodyWidth, height, root.Critical);
+            renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress);
+            var renderSize = size * renderWidth / Mathf.Max(.001f, bodyWidth);
+            ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(lane, renderSize, screenProgress, height));
         }
 
         static float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
