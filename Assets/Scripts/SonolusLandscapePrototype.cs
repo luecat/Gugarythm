@@ -161,6 +161,7 @@ namespace Gugarythm
         // so their visible (non-transparent) edges meet exactly.
         const float HoldConnectorTextureWidth = 306f;
         const float HoldConnectorVisibleTextureWidth = 240f;
+        const float HoldConnectorVisibleUvInset = (HoldConnectorTextureWidth - HoldConnectorVisibleTextureWidth) / HoldConnectorTextureWidth * .5f;
         const float HoldHeadTextureWidth = 354f;
         // Both Hold head atlases and both connector atlases use a 240px solid
         // center.  Match those cores rather than their soft outer glow.
@@ -1737,6 +1738,7 @@ namespace Gugarythm
             bodyWidth * HoldConnectorTextureWidth / HoldConnectorVisibleTextureWidth;
 
         public static float HoldConnectorLaneWidth(float bodyWidth) => bodyWidth;
+        public static float HoldConnectorSourceUvInset => HoldConnectorVisibleUvInset;
 
         public static float HoldConnectorRenderWidth(float bodyWidth, float lane, float size, float screenProgress)
         {
@@ -2286,6 +2288,7 @@ namespace Gugarythm
             // what made overlapping Holds turn cloudy and merge with Guides.
             graphic.drawGlow = false; graphic.drawEdges = false;
             graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
+            graphic.sourceUvInset = HoldConnectorVisibleUvInset;
         }
         static void ConfigureGuideGraphic(TaperedConnectorGraphic graphic)
         {
@@ -2295,6 +2298,7 @@ namespace Gugarythm
             graphic.texture = null;
             graphic.drawGlow = false; graphic.drawEdges = false;
             graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
+            graphic.sourceUvInset = 0;
         }
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
         void ReleaseAllViews() { foreach (var pair in persistentHoldHeadViews.ToArray()) ReleasePersistentHoldHead(pair.Key, pair.Value); foreach (var pair in noteViews.ToArray()) ReleaseNoteView(pair.Key, pair.Value); foreach (var pair in connectorViews.ToArray()) ReleaseConnector(pair.Key, pair.Value); foreach (var pair in simLineViews.ToArray()) ReleaseSimLine(pair.Key, pair.Value); foreach (var pair in guideViews.ToArray()) ReleaseGuide(pair.Key, pair.Value); }
