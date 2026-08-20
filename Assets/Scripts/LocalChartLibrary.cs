@@ -29,9 +29,60 @@ namespace Gugarythm
     public static class LocalChartLibrary
     {
         const string ManifestFile = "library.json";
+        const string DifficultyTagsFile = "difficulty-tags.json";
 
         static string Root => Path.Combine(Application.persistentDataPath, "ChartLibrary");
         static string ManifestPath => Path.Combine(Root, ManifestFile);
+        static string DifficultyTagsPath => Path.Combine(Root, DifficultyTagsFile);
+
+        public static IReadOnlyList<string> LoadDifficultyTags()
+        {
+            var tags = ReadDifficultyTags();
+            var imported = Load().Select(entry => NormalizeTag(entry.DifficultyName)).Where(tag => tag != "未標示");
+            foreach (var tag in imported)
+                if (!tags.Contains(tag, StringComparer.OrdinalIgnoreCase)) tags.Add(tag);
+            SaveDifficultyTags(tags);
+            return tags;
+        }
+
+        public static bool TryCreateDifficultyTag(string value, out string error)
+        {
+            var tag = NormalizeTag(value);
+            if (tag == "未標示") { error = "標籤不可空白。"; return false; }
+            var tags = ReadDifficultyTags();
+            if (tags.Contains(tag, StringComparer.OrdinalIgnoreCase)) { error = "此標籤已存在。"; return false; }
+            tags.Add(tag); SaveDifficultyTags(tags); error = string.Empty; return true;
+        }
+
+        public static void MoveDifficultyTag(int fromIndex, int toIndex)
+        {
+            var tags = ReadDifficultyTags();
+            if (fromIndex < 0 || fromIndex >= tags.Count || toIndex < 0 || toIndex >= tags.Count || fromIndex == toIndex) return;
+            var tag = tags[fromIndex]; tags.RemoveAt(fromIndex); tags.Insert(toIndex, tag); SaveDifficultyTags(tags);
+        }
+
+        public static void DeleteDifficultyTag(string value)
+        {
+            var tag = NormalizeTag(value); var tags = ReadDifficultyTags();
+            if (!tags.RemoveAll(item => string.Equals(item, tag, StringComparison.OrdinalIgnoreCase)).Equals(0)) SaveDifficultyTags(tags);
+            var entries = Load().ToList();
+            foreach (var entry in entries.Where(entry => string.Equals(NormalizeTag(entry.DifficultyName), tag, StringComparison.OrdinalIgnoreCase))) entry.DifficultyName = "未標示";
+            Directory.CreateDirectory(Root); File.WriteAllText(ManifestPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
+        }
+
+        static List<string> ReadDifficultyTags()
+        {
+            try { return File.Exists(DifficultyTagsPath) ? JsonConvert.DeserializeObject<List<string>>(File.ReadAllText(DifficultyTagsPath)) ?? new List<string>() : new List<string>(); }
+            catch { return new List<string>(); }
+        }
+
+        static void SaveDifficultyTags(IEnumerable<string> tags)
+        {
+            Directory.CreateDirectory(Root);
+            File.WriteAllText(DifficultyTagsPath, JsonConvert.SerializeObject(tags.Select(NormalizeTag).Where(tag => tag != "未標示").Distinct(StringComparer.OrdinalIgnoreCase).ToList(), Formatting.Indented));
+        }
+
+        static string NormalizeTag(string value) => string.IsNullOrWhiteSpace(value) ? "未標示" : value.Trim();
 
         public static string Sha256(byte[] bytes)
         {
@@ -107,7 +158,7 @@ namespace Gugarythm
         /// difficulty's chart constant.  A title cannot be blank because it is
         /// the primary label used by the library and grouping UI.
         /// </summary>
-        public static bool TryUpdateChartDetails(string id, string title, string artist, string difficultyLevel, out LocalChartEntry updated)
+        public static bool TryUpdateChartDetails(string id, string title, string artist, string difficultyName, string difficultyLevel, out LocalChartEntry updated)
         {
             updated = null;
             if (string.IsNullOrWhiteSpace(id)) return false;
@@ -126,6 +177,7 @@ namespace Gugarythm
                 groupedEntry.Artist = (artist ?? string.Empty).Trim();
             }
 
+            entry.DifficultyName = (difficultyName ?? string.Empty).Trim();
             entry.DifficultyLevel = (difficultyLevel ?? string.Empty).Trim();
             Directory.CreateDirectory(Root);
             File.WriteAllText(ManifestPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
