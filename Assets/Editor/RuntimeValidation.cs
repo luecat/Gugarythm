@@ -30,6 +30,7 @@ public static class RuntimeValidation
         ValidateUscSlideMidpointRoles();
         ValidateNoteRenderWidths();
         ValidateNoteSurfaceProjection();
+        ValidateHeadlessHoldRendering();
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
@@ -245,6 +246,16 @@ public static class RuntimeValidation
         var farHeight = SonolusLandscapePrototype.NoteSurfaceHeight(.1f);
         Require(farHeight > 0 && farHeight < midHeight && midHeight < judgmentHeight,
             "Note height must grow continuously from the vanishing point to the judgment edge");
+    }
+
+    static void ValidateHeadlessHoldRendering()
+    {
+        var judgedRoot = new RuntimeNote { Visible = true, Judged = true };
+        var headlessRoot = new RuntimeNote { Visible = false, Judged = false };
+        Require(SonolusLandscapePrototype.ShouldRenderPersistentHoldHead(judgedRoot),
+            "A judged Hold root must retain its judgment-line head");
+        Require(!SonolusLandscapePrototype.ShouldRenderPersistentHoldHead(headlessRoot),
+            "A no-head-judgment Hold must not synthesize a normal Hold head at the judgment line");
     }
 
     // This fixture deliberately has no .5-beat interior spans, so PlayableCount
