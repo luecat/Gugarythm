@@ -121,6 +121,7 @@ public static class RuntimeValidation
 
         ValidateJudgedVisualMasking();
         ValidateJudgmentRules();
+        ValidateLatencyCalibration();
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
@@ -700,7 +701,7 @@ public static class RuntimeValidation
         Require(intervalFirst.Grade == JudgmentGrade.Great && intervalMiddle.Grade == JudgmentGrade.Perfect && intervalLast.Grade == JudgmentGrade.Great,
             "Three-note midpoint intervals must consume the first, middle, and last Tap exactly once");
 
-        // Forgiveness alone must not author a protection pair.
+        // Lane forgiveness alone must not author a protection pair.
         var left = Note(730, 1.000, 0); left.Size = 1;
         var right = Note(731, 1.120, 4f); right.Size = 1;
         engine = new JudgmentEngine(new[] { left, right }, new ScoreState());
@@ -720,50 +721,88 @@ public static class RuntimeValidation
         Require(left.Grade == JudgmentGrade.Pending && right.Grade == JudgmentGrade.Great,
             "Forgiveness overlap without authored span overlap must not protect the later Tap");
 
-        var first = Note(732, 2.000, 0);
-        var second = Note(733, 2.140, 0);
-        engine = new JudgmentEngine(new[] { first, second }, new ScoreState());
-        engine.Process(2.210,
-            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.210, 0) },
+        // Merely touching authored edges has zero shared area and must not create protection.
+        var edgeLeft = Note(732, 2.000, 0); edgeLeft.Size = 1;
+        var edgeRight = Note(733, 2.120, 2); edgeRight.Size = 1;
+        engine = new JudgmentEngine(new[] { edgeLeft, edgeRight }, new ScoreState());
+        engine.Process(2.055,
+            new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.055, 2.5f) },
             Array.Empty<ActiveContact>());
-        Require(first.Grade == JudgmentGrade.Miss && second.Grade == JudgmentGrade.Good,
-            "Post-midpoint Attack must route to later protected Tap");
+        Require(edgeLeft.Grade == JudgmentGrade.Pending && edgeRight.Grade == JudgmentGrade.Great,
+            "Touching authored edges must not form a protection pair");
 
-        // A wide Tap's lane outside the shared span must preserve its Perfect window.
-        var wide = Note(734, 3.000, 0); wide.Size = 2;
-        var separate = Note(735, 3.120, 2.5f); separate.Size = 1;
-        engine = new JudgmentEngine(new[] { wide, separate }, new ScoreState());
-        engine.Process(3.020,
-            new[] { new InputToken(3, RuntimeNoteKind.Tap, 3.020, .7f) },
+        // Article rule: Justice and Attack protection covers the whole Tap width,
+        // even when the input is outside the pair's authored shared span.
+        var wideEarly = Note(734, 3.000, 0); wideEarly.Size = 2;
+        var narrowLate = Note(735, 3.120, 2.5f); narrowLate.Size = 1;
+        engine = new JudgmentEngine(new[] { wideEarly, narrowLate }, new ScoreState());
+        engine.Process(3.055,
+            new[] { new InputToken(3, RuntimeNoteKind.Tap, 3.055, 3.1f) },
             Array.Empty<ActiveContact>());
-        Require(wide.Grade == JudgmentGrade.Perfect && separate.Grade == JudgmentGrade.Pending,
-            "A lane unique to a wide Tap must preserve its Perfect window");
+        Require(wideEarly.Grade == JudgmentGrade.Pending && narrowLate.Grade == JudgmentGrade.Pending,
+            "Justice before midpoint must be protected across the whole later Tap width");
 
-        // Shared geometry resolves Perfect to the nearer note on either side of midpoint.
-        var sharedEarly = Note(736, 4.000, 0); sharedEarly.Size = 2;
-        var sharedLate = Note(737, 4.120, 1.5f); sharedLate.Size = 1;
+        wideEarly = Note(746, 3.500, 0); wideEarly.Size = 2;
+        narrowLate = Note(747, 3.660, 2.5f); narrowLate.Size = 1;
+        engine = new JudgmentEngine(new[] { wideEarly, narrowLate }, new ScoreState());
+        engine.Process(3.575,
+            new[] { new InputToken(9, RuntimeNoteKind.Tap, 3.575, 3.1f) },
+            Array.Empty<ActiveContact>());
+        Require(wideEarly.Grade == JudgmentGrade.Pending && narrowLate.Grade == JudgmentGrade.Pending,
+            "Attack before midpoint must be protected across the whole later Tap width");
+
+        // JC is the exception: it remains available outside the shared span.
+        var jcEarly = Note(736, 4.000, 0); jcEarly.Size = 2;
+        var jcLate = Note(737, 4.040, 2.5f); jcLate.Size = 1;
+        engine = new JudgmentEngine(new[] { jcEarly, jcLate }, new ScoreState());
+        engine.Process(4.015,
+            new[] { new InputToken(4, RuntimeNoteKind.Tap, 4.015, 3.1f) },
+            Array.Empty<ActiveContact>());
+        Require(jcEarly.Grade == JudgmentGrade.Pending && jcLate.Grade == JudgmentGrade.Perfect,
+            "JC outside the shared span must preserve the later Tap's full interval");
+
+        var sharedEarly = Note(738, 5.000, 0); sharedEarly.Size = 2;
+        var sharedLate = Note(739, 5.040, 2.5f); sharedLate.Size = 1;
         engine = new JudgmentEngine(new[] { sharedEarly, sharedLate }, new ScoreState());
-        engine.Process(4.020,
-            new[] { new InputToken(4, RuntimeNoteKind.Tap, 4.020, 1.5f) },
+        engine.Process(5.015,
+            new[] { new InputToken(5, RuntimeNoteKind.Tap, 5.015, 1.75f) },
             Array.Empty<ActiveContact>());
         Require(sharedEarly.Grade == JudgmentGrade.Perfect && sharedLate.Grade == JudgmentGrade.Pending,
-            "Shared-span Perfect before midpoint must route to earlier Tap");
+            "JC inside the shared span must be trimmed at the midpoint");
 
-        sharedEarly = Note(738, 5.000, 0); sharedEarly.Size = 2;
-        sharedLate = Note(739, 5.120, 1.5f); sharedLate.Size = 1;
-        engine = new JudgmentEngine(new[] { sharedEarly, sharedLate }, new ScoreState());
-        engine.Process(5.100,
-            new[] { new InputToken(5, RuntimeNoteKind.Tap, 5.100, 1.5f) },
+        // Critical Tap and early Flick display Perfect throughout their early
+        // outer bands, but protection must still use their hidden Justice band.
+        var criticalEarly = Note(750, 6.000, 0); criticalEarly.Size = 2;
+        var criticalLate = Note(751, 6.120, 2.5f); criticalLate.Size = 1; criticalLate.Critical = true;
+        engine = new JudgmentEngine(new[] { criticalEarly, criticalLate }, new ScoreState());
+        engine.Process(6.055,
+            new[] { new InputToken(10, RuntimeNoteKind.Tap, 6.055, 3.1f) },
             Array.Empty<ActiveContact>());
-        Require(sharedEarly.Grade == JudgmentGrade.Pending && sharedLate.Grade == JudgmentGrade.Perfect,
-            "Shared-span Perfect after midpoint must route to later Tap");
+        Require(criticalEarly.Grade == JudgmentGrade.Pending && criticalLate.Grade == JudgmentGrade.Pending,
+            "Critical Tap's hidden Justice band must be protected across its whole width");
 
-        var critical = Note(743, 7.000, 0); critical.Critical = true;
-        Require(JudgmentEngine.GradeFor(critical, -6.0 / 60.0) == JudgmentGrade.Perfect &&
-                JudgmentEngine.GradeFor(critical, 6.0 / 60.0) == JudgmentGrade.Perfect &&
-                JudgmentEngine.GradeFor(critical, -6.0 / 60.0 - .0001) == JudgmentGrade.Pending &&
-                JudgmentEngine.GradeFor(critical, 6.0 / 60.0 + .0001) == JudgmentGrade.Pending,
-            "Critical Tap must never return Great or Good");
+        var flickEarly = Note(752, 7.000, 0); flickEarly.Size = 2;
+        var flickLate = Note(753, 7.120, 2.5f); flickLate.Size = 1; flickLate.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { flickEarly, flickLate }, new ScoreState());
+        engine.Process(7.055,
+            new[] { new InputToken(11, RuntimeNoteKind.Flick, 7.055, 3.1f, 2.8f, 7.055) },
+            Array.Empty<ActiveContact>());
+        Require(flickEarly.Grade == JudgmentGrade.Pending && flickLate.Grade == JudgmentGrade.Pending,
+            "Early Flick's hidden Justice band must be protected across its whole width");
+
+        // Pair lifetime is chart-defined: resolving the earlier Tap must not
+        // restore the later Tap's protected early Justice interval.
+        var resolvedEarly = Note(754, 8.000, 0); resolvedEarly.Size = 1;
+        var resolvedLate = Note(755, 8.120, 0); resolvedLate.Size = 1;
+        engine = new JudgmentEngine(new[] { resolvedEarly, resolvedLate }, new ScoreState());
+        engine.Process(8.000,
+            new[] { new InputToken(12, RuntimeNoteKind.Tap, 8.000, 0) },
+            Array.Empty<ActiveContact>());
+        engine.Process(8.055,
+            new[] { new InputToken(13, RuntimeNoteKind.Tap, 8.055, 0) },
+            Array.Empty<ActiveContact>());
+        Require(resolvedEarly.Grade == JudgmentGrade.Perfect && resolvedLate.Grade == JudgmentGrade.Pending,
+            "A resolved earlier Tap must keep protecting the later Tap's early Justice interval");
     }
 
     static void ValidateAutoPlay()
@@ -778,6 +817,19 @@ public static class RuntimeValidation
         Require(tap.Grade == JudgmentGrade.Perfect && flick.Grade == JudgmentGrade.Perfect &&
                 sustain.Grade == JudgmentGrade.Perfect && release.Grade == JudgmentGrade.Perfect && future.Grade == JudgmentGrade.Pending,
             "Auto Play 必須在音符時間以 Perfect 結算所有可判定音符，並忽略玩家輸入");
+    }
+
+    static void ValidateLatencyCalibration()
+    {
+        var measured = SonolusLandscapePrototype.CalibrationOffsetForElapsed(4.906077, .6);
+        Require(Math.Abs(measured - .106077) < .000001,
+            "Latency calibration must measure against the nearest beat instead of the first four beats");
+        Require(SonolusLandscapePrototype.SanitizeInputOffset(4.906077) == 0,
+            "An impossible persisted input offset must reset to zero");
+        Require(Math.Abs(SonolusLandscapePrototype.SanitizeInputOffset(.106077) - .106077) < .000001,
+            "A plausible persisted input offset must be preserved");
+        Require(SonolusLandscapePrototype.SanitizeInputOffset(.31) == 0,
+            "Manual input offset must not exceed the 300 ms safety limit");
     }
 
     static void ValidateAudioDeviceRecovery()
@@ -915,7 +967,32 @@ public static class RuntimeValidation
         var rubEngine = new JudgmentEngine(rubNotes, new ScoreState());
         rubEngine.Process(3.2, rubInputs, Array.Empty<ActiveContact>());
         Require(rubNotes.All(note => note.Grade == JudgmentGrade.Perfect),
-            "A timed rub must match Tap notes in every crossed slider cell");
+            $"A timed rub must match Tap notes in every crossed slider cell: {string.Join(",", rubNotes.Select(note => note.Grade))}");
+
+        var forgivenessPriority = Note(13, 5, 0);
+        var priorityEngine = new JudgmentEngine(new[] { forgivenessPriority }, new ScoreState());
+        priorityEngine.Process(5.070,
+            new[]
+            {
+                new InputToken(10, RuntimeNoteKind.Tap, 5.000, 1.2f),
+                new InputToken(11, RuntimeNoteKind.Tap, 5.070, 0),
+            },
+            Array.Empty<ActiveContact>());
+        Require(forgivenessPriority.Grade == JudgmentGrade.Perfect,
+            "A better forgiveness candidate must not be discarded for a worse authored-span candidate in the same batch");
+
+        var multiFingerA = Note(14, 6, 0);
+        var multiFingerB = Note(15, 6, 0);
+        var multiFingerEngine = new JudgmentEngine(new[] { multiFingerA, multiFingerB }, new ScoreState());
+        multiFingerEngine.Process(6,
+            new[]
+            {
+                new InputToken(20, RuntimeNoteKind.Tap, 6, 0),
+                new InputToken(21, RuntimeNoteKind.Tap, 6, 1.2f),
+            },
+            Array.Empty<ActiveContact>());
+        Require(multiFingerA.Grade == JudgmentGrade.Perfect && multiFingerB.Grade == JudgmentGrade.Perfect,
+            "An authored candidate from one finger must not remove another finger's forgiveness candidate");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()
