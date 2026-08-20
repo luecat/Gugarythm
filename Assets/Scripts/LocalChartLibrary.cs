@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
+using System.Text;
 using Newtonsoft.Json;
 using UnityEngine;
 
@@ -15,6 +16,10 @@ namespace Gugarythm
         public string Title;
         public string Artist;
         public string Author;
+        public string DifficultyName;
+        public string DifficultyLevel;
+        public string GroupId;
+        public float BestAccuracy = -1f;
         public string Format;
         public string SourceFile;
         public int NoteCount;
@@ -34,7 +39,7 @@ namespace Gugarythm
             return string.Concat(algorithm.ComputeHash(bytes).Select(value => value.ToString("x2")));
         }
 
-        public static LocalChartEntry Save(string fileName, byte[] bytes, RuntimeChart chart)
+        public static LocalChartEntry Save(string fileName, byte[] bytes, RuntimeChart chart, string groupId = null)
         {
             Directory.CreateDirectory(Root);
             var id = Sha256(bytes);
@@ -49,6 +54,11 @@ namespace Gugarythm
             entry.Title = chart.Title;
             entry.Artist = chart.Artist;
             entry.Author = chart.Author;
+            entry.DifficultyName = chart.DifficultyName;
+            entry.DifficultyLevel = chart.DifficultyLevel;
+            entry.GroupId = string.IsNullOrWhiteSpace(groupId)
+                ? string.IsNullOrWhiteSpace(entry.GroupId) ? NewGroupId() : entry.GroupId
+                : groupId;
             entry.Format = chart.SourceFormat;
             entry.SourceFile = sourceName;
             entry.NoteCount = chart.PlayableCount;
@@ -59,12 +69,113 @@ namespace Gugarythm
             return entry;
         }
 
+        public static string NewGroupId() => Guid.NewGuid().ToString("N");
+
+        public static string FindMatchingGroupId(string title, string artist)
+        {
+            var key = Normalize(title);
+            return Load().FirstOrDefault(entry => Normalize(entry.Title) == key)?.GroupId;
+        }
+
+        public static bool TryReadSource(LocalChartEntry entry, out byte[] bytes)
+        {
+            bytes = null;
+            if (entry == null || string.IsNullOrWhiteSpace(entry.SourceFile) || Path.IsPathRooted(entry.SourceFile)) return false;
+            try
+            {
+                var path = Path.Combine(Root, entry.SourceFile);
+                if (!File.Exists(path)) return false;
+                bytes = File.ReadAllBytes(path);
+                return bytes.Length > 0;
+            }
+            catch (Exception) { return false; }
+        }
+
+        public static void UpdateBestAccuracy(string id, float accuracy)
+        {
+            if (string.IsNullOrWhiteSpace(id) || float.IsNaN(accuracy) || float.IsInfinity(accuracy)) return;
+            var entries = Load().ToList();
+            var entry = entries.FirstOrDefault(value => value.Id == id);
+            if (entry == null || accuracy <= entry.BestAccuracy) return;
+            entry.BestAccuracy = accuracy;
+            Directory.CreateDirectory(Root);
+            File.WriteAllText(ManifestPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
+        }
+
+        /// <summary>
+        /// Updates the shared song metadata for a merged group and the selected
+        /// difficulty's chart constant.  A title cannot be blank because it is
+        /// the primary label used by the library and grouping UI.
+        /// </summary>
+        public static bool TryUpdateChartDetails(string id, string title, string artist, string difficultyLevel, out LocalChartEntry updated)
+        {
+            updated = null;
+            if (string.IsNullOrWhiteSpace(id)) return false;
+
+            title = (title ?? string.Empty).Trim();
+            if (title.Length == 0) return false;
+
+            var entries = Load().ToList();
+            var entry = entries.FirstOrDefault(value => value.Id == id);
+            if (entry == null) return false;
+
+            var groupId = entry.GroupId;
+            foreach (var groupedEntry in entries.Where(value => value.GroupId == groupId))
+            {
+                groupedEntry.Title = title;
+                groupedEntry.Artist = (artist ?? string.Empty).Trim();
+            }
+
+            entry.DifficultyLevel = (difficultyLevel ?? string.Empty).Trim();
+            Directory.CreateDirectory(Root);
+            File.WriteAllText(ManifestPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
+            updated = entry;
+            return true;
+        }
+
+        /// <summary>Removes one stored chart entry and its private source package.</summary>
+        public static bool TryDelete(string id)
+        {
+            if (string.IsNullOrWhiteSpace(id)) return false;
+            var entries = Load().ToList();
+            var entry = entries.FirstOrDefault(value => value.Id == id);
+            if (entry == null) return false;
+
+            entries.Remove(entry);
+            Directory.CreateDirectory(Root);
+            File.WriteAllText(ManifestPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
+
+            // SourceFile is stored as a filename; reject rooted values so a
+            // corrupt manifest can never delete something outside ChartLibrary.
+            if (!string.IsNullOrWhiteSpace(entry.SourceFile) && !Path.IsPathRooted(entry.SourceFile))
+            {
+                try
+                {
+                    var sourcePath = Path.Combine(Root, entry.SourceFile);
+                    if (File.Exists(sourcePath)) File.Delete(sourcePath);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogWarning("譜面索引已刪除，但無法移除原始 GGR：" + exception.Message);
+                }
+            }
+            return true;
+        }
+
         public static IReadOnlyList<LocalChartEntry> Load()
         {
             try
             {
                 if (!File.Exists(ManifestPath)) return Array.Empty<LocalChartEntry>();
-                return JsonConvert.DeserializeObject<List<LocalChartEntry>>(File.ReadAllText(ManifestPath)) ?? new List<LocalChartEntry>();
+                var entries = JsonConvert.DeserializeObject<List<LocalChartEntry>>(File.ReadAllText(ManifestPath)) ?? new List<LocalChartEntry>();
+                foreach (var entry in entries)
+                {
+                    if (string.IsNullOrWhiteSpace(entry.GroupId)) entry.GroupId = LegacyGroupId(entry.Title, entry.Artist);
+                    if (float.IsNaN(entry.BestAccuracy) || float.IsInfinity(entry.BestAccuracy)) entry.BestAccuracy = -1f;
+                    entry.DifficultyName ??= string.Empty;
+                    entry.DifficultyLevel ??= string.Empty;
+                }
+                return entries;
             }
             catch (Exception exception)
             {
@@ -72,5 +183,11 @@ namespace Gugarythm
                 return Array.Empty<LocalChartEntry>();
             }
         }
+
+        static string GroupKey(string title, string artist) => Normalize(title) + "\u001f" + Normalize(artist);
+
+        static string LegacyGroupId(string title, string artist) => "legacy-" + Sha256(Encoding.UTF8.GetBytes(GroupKey(title, artist)))[..16];
+
+        static string Normalize(string value) => string.Join(" ", (value ?? string.Empty).Trim().Normalize(NormalizationForm.FormKC).Split((char[])null, StringSplitOptions.RemoveEmptyEntries)).ToUpperInvariant();
     }
 }

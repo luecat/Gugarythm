@@ -6,6 +6,15 @@ EditorBuildSettings:
   serializedVersion: 2
   m_Scenes:
   - enabled: 1
+    path: Assets/Scenes/LibraryScene.unity
+    guid: 9e346109ec7f4bb68a390ad70a347fd9
+  - enabled: 1
+    path: Assets/Scenes/SettingsScene.unity
+    guid: 20420d01aa894cd2b83b98e79a489613
+  - enabled: 1
+    path: Assets/Scenes/ChartEditorScene.unity
+    guid: 8b3f665825f44a9393c02e1216ff0e64
+  - enabled: 1
     path: Assets/Scenes/RhythmPrototype.unity
     guid: 1671048e3fb7f45b58761f71951a3c6c
   m_configObjects: {}

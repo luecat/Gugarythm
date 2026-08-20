@@ -140,6 +140,8 @@ namespace Gugarythm
         public string Title = "Untitled";
         public string Artist = "";
         public string Author = "";
+        public string DifficultyName = "";
+        public string DifficultyLevel = "";
         public string Engine = "";
         public double BgmOffset;
         public byte[] BgmBytes;

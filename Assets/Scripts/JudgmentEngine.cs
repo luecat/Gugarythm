@@ -415,8 +415,14 @@ namespace Gugarythm
                     if (distance >= OuterLateWindow(earlier) + OuterEarlyWindow(later)) break;
                     if (distance <= 0 || !IsTapProtectionKind(later.Kind)) continue;
 
-                    var sharedMinimum = Math.Max(earlier.Lane - earlier.Size, later.Lane - later.Size);
-                    var sharedMaximum = Math.Min(earlier.Lane + earlier.Size, later.Lane + later.Size);
+                    // CHUNITHM-style protection follows the physical input
+                    // area, not only the visible note sprites. A rub can
+                    // cross two adjacent playable regions whose artwork does
+                    // not overlap, and that transition must retain protection.
+                    var sharedMinimum = Math.Max(earlier.Lane - earlier.Size - LaneForgiveness,
+                        later.Lane - later.Size - LaneForgiveness);
+                    var sharedMaximum = Math.Min(earlier.Lane + earlier.Size + LaneForgiveness,
+                        later.Lane + later.Size + LaneForgiveness);
                     if (sharedMinimum >= sharedMaximum) continue;
 
                     var pair = new TapProtectionPair(earlier, later, sharedMinimum, sharedMaximum);
