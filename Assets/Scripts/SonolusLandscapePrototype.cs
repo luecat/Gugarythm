@@ -269,6 +269,7 @@ namespace Gugarythm
         Slider speedSlider;
         Material laneMaterial;
         Material missedHoldMaterial;
+        Material smoothHoldMaterial;
         bool running;
         bool loading;
         bool musicLoadSucceeded;
@@ -386,6 +387,7 @@ namespace Gugarythm
             if (EnhancedTouchSupport.enabled) EnhancedTouchSupport.Disable();
             if (laneMaterial != null) Destroy(laneMaterial);
             if (missedHoldMaterial != null) Destroy(missedHoldMaterial);
+            if (smoothHoldMaterial != null) Destroy(smoothHoldMaterial);
         }
 
         void Update()
@@ -1329,7 +1331,7 @@ namespace Gugarythm
                     // opacity of about 0.62, yielding a ~0.5 center opacity.
                     line.color = new Color(1, 1, 1, .62f);
                 }
-                line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : null;
+                line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : smoothHoldMaterial;
                 SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
                 if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
                     holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root) &&
@@ -1873,6 +1875,8 @@ namespace Gugarythm
             }
             var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
+            var smoothHoldShader = Shader.Find("Gugarythm/Smooth Hold Ribbon UI");
+            if (smoothHoldShader != null) smoothHoldMaterial = new Material(smoothHoldShader);
             BuildInputLaneFeedback(stage);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             BuildJudgmentDebugGrid(stage);
