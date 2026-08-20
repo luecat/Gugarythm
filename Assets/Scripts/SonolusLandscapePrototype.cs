@@ -232,6 +232,7 @@ namespace Gugarythm
         AudioClip criticalFlickSound;
         AudioClip stageSound;
         RuntimeChart chart;
+        LocalChartEntry currentLibraryEntry;
         JudgmentEngine judgmentEngine;
         AudioSource music;
         AudioSource effects;
@@ -246,6 +247,10 @@ namespace Gugarythm
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
         RectTransform menuPanel;
+        RectTransform settingsPanel;
+        RectTransform chartEditorPanel;
+        RectTransform deleteChartConfirmationPanel;
+        RectTransform importDecisionPanel;
         RectTransform pauseOverlay;
         RectTransform pauseMenuContent;
         RectTransform resultPanel;
@@ -253,10 +258,29 @@ namespace Gugarythm
         Text comboLabel;
         Text judgmentLabel;
         Text loadStatus;
+        Text libraryCountLabel;
+        Text librarySortLabel;
+        Text librarySortModeLabel;
+        RectTransform libraryDirectionIcon;
+        Text detailTitleLabel;
+        Text detailArtistLabel;
+        Text detailDifficultyLabel;
+        Text detailAccuracyLabel;
+        Text detailLevelLabel;
+        Text detailCoverTitleLabel;
+        InputField librarySearchInput;
+        InputField chartEditorTitleInput;
+        InputField chartEditorAuthorInput;
+        InputField chartEditorLevelInput;
+        RectTransform libraryListContent;
+        RectTransform difficultyButtonContent;
+        Text importDecisionText;
         Text resultText;
         Text speedLabel;
         Text calibrationLabel;
         Text calibrationOffsetLabel;
+        Text chartEditorSubtitleLabel;
+        Text chartEditorStatusLabel;
         Button calibrationTapButton;
         Button calibrationDecreaseOffsetButton;
         Button calibrationIncreaseOffsetButton;
@@ -264,6 +288,11 @@ namespace Gugarythm
         Text resumeCountdownLabel;
         Text pauseTitle;
         Button startButton;
+        LocalChartEntry selectedLibraryEntry;
+        LocalChartEntry chartEditorEntry;
+        string selectedDifficultyName = "";
+        ChartLibrarySort librarySort = ChartLibrarySort.Accuracy;
+        bool librarySortAscending;
         Button pauseButton;
         RectTransform calibrationPanel;
         Toggle autoPlayToggle;
@@ -271,6 +300,9 @@ namespace Gugarythm
         Material laneMaterial;
         Material missedHoldMaterial;
         bool running;
+        string pendingImportFileName;
+        byte[] pendingImportBytes;
+        RuntimeChart pendingImportChart;
         bool loading;
         bool musicLoadSucceeded;
         bool paused;
@@ -376,6 +408,101 @@ namespace Gugarythm
             SetStatus("請匯入 GGR 封包。");
         }
 
+        IEnumerator Start()
+        {
+            // Every scene owns a fresh presentation/controller.  Only the
+            // selected package crosses the boundary through ChartSelectionSession.
+            if (GugarythmSceneRouter.IsLibrary)
+            {
+                SetMenuHudVisible(false);
+                menuPanel.gameObject.SetActive(true);
+                settingsPanel.gameObject.SetActive(false);
+                RestoreLibrarySelection();
+                RefreshLibraryUI();
+                yield break;
+            }
+
+            if (GugarythmSceneRouter.IsSettings)
+            {
+                SetMenuHudVisible(false);
+                menuPanel.gameObject.SetActive(false);
+                settingsPanel.gameObject.SetActive(true);
+                yield break;
+            }
+
+            if (GugarythmSceneRouter.IsChartEditor)
+            {
+                SetMenuHudVisible(false);
+                menuPanel.gameObject.SetActive(false);
+                settingsPanel.gameObject.SetActive(false);
+                chartEditorPanel.gameObject.SetActive(true);
+                PopulateChartEditor();
+                yield break;
+            }
+
+            menuPanel.gameObject.SetActive(false);
+            settingsPanel.gameObject.SetActive(false);
+            chartEditorPanel.gameObject.SetActive(false);
+            if (!ChartSelectionSession.Ensure().TryGetSelection(out var entry, out var bytes))
+            {
+                GugarythmSceneRouter.OpenLibrary();
+                yield break;
+            }
+
+            yield return LoadGameplaySelection(entry, bytes);
+        }
+
+        void SetMenuHudVisible(bool visible)
+        {
+            if (accuracyLabel != null) accuracyLabel.transform.parent.gameObject.SetActive(visible);
+            if (comboLabel != null) comboLabel.gameObject.SetActive(false);
+            if (judgmentLabel != null) judgmentLabel.gameObject.SetActive(visible);
+            if (pauseButton != null) pauseButton.gameObject.SetActive(false);
+        }
+
+        void RestoreLibrarySelection()
+        {
+            if (!ChartSelectionSession.Ensure().TryGetSelection(out var remembered, out _)) return;
+            var entry = LocalChartLibrary.Load().FirstOrDefault(candidate => candidate.Id == remembered.Id);
+            if (entry == null) return;
+            selectedLibraryEntry = entry;
+            currentLibraryEntry = entry;
+            selectedDifficultyName = entry.DifficultyName ?? string.Empty;
+        }
+
+        IEnumerator LoadGameplaySelection(LocalChartEntry entry, byte[] bytes)
+        {
+            loading = true;
+            startButton.interactable = false;
+            SetStatus("正在載入 " + entry.Title + "…");
+            yield return null;
+
+            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
+            if (!result.Success)
+            {
+                Debug.LogError("無法載入跨場景選取的譜面：" + result.Error);
+                GugarythmSceneRouter.OpenLibrary();
+                yield break;
+            }
+
+            chart = result.Chart;
+            musicLoadSucceeded = false;
+            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
+            if (!musicLoadSucceeded)
+            {
+                Debug.LogError("跨場景選取的 GGR 音樂無法解碼。");
+                GugarythmSceneRouter.OpenLibrary();
+                yield break;
+            }
+
+            currentLibraryEntry = entry;
+            selectedLibraryEntry = entry;
+            selectedDifficultyName = entry.DifficultyName ?? string.Empty;
+            loading = false;
+            startButton.interactable = true;
+            StartGameplay();
+        }
+
         void OnDestroy()
         {
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
@@ -459,8 +586,7 @@ namespace Gugarythm
             }
             else SetStatus("GGR 缺少 USC 譜面或音樂。");
 
-            SaveToLocalLibrary(fileName, bytes, chart);
-            startButton.interactable = music.clip != null;
+            PresentImportStorageDecision(fileName, bytes, chart);
             var warning = chart.Warnings.Count > 0 ? $" · {chart.Warnings.Count} 個解析警告" : "";
             SetStatus($"{chart.Title} · {chart.PlayableCount:N0} notes · {chart.SourceFormat}{warning}");
             loading = false;
@@ -683,6 +809,30 @@ namespace Gugarythm
 
         void StartGame()
         {
+            if (GugarythmSceneRouter.IsLibrary)
+            {
+                if (loading || selectedLibraryEntry == null) return;
+                if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
+                {
+                    SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。");
+                    return;
+                }
+
+                if (!ChartSelectionSession.Ensure().SetSelection(selectedLibraryEntry, bytes))
+                {
+                    SetStatus("無法準備所選譜面。");
+                    return;
+                }
+
+                GugarythmSceneRouter.OpenGameplay();
+                return;
+            }
+
+            StartGameplay();
+        }
+
+        void StartGameplay()
+        {
             if (loading || chart == null || music.clip == null) return;
             CancelResumeCountdown();
             ResetRuntime();
@@ -822,9 +972,9 @@ namespace Gugarythm
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
             resultPanel.gameObject.SetActive(false);
-            menuPanel.gameObject.SetActive(true);
             RefreshHud();
             ShowJudgment("", Color.white);
+            GugarythmSceneRouter.OpenLibrary();
         }
 
         void CancelResumeCountdown()
@@ -1761,6 +1911,8 @@ namespace Gugarythm
             pauseButton.gameObject.SetActive(false);
             ReleaseAllViews();
             RefreshHud();
+            if (currentLibraryEntry != null)
+                LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
             resultPanel.gameObject.SetActive(true);
             resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}";
         }
@@ -1888,6 +2040,9 @@ namespace Gugarythm
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
             BuildMenu(safeAreaRoot);
+            BuildSettings(safeAreaRoot);
+            BuildChartEditor(safeAreaRoot);
+            BuildImportDecision(safeAreaRoot);
             BuildLatencyCalibration(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
@@ -2035,7 +2190,20 @@ namespace Gugarythm
             var logicalSafeSize = new Vector2(
                 ReferenceWidth * safe.width / Screen.width,
                 CanvasHeight * safe.height / Screen.height);
-            FitOverlayPanel(menuPanel, new Vector2(760, 570), logicalSafeSize);
+            // 曲庫是主畫面，不是置中的彈窗；必須覆蓋整個可用安全區域。
+            if (menuPanel != null)
+            {
+                Fill(menuPanel);
+                menuPanel.localScale = Vector3.one;
+            }
+            // Settings is a destination scene as well, so its root follows the
+            // safe area exactly instead of retaining the old modal dimensions.
+            if (settingsPanel != null)
+            {
+                Fill(settingsPanel);
+                settingsPanel.localScale = Vector3.one;
+            }
+            FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(500, 530), logicalSafeSize);
             FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
@@ -2064,21 +2232,476 @@ namespace Gugarythm
 
         void BuildMenu(RectTransform root)
         {
-            menuPanel = Panel("Library Menu", root, new Color(.04f, .06f, .14f, .94f), new Vector2(760, 570), Vector2.zero); Outline(menuPanel.gameObject, new Color(.4f, .8f, 1f, .75f), 3);
-            var title = Label("GUGARYTHM  LOCAL PLAYER", menuPanel, 36); title.rectTransform.sizeDelta = new Vector2(700, 70); title.rectTransform.anchoredPosition = new Vector2(0, 220);
-            loadStatus = Label("準備中…", menuPanel, 20); loadStatus.rectTransform.sizeDelta = new Vector2(680, 80); loadStatus.rectTransform.anchoredPosition = new Vector2(0, 145);
-            speedLabel = Label("流速  8.0  ·  按鈕／← → 每次 0.1", menuPanel, 23); speedLabel.rectTransform.sizeDelta = new Vector2(600, 44); speedLabel.rectTransform.anchoredPosition = new Vector2(0, 82);
-            speedLabel.text = $"流速  {scrollSpeed:F1}  ·  按鈕／← → 每次 0.1";
-            speedSlider = MakeSlider(menuPanel, new Vector2(0, 42), 1, 20, scrollSpeed, value =>
+            menuPanel = Panel("Chart Library", root, new Color(.11f, .11f, .11f, 1f), new Vector2(1500, 820), Vector2.zero);
+            Fill(menuPanel);
+            menuPanel.localScale = Vector3.one;
+            var library = Panel("Library Pane", menuPanel, new Color(.16f, .16f, .16f, 1f), Vector2.zero, Vector2.zero, true);
+            library.anchorMin = new Vector2(0, 0); library.anchorMax = new Vector2(.244f, 1); library.offsetMin = Vector2.zero; library.offsetMax = Vector2.zero;
+            var divider = Panel("Library Divider", menuPanel, new Color(.27f, .27f, .27f, 1f), Vector2.zero, Vector2.zero, true);
+            divider.anchorMin = new Vector2(.244f, 0); divider.anchorMax = new Vector2(.244f, 1); divider.offsetMin = Vector2.zero; divider.offsetMax = new Vector2(1, 0); divider.GetComponent<Image>().raycastTarget = false;
+            var detail = Panel("Detail Pane", menuPanel, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
+            detail.anchorMin = new Vector2(.244f, 0); detail.anchorMax = new Vector2(1, 1); detail.offsetMin = new Vector2(1, 0); detail.offsetMax = Vector2.zero;
+
+            var brand = Label("GUGARYTHM", library, 19); brand.color = new Color(.68f, .68f, .68f); brand.alignment = TextAnchor.MiddleLeft; brand.rectTransform.sizeDelta = new Vector2(260, 36); PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -34));
+            var heading = Label("譜面保管庫", library, 30); heading.alignment = TextAnchor.MiddleLeft; heading.rectTransform.sizeDelta = new Vector2(270, 50); PinToAnchor(heading.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -74));
+            var countBadge = Panel("Chart Count Badge", library, new Color(.24f, .24f, .24f), new Vector2(42, 42), Vector2.zero);
+            PinToAnchor(countBadge, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-38, -42));
+            var countBadgeText = Label("", countBadge, 18); Fill(countBadgeText.rectTransform); libraryCountLabel = countBadgeText;
+            librarySearchInput = MakeInputField("搜尋", library, Vector2.zero, new Vector2(0, 56));
+            var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -204); searchRect.offsetMax = new Vector2(-22, -148);
+            librarySearchInput.onValueChanged.AddListener(_ => RefreshLibraryUI());
+            const int libraryHeaderFontSize = 19;
+            const float libraryHeaderCenterY = -287;
+            var listHeading = Label("所有譜面", library, libraryHeaderFontSize); listHeading.alignment = TextAnchor.MiddleLeft; listHeading.rectTransform.sizeDelta = new Vector2(220, 40); PinToAnchor(listHeading.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(34, libraryHeaderCenterY));
+            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleRight; librarySortLabel.rectTransform.sizeDelta = new Vector2(54, 40); PinToAnchor(librarySortLabel.rectTransform, new Vector2(1, 1), new Vector2(1, .5f), new Vector2(-215, libraryHeaderCenterY));
+            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleRight; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(78, 40); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(1, 1), new Vector2(1, .5f), new Vector2(-141, libraryHeaderCenterY));
+            MakeInvisibleButton(librarySortModeLabel.rectTransform, CycleLibrarySort);
+            libraryDirectionIcon = Panel("Sort Direction", library, Color.clear, new Vector2(42, 40), Vector2.zero);
+            // Rotate around the icon centre so ascending and descending arrows share the same visual X position.
+            PinToAnchor(libraryDirectionIcon, new Vector2(1, 1), new Vector2(.5f, .5f), new Vector2(-105, libraryHeaderCenterY));
+            AddSortArrowIcon(libraryDirectionIcon);
+            MakeInvisibleButton(libraryDirectionIcon, () => { librarySortAscending = !librarySortAscending; RefreshLibraryUI(); });
+            libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
+            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-22, -310);
+
+            var importButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
+            var importRect = importButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
+
+            var breadcrumb = Label("LIBRARY   /   CHART DETAIL", detail, 18); breadcrumb.color = new Color(.64f, .64f, .64f); breadcrumb.alignment = TextAnchor.MiddleLeft; breadcrumb.rectTransform.sizeDelta = new Vector2(480, 38); PinToAnchor(breadcrumb.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(80, -52));
+            var gear = MakeOutlinedButton("", detail, Vector2.zero, OpenSettings, new Vector2(66, 66));
+            PinToAnchor(gear.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-48, -48));
+            AddGearIcon(gear.GetComponent<RectTransform>());
+            var edit = MakeOutlinedButton("", detail, Vector2.zero, OpenChartEditor, new Vector2(66, 66));
+            PinToAnchor(edit.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-126, -48));
+            AddPencilIcon(edit.GetComponent<RectTransform>());
+            var cover = Panel("Cover Placeholder", detail, new Color(.19f, .30f, .42f), new Vector2(495, 495), Vector2.zero);
+            PinToAnchor(cover, new Vector2(.24f, .5f), new Vector2(.5f, .5f), new Vector2(0, -45));
+            // Keep the no-cover fallback visually consistent with the Web archive
+            // rather than showing a blank utility tile.
+            cover.gameObject.AddComponent<RectMask2D>();
+            var coverMagenta = Panel("Cover Magenta", cover, new Color(.61f, .33f, .45f), new Vector2(760, 250), new Vector2(-112, 205));
+            coverMagenta.localRotation = Quaternion.Euler(0, 0, -45);
+            var coverCyan = Panel("Cover Cyan", cover, new Color(.29f, .55f, .68f), new Vector2(760, 320), new Vector2(0, 15));
+            coverCyan.localRotation = Quaternion.Euler(0, 0, -45);
+            var coverBlue = Panel("Cover Blue", cover, new Color(.23f, .35f, .77f), new Vector2(760, 245), new Vector2(145, -190));
+            coverBlue.localRotation = Quaternion.Euler(0, 0, -45);
+            var coverLetter = Label("G", cover, 142); coverLetter.color = new Color(1f, 1f, 1f, .16f); Fill(coverLetter.rectTransform);
+            var coverBrand = Label("GUGARYTHM\nCHART ARCHIVE", cover, 15); coverBrand.alignment = TextAnchor.UpperRight; coverBrand.rectTransform.sizeDelta = new Vector2(210, 70); coverBrand.rectTransform.anchoredPosition = new Vector2(112, 185);
+            detailCoverTitleLabel = Label("選擇一份譜面", cover, 56); detailCoverTitleLabel.alignment = TextAnchor.LowerLeft; detailCoverTitleLabel.rectTransform.sizeDelta = new Vector2(430, 190); detailCoverTitleLabel.rectTransform.anchoredPosition = new Vector2(-18, -128);
+            var detailKicker = Label("CHART DETAIL", detail, 18); detailKicker.color = new Color(.64f, .64f, .64f); detailKicker.alignment = TextAnchor.MiddleLeft; detailKicker.rectTransform.sizeDelta = new Vector2(320, 34); PinToAnchor(detailKicker.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 305));
+            detailTitleLabel = Label("選擇一份譜面", detail, 58); detailTitleLabel.alignment = TextAnchor.MiddleLeft; detailTitleLabel.rectTransform.sizeDelta = new Vector2(620, 92); PinToAnchor(detailTitleLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 183.5f));
+            detailArtistLabel = Label("", detail, 25); detailArtistLabel.color = new Color(.68f, .68f, .68f); detailArtistLabel.alignment = TextAnchor.MiddleLeft; detailArtistLabel.rectTransform.sizeDelta = new Vector2(620, 48); PinToAnchor(detailArtistLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 113.5f));
+            var infoDivider = Panel("Detail Divider", detail, new Color(.28f, .28f, .28f), new Vector2(0, 1), Vector2.zero); infoDivider.anchorMin = new Vector2(.51f, .5f); infoDivider.anchorMax = new Vector2(.94f, .5f); infoDivider.offsetMin = new Vector2(0, 72); infoDivider.offsetMax = new Vector2(0, 73); infoDivider.GetComponent<Image>().raycastTarget = false;
+            detailDifficultyLabel = Label("選擇難度", detail, 17); detailDifficultyLabel.color = new Color(.68f, .68f, .68f); detailDifficultyLabel.alignment = TextAnchor.MiddleLeft; detailDifficultyLabel.rectTransform.sizeDelta = new Vector2(440, 38); PinToAnchor(detailDifficultyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 36));
+            difficultyButtonContent = new GameObject("Difficulty Buttons", typeof(RectTransform)).GetComponent<RectTransform>();
+            difficultyButtonContent.SetParent(detail, false);
+            difficultyButtonContent.anchorMin = difficultyButtonContent.anchorMax = new Vector2(0, .5f);
+            difficultyButtonContent.pivot = new Vector2(0, .5f);
+            difficultyButtonContent.sizeDelta = new Vector2(450, 76);
+            difficultyButtonContent.anchoredPosition = new Vector2(0, -26);
+            difficultyButtonContent.anchorMin = difficultyButtonContent.anchorMax = new Vector2(.51f, .5f);
+            detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(230, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
+            detailLevelLabel = Label("CHART LEVEL\n<size=52>—</size>", detail, 18); detailLevelLabel.supportRichText = true; detailLevelLabel.alignment = TextAnchor.UpperLeft; detailLevelLabel.color = new Color(.88f, .88f, .88f); detailLevelLabel.rectTransform.sizeDelta = new Vector2(220, 100); PinToAnchor(detailLevelLabel.rectTransform, new Vector2(.75f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
+            startButton = MakeFlatButton("▶  開始遊戲", detail, Vector2.zero, StartGame, new Vector2(0, 82), new Color(.06f, .58f, .96f));
+            var startRect = startButton.GetComponent<RectTransform>(); startRect.anchorMin = new Vector2(.51f, .5f); startRect.anchorMax = new Vector2(.94f, .5f); startRect.pivot = new Vector2(.5f, .5f); startRect.offsetMin = new Vector2(0, -300.5f); startRect.offsetMax = new Vector2(0, -218.5f);
+            startButton.interactable = false;
+            RefreshLibraryUI();
+        }
+
+        void BuildSettings(RectTransform root)
+        {
+            settingsPanel = Panel("Settings", root, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
+            var title = Label("設定", settingsPanel, 42);
+            title.alignment = TextAnchor.MiddleLeft;
+            title.rectTransform.sizeDelta = new Vector2(560, 72);
+            PinToAnchor(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(64, -42));
+            var back = MakeFlatButton("返回曲庫", settingsPanel, Vector2.zero, ReturnFromSettings, new Vector2(180, 58), new Color(.18f, .18f, .18f));
+            PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-52, -48));
+
+            var card = Panel("Settings Card", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(760, 520), new Vector2(0, -20));
+            var cardTitle = Label("音訊與遊玩", card, 32);
+            cardTitle.rectTransform.sizeDelta = new Vector2(660, 62);
+            cardTitle.rectTransform.anchoredPosition = new Vector2(0, 180);
+            var description = Label("調整遊玩延遲與輸入同步", card, 22);
+            description.color = new Color(.72f, .82f, 1f, 1);
+            description.rectTransform.sizeDelta = new Vector2(660, 44);
+            description.rectTransform.anchoredPosition = new Vector2(0, 125);
+            MakeFlatButton("校正聲音偏移", card, new Vector2(0, 15), StartLatencyCalibration, new Vector2(420, 76), new Color(.06f, .58f, .96f));
+            var offset = Label($"目前聲音偏移  {audioOffsetSeconds * 1000d:+0;-0;0} ms", card, 19);
+            offset.color = new Color(.68f, .68f, .68f);
+            offset.rectTransform.sizeDelta = new Vector2(620, 44);
+            offset.rectTransform.anchoredPosition = new Vector2(0, -75);
+            settingsPanel.gameObject.SetActive(false);
+        }
+
+        void BuildChartEditor(RectTransform root)
+        {
+            chartEditorPanel = Panel("Chart Editor", root, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
+            var breadcrumb = Label("LIBRARY   /   EDIT CHART", chartEditorPanel, 18);
+            breadcrumb.color = new Color(.64f, .64f, .64f);
+            breadcrumb.alignment = TextAnchor.MiddleLeft;
+            breadcrumb.rectTransform.sizeDelta = new Vector2(480, 38);
+            PinToAnchor(breadcrumb.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(80, -52));
+
+            var back = MakeOutlinedButton("返回曲庫", chartEditorPanel, Vector2.zero, ReturnFromChartEditor, new Vector2(130, 48));
+            PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-56, -48));
+
+            var card = Panel("Chart Editor Card", chartEditorPanel, new Color(.14f, .14f, .14f, 1f), new Vector2(740, 610), Vector2.zero);
+            var title = Label("編輯譜面", card, 42);
+            title.alignment = TextAnchor.MiddleLeft;
+            title.rectTransform.sizeDelta = new Vector2(620, 64);
+            title.rectTransform.anchoredPosition = new Vector2(0, 240);
+            chartEditorSubtitleLabel = Label("", card, 18);
+            chartEditorSubtitleLabel.alignment = TextAnchor.MiddleLeft;
+            chartEditorSubtitleLabel.color = new Color(.65f, .65f, .65f);
+            chartEditorSubtitleLabel.rectTransform.sizeDelta = new Vector2(620, 36);
+            chartEditorSubtitleLabel.rectTransform.anchoredPosition = new Vector2(0, 190);
+
+            BuildEditorField(card, "歌曲名稱", out chartEditorTitleInput, new Vector2(0, 100));
+            BuildEditorField(card, "作者名稱", out chartEditorAuthorInput, new Vector2(0, 0));
+            BuildEditorField(card, "難度", out chartEditorLevelInput, new Vector2(0, -100));
+            chartEditorStatusLabel = Label("", card, 17);
+            chartEditorStatusLabel.color = new Color(.92f, .54f, .54f);
+            chartEditorStatusLabel.alignment = TextAnchor.MiddleLeft;
+            chartEditorStatusLabel.rectTransform.sizeDelta = new Vector2(620, 32);
+            chartEditorStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -158);
+
+            MakeFlatButton("儲存變更", card, new Vector2(100, -225), SaveChartEditor, new Vector2(300, 64), new Color(.06f, .58f, .96f));
+            var delete = MakeOutlinedButton("刪除譜面", card, new Vector2(-220, -225), PromptDeleteChart, new Vector2(180, 64));
+            var deleteText = delete.GetComponentInChildren<Text>();
+            deleteText.color = new Color(1f, .48f, .48f);
+            Outline(delete.gameObject, new Color(.72f, .26f, .26f), 1);
+
+            deleteChartConfirmationPanel = Panel("Delete Chart Confirmation", chartEditorPanel, new Color(.07f, .07f, .07f, .99f), new Vector2(520, 300), Vector2.zero);
+            Outline(deleteChartConfirmationPanel.gameObject, new Color(.78f, .28f, .28f), 2);
+            var confirmTitle = Label("確定要刪除這份譜面？", deleteChartConfirmationPanel, 28);
+            confirmTitle.rectTransform.sizeDelta = new Vector2(450, 52);
+            confirmTitle.rectTransform.anchoredPosition = new Vector2(0, 88);
+            var confirmCopy = Label("此操作會移除本機 GGR，無法復原。", deleteChartConfirmationPanel, 18);
+            confirmCopy.color = new Color(.72f, .72f, .72f);
+            confirmCopy.rectTransform.sizeDelta = new Vector2(450, 42);
+            confirmCopy.rectTransform.anchoredPosition = new Vector2(0, 35);
+            MakeOutlinedButton("取消", deleteChartConfirmationPanel, new Vector2(-112, -82), CancelDeleteChart, new Vector2(170, 56));
+            var confirmDelete = MakeFlatButton("確認刪除", deleteChartConfirmationPanel, new Vector2(112, -82), ConfirmDeleteChart, new Vector2(170, 56), new Color(.65f, .18f, .18f));
+            confirmDelete.GetComponentInChildren<Text>().color = Color.white;
+            deleteChartConfirmationPanel.gameObject.SetActive(false);
+            chartEditorPanel.gameObject.SetActive(false);
+        }
+
+        static void BuildEditorField(RectTransform parent, string label, out InputField input, Vector2 position)
+        {
+            var fieldLabel = Label(label, parent, 18);
+            fieldLabel.alignment = TextAnchor.MiddleLeft;
+            fieldLabel.color = new Color(.72f, .72f, .72f);
+            fieldLabel.rectTransform.sizeDelta = new Vector2(620, 34);
+            fieldLabel.rectTransform.anchoredPosition = position + new Vector2(0, 35);
+            input = MakeInputField(label, parent, position + new Vector2(0, -12), new Vector2(620, 56));
+        }
+
+        void PopulateChartEditor()
+        {
+            if (!ChartSelectionSession.Ensure().TryGetSelection(out var remembered, out _))
             {
-                SetScrollSpeed(value);
-            });
-            MakeButton("−", menuPanel, new Vector2(-320, 42), () => AdjustScrollSpeed(-.1f), new Vector2(88, 58));
-            MakeButton("＋", menuPanel, new Vector2(320, 42), () => AdjustScrollSpeed(.1f), new Vector2(88, 58));
-            autoPlayToggle = MakeToggle("AUTO PLAY", menuPanel, new Vector2(0, -36));
-            startButton = MakeButton("開始遊玩", menuPanel, new Vector2(0, -126), StartGame); startButton.interactable = false;
-            MakeButton("匯入 GGR", menuPanel, new Vector2(0, -236), RequestImport);
-            MakeButton("校正聲音偏移", menuPanel, new Vector2(245, -126), StartLatencyCalibration, new Vector2(190, 54));
+                chartEditorEntry = null;
+                chartEditorSubtitleLabel.text = "請先在曲庫選取一份譜面。";
+                chartEditorStatusLabel.text = "沒有可編輯的譜面。";
+                return;
+            }
+
+            chartEditorEntry = LocalChartLibrary.Load().FirstOrDefault(entry => entry.Id == remembered.Id);
+            if (chartEditorEntry == null)
+            {
+                chartEditorSubtitleLabel.text = "找不到原本選取的譜面。";
+                chartEditorStatusLabel.text = "譜面可能已被刪除。";
+                return;
+            }
+
+            chartEditorTitleInput.text = chartEditorEntry.Title ?? string.Empty;
+            chartEditorAuthorInput.text = chartEditorEntry.Artist ?? string.Empty;
+            chartEditorLevelInput.text = chartEditorEntry.DifficultyLevel ?? string.Empty;
+            chartEditorSubtitleLabel.text = string.IsNullOrWhiteSpace(chartEditorEntry.DifficultyName)
+                ? string.Empty
+                : chartEditorEntry.DifficultyName;
+            chartEditorStatusLabel.text = string.Empty;
+        }
+
+        void OpenChartEditor()
+        {
+            if (selectedLibraryEntry == null)
+            {
+                SetStatus("請先選取一份譜面。");
+                return;
+            }
+            if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes) ||
+                !ChartSelectionSession.Ensure().SetSelection(selectedLibraryEntry, bytes))
+            {
+                SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。");
+                return;
+            }
+            GugarythmSceneRouter.OpenChartEditor();
+        }
+
+        void SaveChartEditor()
+        {
+            if (chartEditorEntry == null) return;
+            if (!LocalChartLibrary.TryUpdateChartDetails(chartEditorEntry.Id, chartEditorTitleInput.text, chartEditorAuthorInput.text,
+                    chartEditorLevelInput.text, out var updated))
+            {
+                chartEditorStatusLabel.text = "歌曲名稱不可空白。";
+                return;
+            }
+
+            if (LocalChartLibrary.TryReadSource(updated, out var bytes)) ChartSelectionSession.Ensure().SetSelection(updated, bytes);
+            GugarythmSceneRouter.OpenLibrary();
+        }
+
+        void PromptDeleteChart()
+        {
+            if (chartEditorEntry != null) deleteChartConfirmationPanel.gameObject.SetActive(true);
+        }
+
+        void CancelDeleteChart() => deleteChartConfirmationPanel.gameObject.SetActive(false);
+
+        void ConfirmDeleteChart()
+        {
+            if (chartEditorEntry == null || !LocalChartLibrary.TryDelete(chartEditorEntry.Id))
+            {
+                chartEditorStatusLabel.text = "刪除失敗，請稍後再試。";
+                deleteChartConfirmationPanel.gameObject.SetActive(false);
+                return;
+            }
+            ChartSelectionSession.Ensure().Clear();
+            GugarythmSceneRouter.OpenLibrary();
+        }
+
+        void ReturnFromChartEditor() => GugarythmSceneRouter.OpenLibrary();
+
+        void CycleLibrarySort()
+        {
+            librarySort = librarySort == ChartLibrarySort.Accuracy ? ChartLibrarySort.Difficulty :
+                librarySort == ChartLibrarySort.Difficulty ? ChartLibrarySort.Title : ChartLibrarySort.Accuracy;
+            RefreshLibraryUI();
+        }
+
+        void RefreshLibraryUI()
+        {
+            if (libraryListContent == null) return;
+            var entries = LocalChartLibrary.Load();
+            var groups = ChartLibraryGrouping.Group(entries);
+            var filter = librarySearchInput == null ? string.Empty : librarySearchInput.text.Trim();
+            if (!string.IsNullOrEmpty(filter))
+            {
+                groups = groups.Where(group => ContainsIgnoreCase(group.Title, filter) || ContainsIgnoreCase(group.Artist, filter) ||
+                    group.Difficulties.Any(entry => ContainsIgnoreCase(entry.Author, filter))).ToList();
+            }
+
+            if (selectedLibraryEntry != null)
+            {
+                var refreshed = entries.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id);
+                if (refreshed != null) selectedLibraryEntry = refreshed;
+            }
+            if (selectedLibraryEntry == null && groups.Count > 0) SelectLibraryEntry(groups[0].Difficulties[0], false);
+            if (selectedLibraryEntry != null && string.IsNullOrWhiteSpace(selectedDifficultyName)) selectedDifficultyName = selectedLibraryEntry.DifficultyName ?? string.Empty;
+
+            groups = ChartLibraryGrouping.Sort(groups, librarySort, librarySortAscending, selectedDifficultyName).ToList();
+            libraryCountLabel.text = groups.Count.ToString();
+            librarySortModeLabel.text = librarySort == ChartLibrarySort.Accuracy ? "準確率" : librarySort == ChartLibrarySort.Difficulty ? "難度" : "曲名";
+            libraryDirectionIcon.localRotation = Quaternion.Euler(0, 0, librarySortAscending ? 180 : 0);
+            ClearChildren(libraryListContent);
+            const float rowHeight = 102f;
+            libraryListContent.sizeDelta = new Vector2(0, Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height, groups.Count * rowHeight + 8));
+            for (var index = 0; index < groups.Count; index++) BuildLibraryRow(groups[index], index, rowHeight);
+            RefreshDetailUI(groups);
+        }
+
+        void BuildLibraryRow(LocalChartGroup group, int index, float rowHeight)
+        {
+            var hasSelectedDifficulty = group.FindDifficulty(selectedDifficultyName);
+            var selected = selectedLibraryEntry != null && group.GroupId == selectedLibraryEntry.GroupId;
+            var row = Panel("Chart Row", libraryListContent, selected ? new Color(.12f, .25f, .36f) : new Color(.16f, .16f, .16f), new Vector2(0, rowHeight - 2), Vector2.zero);
+            row.anchorMin = new Vector2(0, 1);
+            row.anchorMax = new Vector2(1, 1);
+            row.pivot = new Vector2(.5f, 1);
+            row.offsetMin = new Vector2(0, -rowHeight * (index + 1) + 2);
+            row.offsetMax = new Vector2(0, -rowHeight * index);
+            if (selected) Outline(row.gameObject, new Color(.05f, .60f, 1f), 2);
+            if (index > 0)
+            {
+                var divider = Panel("Chart Divider", row, new Color(.27f, .27f, .27f, .72f), new Vector2(0, 1), Vector2.zero);
+                divider.anchorMin = new Vector2(0, 1); divider.anchorMax = new Vector2(1, 1); divider.offsetMin = new Vector2(16, -1); divider.offsetMax = new Vector2(-16, 0);
+                divider.GetComponent<Image>().raycastTarget = false;
+            }
+            var title = Label(group.Title, row, 21); title.alignment = TextAnchor.MiddleLeft; title.rectTransform.anchorMin = new Vector2(0, 1); title.rectTransform.anchorMax = new Vector2(1, 1); title.rectTransform.pivot = new Vector2(0, 1); title.rectTransform.offsetMin = new Vector2(24, -58); title.rectTransform.offsetMax = new Vector2(-78, -24);
+            var artist = Label(group.Artist, row, 16); artist.alignment = TextAnchor.MiddleLeft; artist.color = new Color(.67f, .67f, .67f); artist.rectTransform.anchorMin = new Vector2(0, 1); artist.rectTransform.anchorMax = new Vector2(1, 1); artist.rectTransform.pivot = new Vector2(0, 1); artist.rectTransform.offsetMin = new Vector2(24, -88); artist.rectTransform.offsetMax = new Vector2(-78, -59);
+            if (hasSelectedDifficulty != null)
+            {
+                var level = Label(hasSelectedDifficulty.DifficultyLevel, row, 20); level.color = new Color(.78f, .78f, .78f); level.rectTransform.sizeDelta = new Vector2(62, 50); PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-18, 0));
+            }
+            MakeInvisibleButton(row, () => SelectLibraryEntry(hasSelectedDifficulty ?? group.Difficulties[0], true));
+        }
+
+        void SelectLibraryEntry(LocalChartEntry entry, bool loadSource)
+        {
+            if (entry == null) return;
+            selectedLibraryEntry = entry;
+            currentLibraryEntry = entry;
+            selectedDifficultyName = entry.DifficultyName ?? string.Empty;
+            if (GugarythmSceneRouter.IsLibrary)
+            {
+                if (startButton != null) startButton.interactable = true;
+                RefreshLibraryUI();
+                return;
+            }
+
+            if (loadSource) StartCoroutine(LoadLibraryEntry(entry));
+            else RefreshLibraryUI();
+        }
+
+        IEnumerator LoadLibraryEntry(LocalChartEntry entry)
+        {
+            if (!LocalChartLibrary.TryReadSource(entry, out var bytes)) { SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。"); yield break; }
+            loading = true;
+            startButton.interactable = false;
+            SetStatus("正在載入 " + entry.Title + "…");
+            yield return null;
+            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
+            if (!result.Success) { SetStatus("譜面載入失敗：" + result.Error); loading = false; yield break; }
+            chart = result.Chart;
+            musicLoadSucceeded = false;
+            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
+            if (!musicLoadSucceeded) { SetStatus("GGR 音樂格式不支援或無法解碼。"); loading = false; yield break; }
+            currentLibraryEntry = entry;
+            selectedLibraryEntry = entry;
+            startButton.interactable = true;
+            SetStatus($"{chart.Title} · {chart.PlayableCount:N0} notes · {DisplayDifficulty(chart)}");
+            loading = false;
+            RefreshLibraryUI();
+        }
+
+        void RefreshDetailUI(IReadOnlyList<LocalChartGroup> groups)
+        {
+            ClearChildren(difficultyButtonContent);
+            var group = selectedLibraryEntry == null ? null : groups.FirstOrDefault(item => item.GroupId == selectedLibraryEntry.GroupId);
+            if (group == null)
+            {
+                detailTitleLabel.text = "選擇一份譜面";
+                detailArtistLabel.text = string.Empty;
+                detailCoverTitleLabel.text = "選擇一份\n譜面";
+                detailDifficultyLabel.text = "選擇難度";
+                detailAccuracyLabel.text = "BEST ACCURACY\n<size=52>—</size>";
+                detailLevelLabel.text = "CHART LEVEL\n<size=52>—</size>";
+                return;
+            }
+            detailTitleLabel.text = group.Title;
+            detailArtistLabel.text = group.Artist;
+            detailCoverTitleLabel.text = group.Title.Replace(" ", "\n");
+            detailDifficultyLabel.text = "選擇難度";
+            var current = group.Difficulties.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id) ?? group.Difficulties[0];
+            for (var index = 0; index < group.Difficulties.Count; index++)
+            {
+                var entry = group.Difficulties[index];
+                var text = DisplayDifficulty(entry);
+                var active = entry.Id == current.Id;
+                var button = MakeFlatButton(text, difficultyButtonContent, new Vector2(index * 150, 0),
+                    () => SelectLibraryEntry(entry, true), new Vector2(136, 52), active ? new Color(.10f, .20f, .29f) : new Color(.15f, .15f, .15f));
+                var buttonRect = button.GetComponent<RectTransform>();
+                buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(0, .5f);
+                buttonRect.pivot = new Vector2(0, .5f);
+                buttonRect.anchoredPosition = new Vector2(index * 150, 0);
+                Outline(button.gameObject, active ? new Color(.08f, .62f, 1f) : new Color(.34f, .34f, .34f), active ? 3 : 1);
+                button.GetComponentInChildren<Text>().color = active ? new Color(.22f, .68f, 1f) : new Color(.78f, .78f, .78f);
+            }
+            detailAccuracyLabel.text = current.BestAccuracy < 0 ? "BEST ACCURACY\n<size=52>—</size>" : $"BEST ACCURACY\n<size=52>{current.BestAccuracy:F2}%</size>";
+            detailLevelLabel.text = $"CHART LEVEL\n<size=52>{(string.IsNullOrWhiteSpace(current.DifficultyLevel) ? "—" : current.DifficultyLevel)}</size>";
+        }
+
+        static bool ContainsIgnoreCase(string value, string part) => (value ?? string.Empty).IndexOf(part ?? string.Empty, StringComparison.OrdinalIgnoreCase) >= 0;
+
+        static void ClearChildren(RectTransform parent)
+        {
+            if (parent == null) return;
+            for (var index = parent.childCount - 1; index >= 0; index--) Destroy(parent.GetChild(index).gameObject);
+        }
+
+        void BuildImportDecision(RectTransform root)
+        {
+            importDecisionPanel = Panel("Import Storage Decision", root, new Color(.04f, .06f, .14f, .98f), new Vector2(620, 420), Vector2.zero);
+            Outline(importDecisionPanel.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
+            var title = Label("偵測到相同曲名", importDecisionPanel, 36);
+            title.rectTransform.sizeDelta = new Vector2(560, 70);
+            title.rectTransform.anchoredPosition = new Vector2(0, 135);
+            importDecisionText = Label("", importDecisionPanel, 22);
+            importDecisionText.rectTransform.sizeDelta = new Vector2(540, 100);
+            importDecisionText.rectTransform.anchoredPosition = new Vector2(0, 55);
+            MakeButton("合併儲存", importDecisionPanel, new Vector2(120, -70), () => CommitPendingImport(true), new Vector2(210, 62));
+            MakeButton("單獨儲存", importDecisionPanel, new Vector2(-120, -70), () => CommitPendingImport(false), new Vector2(210, 62));
+            MakeButton("取消", importDecisionPanel, new Vector2(0, -150), CancelPendingImport, new Vector2(180, 52));
+            importDecisionPanel.gameObject.SetActive(false);
+        }
+
+        void PresentImportStorageDecision(string fileName, byte[] bytes, RuntimeChart importedChart)
+        {
+            var matchingGroupId = LocalChartLibrary.FindMatchingGroupId(importedChart.Title, importedChart.Artist);
+            if (string.IsNullOrWhiteSpace(matchingGroupId))
+            {
+                SaveToLocalLibrary(fileName, bytes, importedChart, LocalChartLibrary.NewGroupId());
+                return;
+            }
+
+            pendingImportFileName = fileName;
+            pendingImportBytes = bytes;
+            pendingImportChart = importedChart;
+            importDecisionText.text = $"「{importedChart.Title}」已存在。\n要將 {DisplayDifficulty(importedChart)} 合併到同一首歌嗎？";
+            importDecisionPanel.gameObject.SetActive(true);
+        }
+
+        static string DisplayDifficulty(RuntimeChart importedChart) =>
+            string.IsNullOrWhiteSpace(importedChart.DifficultyName) ? "未標示難度" :
+            string.IsNullOrWhiteSpace(importedChart.DifficultyLevel) ? importedChart.DifficultyName :
+            importedChart.DifficultyName + " " + importedChart.DifficultyLevel;
+
+        static string DisplayDifficulty(LocalChartEntry entry) =>
+            string.IsNullOrWhiteSpace(entry.DifficultyName) ? "未標示難度" :
+            string.IsNullOrWhiteSpace(entry.DifficultyLevel) ? entry.DifficultyName :
+            entry.DifficultyName + " " + entry.DifficultyLevel;
+
+        void CommitPendingImport(bool merge)
+        {
+            if (pendingImportChart == null) return;
+            var groupId = merge
+                ? LocalChartLibrary.FindMatchingGroupId(pendingImportChart.Title, pendingImportChart.Artist)
+                : null;
+            SaveToLocalLibrary(pendingImportFileName, pendingImportBytes, pendingImportChart,
+                string.IsNullOrWhiteSpace(groupId) ? LocalChartLibrary.NewGroupId() : groupId);
+            ClearPendingImport();
+        }
+
+        void CancelPendingImport()
+        {
+            startButton.interactable = music.clip != null;
+            ClearPendingImport();
+        }
+
+        void ClearPendingImport()
+        {
+            pendingImportFileName = null;
+            pendingImportBytes = null;
+            pendingImportChart = null;
+            if (importDecisionPanel != null) importDecisionPanel.gameObject.SetActive(false);
+        }
+
+        void OpenSettings()
+        {
+            if (selectedLibraryEntry != null && LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
+                ChartSelectionSession.Ensure().SetSelection(selectedLibraryEntry, bytes);
+            GugarythmSceneRouter.OpenSettings();
+        }
+
+        void ReturnFromSettings()
+        {
+            calibrationActive = false;
+            StopCalibrationTickAudio();
+            GugarythmSceneRouter.OpenLibrary();
         }
 
         void BuildLatencyCalibration(RectTransform root)
@@ -2110,7 +2733,7 @@ namespace Gugarythm
             resultPanel = Panel("Result", root, new Color(.04f, .06f, .14f, .96f), new Vector2(620, 650), Vector2.zero); Outline(resultPanel.gameObject, new Color(.9f, .5f, 1f, .75f), 3);
             var title = Label("RESULT", resultPanel, 38); title.rectTransform.sizeDelta = new Vector2(580, 70); title.rectTransform.anchoredPosition = new Vector2(0, 260);
             resultText = Label("", resultPanel, 27); resultText.rectTransform.sizeDelta = new Vector2(540, 440); resultText.rectTransform.anchoredPosition = new Vector2(0, 25);
-            MakeButton("返回曲庫", resultPanel, new Vector2(0, -270), () => { resultPanel.gameObject.SetActive(false); menuPanel.gameObject.SetActive(true); });
+            MakeButton("返回曲庫", resultPanel, new Vector2(0, -270), GugarythmSceneRouter.OpenLibrary);
             resultPanel.gameObject.SetActive(false);
         }
 
@@ -2162,9 +2785,16 @@ namespace Gugarythm
 #endif
         }
 
-        void SaveToLocalLibrary(string fileName, byte[] bytes, RuntimeChart importedChart)
+        void SaveToLocalLibrary(string fileName, byte[] bytes, RuntimeChart importedChart, string groupId)
         {
-            try { LocalChartLibrary.Save(fileName, bytes, importedChart); }
+            try
+            {
+                currentLibraryEntry = LocalChartLibrary.Save(fileName, bytes, importedChart, groupId);
+                selectedLibraryEntry = currentLibraryEntry;
+                selectedDifficultyName = currentLibraryEntry.DifficultyName ?? string.Empty;
+                startButton.interactable = music.clip != null;
+                RefreshLibraryUI();
+            }
             catch (Exception exception) { importedChart.Warnings.Add("本機曲庫保存失敗：" + exception.Message); }
         }
 
@@ -2357,6 +2987,180 @@ namespace Gugarythm
         {
             var panel = Panel(text, parent, new Color(.1f, .62f, .78f), size ?? new Vector2(300, 82), position); panel.GetComponent<Image>().raycastTarget = true; Outline(panel.gameObject, Color.white, 2);
             var label = Label(text, panel, 27); Fill(label.rectTransform); var button = panel.gameObject.AddComponent<Button>(); button.onClick.AddListener(() => action()); return button;
+        }
+
+        static Button MakeFlatButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size, Color color)
+        {
+            var panel = Panel(text, parent, color, size, position);
+            var image = panel.GetComponent<Image>(); image.raycastTarget = true;
+            var label = Label(text, panel, 18); Fill(label.rectTransform);
+            var button = panel.gameObject.AddComponent<Button>();
+            button.targetGraphic = image;
+            button.onClick.AddListener(() => action());
+            return button;
+        }
+
+        static Button MakeOutlinedButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size)
+        {
+            var panel = Panel(text, parent, new Color(.16f, .16f, .16f), size, position);
+            var image = panel.GetComponent<Image>();
+            image.raycastTarget = true;
+            Outline(panel.gameObject, new Color(.42f, .42f, .42f), 1);
+            var label = Label(text, panel, 18);
+            label.color = new Color(.78f, .78f, .78f);
+            Fill(label.rectTransform);
+            var button = panel.gameObject.AddComponent<Button>();
+            button.targetGraphic = image;
+            button.onClick.AddListener(() => action());
+            return button;
+        }
+
+        static void MakeInvisibleButton(RectTransform target, Action action)
+        {
+            var image = target.GetComponent<Image>();
+            Button button;
+            if (image == null)
+            {
+                var overlay = new GameObject("Button Hit Area", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+                var rect = overlay.GetComponent<RectTransform>();
+                rect.SetParent(target.parent, false);
+                rect.anchorMin = target.anchorMin;
+                rect.anchorMax = target.anchorMax;
+                rect.pivot = target.pivot;
+                rect.sizeDelta = target.sizeDelta;
+                rect.anchoredPosition = target.anchoredPosition;
+                image = overlay.GetComponent<Image>();
+                image.color = new Color(1, 1, 1, 0);
+                button = overlay.AddComponent<Button>();
+            }
+            else button = target.GetComponent<Button>() ?? target.gameObject.AddComponent<Button>();
+            image.raycastTarget = true;
+            button.targetGraphic = image;
+            button.onClick.AddListener(() => action());
+        }
+
+        static InputField MakeInputField(string placeholder, RectTransform parent, Vector2 position, Vector2 size)
+        {
+            var panel = Panel("Search", parent, new Color(.12f, .12f, .12f), size, position);
+            Outline(panel.gameObject, new Color(.30f, .30f, .30f), 1);
+            var text = Label("", panel, 18); text.alignment = TextAnchor.MiddleLeft; text.rectTransform.anchorMin = Vector2.zero; text.rectTransform.anchorMax = Vector2.one; text.rectTransform.offsetMin = new Vector2(18, 0); text.rectTransform.offsetMax = new Vector2(-18, 0);
+            var place = Label(placeholder, panel, 18); place.color = new Color(.58f, .58f, .58f); place.alignment = TextAnchor.MiddleLeft; place.rectTransform.anchorMin = Vector2.zero; place.rectTransform.anchorMax = Vector2.one; place.rectTransform.offsetMin = new Vector2(18, 0); place.rectTransform.offsetMax = new Vector2(-18, 0);
+            var input = panel.gameObject.AddComponent<InputField>();
+            input.targetGraphic = panel.GetComponent<Image>(); input.textComponent = text; input.placeholder = place;
+            return input;
+        }
+
+        static void AddGearIcon(RectTransform parent)
+        {
+            var icon = new GameObject("Gear Icon", typeof(RectTransform), typeof(CanvasRenderer), typeof(GearIconGraphic));
+            var rect = icon.GetComponent<RectTransform>();
+            rect.SetParent(parent, false);
+            rect.sizeDelta = new Vector2(34, 34);
+            var graphic = icon.GetComponent<GearIconGraphic>();
+            graphic.color = new Color(.84f, .84f, .84f);
+            graphic.raycastTarget = false;
+        }
+
+        static void AddPencilIcon(RectTransform parent)
+        {
+            var icon = new GameObject("Pencil Icon", typeof(RectTransform), typeof(CanvasRenderer), typeof(PencilIconGraphic));
+            var rect = icon.GetComponent<RectTransform>();
+            rect.SetParent(parent, false);
+            rect.sizeDelta = new Vector2(34, 34);
+            icon.GetComponent<PencilIconGraphic>().raycastTarget = false;
+        }
+
+        static void AddSortArrowIcon(RectTransform parent)
+        {
+            var color = new Color(.10f, .62f, 1f);
+            AddSortArrowPart("Stem", parent, new Vector2(3, 19), new Vector2(0, 4), 0, color);
+            AddSortArrowPart("Left Wing", parent, new Vector2(3, 10), new Vector2(-4, -8), 45, color);
+            AddSortArrowPart("Right Wing", parent, new Vector2(3, 10), new Vector2(4, -8), -45, color);
+        }
+
+        static void AddSortArrowPart(string name, RectTransform parent, Vector2 size, Vector2 position, float rotation, Color color)
+        {
+            var part = Panel(name, parent, color, size, position);
+            part.localRotation = Quaternion.Euler(0, 0, rotation);
+            part.GetComponent<Image>().raycastTarget = false;
+        }
+
+        sealed class GearIconGraphic : MaskableGraphic
+        {
+            protected override void OnPopulateMesh(VertexHelper vertices)
+            {
+                vertices.Clear();
+                const int segments = 32;
+                const float innerRadius = 5.2f;
+                const float rootRadius = 10.8f;
+                const float toothRadius = 15.2f;
+                var tint = color;
+                for (var index = 0; index < segments; index++)
+                {
+                    var next = (index + 1) % segments;
+                    var outerA = GearPoint(index, segments, rootRadius, toothRadius);
+                    var outerB = GearPoint(next, segments, rootRadius, toothRadius);
+                    var innerA = GearPoint(index, segments, innerRadius, innerRadius);
+                    var innerB = GearPoint(next, segments, innerRadius, innerRadius);
+                    var baseIndex = vertices.currentVertCount;
+                    vertices.AddVert(outerA, tint, Vector2.zero);
+                    vertices.AddVert(outerB, tint, Vector2.zero);
+                    vertices.AddVert(innerB, tint, Vector2.zero);
+                    vertices.AddVert(innerA, tint, Vector2.zero);
+                    vertices.AddTriangle(baseIndex, baseIndex + 1, baseIndex + 2);
+                    vertices.AddTriangle(baseIndex, baseIndex + 2, baseIndex + 3);
+                }
+            }
+
+            static Vector2 GearPoint(int index, int segments, float rootRadius, float toothRadius)
+            {
+                var angle = (index / (float)segments * Mathf.PI * 2f) + Mathf.PI * .25f;
+                var isTooth = index % 4 is 0 or 1;
+                var radius = isTooth ? toothRadius : rootRadius;
+                return new Vector2(Mathf.Cos(angle) * radius, Mathf.Sin(angle) * radius);
+            }
+        }
+
+        sealed class PencilIconGraphic : MaskableGraphic
+        {
+            protected override void OnPopulateMesh(VertexHelper vertices)
+            {
+                vertices.Clear();
+                // A single diagonal pencil silhouette: triangular graphite tip,
+                // long body and a darker end cap, so it remains legible at 34 px.
+                AddPolygon(vertices, new[]
+                {
+                    new Vector2(-14, -10), new Vector2(-10, -14),
+                    new Vector2(10, 6), new Vector2(6, 10),
+                }, new Color(.86f, .86f, .86f));
+                AddPolygon(vertices, new[]
+                {
+                    new Vector2(6, 10), new Vector2(10, 6),
+                    new Vector2(14, 10), new Vector2(10, 14),
+                }, new Color(.52f, .52f, .52f));
+                AddPolygon(vertices, new[]
+                {
+                    new Vector2(-18, -18), new Vector2(-14, -10), new Vector2(-10, -14),
+                }, new Color(.95f, .95f, .95f));
+            }
+
+            static void AddPolygon(VertexHelper vertices, Vector2[] points, Color tint)
+            {
+                var first = vertices.currentVertCount;
+                for (var index = 0; index < points.Length; index++) vertices.AddVert(points[index], tint, Vector2.zero);
+                for (var index = 1; index < points.Length - 1; index++) vertices.AddTriangle(first, first + index, first + index + 1);
+            }
+        }
+
+        static RectTransform MakeVerticalScroll(string name, RectTransform parent, Vector2 position, Vector2 size)
+        {
+            var root = Panel(name, parent, new Color(.12f, .12f, .12f), size, position);
+            var mask = root.gameObject.AddComponent<Mask>(); mask.showMaskGraphic = false;
+            var content = new GameObject("Content", typeof(RectTransform)).GetComponent<RectTransform>();
+            content.SetParent(root, false); content.anchorMin = new Vector2(0, 1); content.anchorMax = new Vector2(1, 1); content.pivot = new Vector2(.5f, 1); content.anchoredPosition = Vector2.zero; content.sizeDelta = new Vector2(0, size.y);
+            var scroll = root.gameObject.AddComponent<ScrollRect>();
+            scroll.viewport = root; scroll.content = content; scroll.horizontal = false; scroll.vertical = true; scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 28;
+            return content;
         }
 
         static Toggle MakeToggle(string text, RectTransform parent, Vector2 position)

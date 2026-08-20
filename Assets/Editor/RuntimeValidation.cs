@@ -879,14 +879,22 @@ public static class RuntimeValidation
         engine = new JudgmentEngine(new[] { left, right }, new ScoreState());
         engine.Process(1.375, new[] { new InputToken(8, RuntimeNoteKind.Tap, 1.375, 1.3f) }, Array.Empty<ActiveContact>());
         Require(left.Grade == JudgmentGrade.Pending && right.Grade == JudgmentGrade.Great,
-            "Forgiveness overlap without authored span overlap must not protect the later Tap");
+            "A rubbed candidate on the correct side must still resolve to the closer Tap");
+
+        var rubFirst = Note(756, 9.000, 0); rubFirst.Size = 1;
+        var rubLater = Note(757, 9.120, 3.1f); rubLater.Size = 1;
+        engine = new JudgmentEngine(new[] { rubFirst, rubLater }, new ScoreState());
+        engine.Process(8.910, new[] { new InputToken(14, RuntimeNoteKind.Tap, 8.910, 0) }, Array.Empty<ActiveContact>());
+        engine.Process(9.030, new[] { new InputToken(14, RuntimeNoteKind.Tap, 9.030, 3.1f) }, Array.Empty<ActiveContact>());
+        Require(rubFirst.Grade == JudgmentGrade.Good && rubLater.Grade == JudgmentGrade.Pending,
+            "A Good at the start of a rubbed Tap train must keep the next forgiveness-overlap Tap protected");
 
         var edgeLeft = Note(732, 2.000, 0); edgeLeft.Size = 1;
         var edgeRight = Note(733, 2.120, 2); edgeRight.Size = 1;
         engine = new JudgmentEngine(new[] { edgeLeft, edgeRight }, new ScoreState());
         engine.Process(2.055, new[] { new InputToken(2, RuntimeNoteKind.Tap, 2.055, 2.5f) }, Array.Empty<ActiveContact>());
-        Require(edgeLeft.Grade == JudgmentGrade.Pending && edgeRight.Grade == JudgmentGrade.Great,
-            "Touching authored edges must not form a protection pair");
+        Require(edgeLeft.Grade == JudgmentGrade.Pending && edgeRight.Grade == JudgmentGrade.Pending,
+            "Touching playable input regions must form a protection pair");
 
         var wideEarly = Note(734, 3.000, 0); wideEarly.Size = 2;
         var narrowLate = Note(735, 3.120, 2.5f); narrowLate.Size = 1;

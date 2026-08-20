@@ -56,7 +56,7 @@ namespace Gugarythm
                     chart.Warnings.Add(MissingMetadataWarning);
                 else if (package.MetadataBytes != null)
                 {
-                    try { JObject.Parse(Utf8.GetString(package.MetadataBytes)); }
+                    try { ApplyMetadata(chart, JObject.Parse(Utf8.GetString(package.MetadataBytes))); }
                     catch (Exception) { chart.Warnings.Add(InvalidMetadataWarning); }
                 }
                 if (manifest["cover"] != null && package.CoverBytes == null)
@@ -78,6 +78,28 @@ namespace Gugarythm
         {
             try { return JObject.Parse(Utf8.GetString(bytes)); }
             catch (Exception) { throw new GgrPackageException(Unsupported); }
+        }
+
+        static void ApplyMetadata(RuntimeChart chart, JObject metadata)
+        {
+            chart.Title = ReadText(metadata, false, "title", "name") ?? chart.Title;
+            chart.Artist = ReadText(metadata, false, "artist", "composer") ?? chart.Artist;
+            chart.Author = ReadText(metadata, false, "author", "charter", "chartAuthor") ?? chart.Author;
+            chart.DifficultyName = ReadText(metadata, false, "difficulty", "difficultyName") ?? chart.DifficultyName;
+            chart.DifficultyLevel = ReadText(metadata, true, "level", "rating", "difficultyLevel") ?? chart.DifficultyLevel;
+        }
+
+        static string ReadText(JObject metadata, bool allowNumbers, params string[] names)
+        {
+            foreach (var name in names)
+            {
+                var token = metadata[name];
+                if (token == null || token.Type is JTokenType.Null or JTokenType.Undefined) continue;
+                if (token.Type != JTokenType.String && (!allowNumbers || token.Type is not (JTokenType.Integer or JTokenType.Float))) continue;
+                var value = token.ToString();
+                if (!string.IsNullOrWhiteSpace(value)) return value.Trim();
+            }
+            return null;
         }
 
         static bool IsVersionOne(JObject manifest) =>
