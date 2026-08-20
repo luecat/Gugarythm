@@ -242,6 +242,7 @@ namespace Gugarythm
         RectTransform guideLayer;
         RectTransform connectorLayer;
         RectTransform simLineLayer;
+        RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
         RectTransform menuPanel;
         RectTransform pauseOverlay;
@@ -1253,7 +1254,7 @@ namespace Gugarythm
                 }
                 if (!noteViews.TryGetValue(note.Index, out var view))
                 {
-                    view = AcquireNoteView();
+                    view = AcquireNoteView(noteLayer);
                     noteViews[note.Index] = view;
                     ApplyNoteTexture(view, note);
                 }
@@ -1348,9 +1349,13 @@ namespace Gugarythm
             renderedPersistentHoldHeads.Add(rootIndex);
             if (!persistentHoldHeadViews.TryGetValue(rootIndex, out var view))
             {
-                view = AcquireNoteView();
+                view = AcquireNoteView(persistentHoldHeadLayer);
                 persistentHoldHeadViews[rootIndex] = view;
-                view.texture = buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var texture) ? texture : null;
+                var trace = ShouldUseTracePersistentHoldVisual(root);
+                var traceKey = root.Critical ? "yellow" : "mint";
+                view.texture = trace
+                    ? traceTextures.TryGetValue(traceKey, out var traceTexture) ? traceTexture : null
+                    : buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var holdTexture) ? holdTexture : null;
                 view.color = Color.white;
                 view.capRatio = NoteCapRatio;
                 var particle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
@@ -1609,6 +1614,8 @@ namespace Gugarythm
             note != null && IsHoldMid(note) && !note.Judged && note.HoldRootIndex >= 0 && approachProgress >= 1f;
         public static bool ShouldRenderPersistentHoldHead(RuntimeNote root) =>
             root != null && root.Visible && root.Judged;
+        public static bool ShouldUseTracePersistentHoldVisual(RuntimeNote root) =>
+            root != null && IsTrace(root);
         static bool ShouldHideHoldHead(RuntimeNote note, float approachProgress) =>
             ShouldHideAttachedHoldParticle(note, approachProgress)
                 ? true
@@ -1867,6 +1874,7 @@ namespace Gugarythm
             guideLayer = Layer("Decoration Guides", stage);
             connectorLayer = Layer("Hold Connectors", stage);
             simLineLayer = Layer("Synchronization Lines", stage);
+            persistentHoldHeadLayer = Layer("Persistent Hold Heads", stage);
             noteLayer = Layer("Notes", stage);
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
@@ -2151,17 +2159,18 @@ namespace Gugarythm
             catch (Exception exception) { importedChart.Warnings.Add("本機曲庫保存失敗：" + exception.Message); }
         }
 
-        HorizontalSlicedRawImage AcquireNoteView()
+        HorizontalSlicedRawImage AcquireNoteView(RectTransform parent)
         {
             if (notePool.Count > 0)
             {
                 var pooled = notePool.Pop();
+                pooled.rectTransform.SetParent(parent, false);
                 pooled.gameObject.SetActive(true);
                 pooled.transform.SetAsLastSibling();
                 return pooled;
             }
             var go = new GameObject("Runtime Note", typeof(RectTransform), typeof(CanvasRenderer), typeof(HorizontalSlicedRawImage));
-            var rect = go.GetComponent<RectTransform>(); rect.SetParent(noteLayer, false); rect.sizeDelta = new Vector2(100, 30);
+            var rect = go.GetComponent<RectTransform>(); rect.SetParent(parent, false); rect.sizeDelta = new Vector2(100, 30);
             var view = go.GetComponent<HorizontalSlicedRawImage>(); view.color = Color.white; view.raycastTarget = false; view.capRatio = NoteCapRatio;
             var particle = RawPanel("Trace Particle", view.rectTransform, null, Color.white, new Vector2(52, 52), Vector2.zero).GetComponent<RawImage>();
             particle.raycastTarget = false;

@@ -31,6 +31,7 @@ public static class RuntimeValidation
         ValidateNoteRenderWidths();
         ValidateNoteSurfaceProjection();
         ValidateHeadlessHoldRendering();
+        ValidatePersistentHoldVisualRouting();
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
@@ -256,6 +257,16 @@ public static class RuntimeValidation
             "A judged Hold root must retain its judgment-line head");
         Require(!SonolusLandscapePrototype.ShouldRenderPersistentHoldHead(headlessRoot),
             "A no-head-judgment Hold must not synthesize a normal Hold head at the judgment line");
+    }
+
+    static void ValidatePersistentHoldVisualRouting()
+    {
+        var traceRoot = new RuntimeNote { Archetype = "USC Trace Slide start", Visible = true, Judged = true };
+        var normalRoot = new RuntimeNote { Archetype = "USC Slide start", Visible = true, Judged = true };
+        Require(SonolusLandscapePrototype.ShouldUseTracePersistentHoldVisual(traceRoot),
+            "A Trace Hold root must retain its Trace visual at the judgment line");
+        Require(!SonolusLandscapePrototype.ShouldUseTracePersistentHoldVisual(normalRoot),
+            "A normal Hold root must retain its Hold-head visual at the judgment line");
     }
 
     // This fixture deliberately has no .5-beat interior spans, so PlayableCount
