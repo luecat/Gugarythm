@@ -1258,7 +1258,7 @@ namespace Gugarythm
                     ApplyNoteTexture(view, note);
                 }
                 var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
-                var height = FixedNoteSurfaceHeight;
+                var height = NoteSurfaceHeight(screenProgress);
                 // HorizontalSlicedRawImage preserves each cap's pixel aspect,
                 // so compensate the atlas's transparent outer pixels in screen
                 // space. The visible note edges—not the PNG bounds—then meet
@@ -1361,7 +1361,7 @@ namespace Gugarythm
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = PerspectiveProgress(1f);
-            var height = FixedNoteSurfaceHeight;
+            var height = NoteSurfaceHeight(screenProgress);
             var renderWidth = HoldHeadRenderQuadWidth(LaneWidth(lane, size, screenProgress), height, root.Critical);
             renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress);
             var bodyWidth = LaneWidth(lane, size, screenProgress);
@@ -1565,7 +1565,16 @@ namespace Gugarythm
         }
 
         static float ScreenY(float screenProgress) => Mathf.LerpUnclamped(TopY, HitY, screenProgress);
-        static float FixedNoteSurfaceHeight => LaneWidth(0, 1f, 1f) * ButtonHeightRatio;
+        /// <summary>
+        /// Keep note height on the same continuous depth function as the lane
+        /// edges.  A note becomes smaller toward the vanishing point and grows
+        /// smoothly all the way to the judgment edge without a near-track step.
+        /// </summary>
+        public static float NoteSurfaceHeight(float screenProgress)
+        {
+            var clampedProgress = Mathf.Clamp01(screenProgress);
+            return LaneWidth(0, 1f, clampedProgress) * ButtonHeightRatio;
+        }
 
         public static NoteSurfaceQuad BuildNoteSurfaceQuad(float lane, float size, float screenProgress, float height)
         {
