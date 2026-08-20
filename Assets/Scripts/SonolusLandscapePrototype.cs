@@ -1785,8 +1785,11 @@ namespace Gugarythm
                 flickCriticalCenterTextures[index] = Resources.Load<Texture2D>("NeonRhythm/flicks/flick-critical-center-" + suffix);
                 flickCriticalSideTextures[index] = Resources.Load<Texture2D>("NeonRhythm/flicks/flick-critical-side-" + suffix);
             }
-            holdGreenConnectorTexture = Resources.Load<Texture2D>("NeonRhythm/connectors/hold-green");
-            holdYellowConnectorTexture = Resources.Load<Texture2D>("NeonRhythm/connectors/hold-yellow");
+            // The original 306x4 strips cannot retain a smooth alpha shoulder
+            // once a wide Hold is magnified.  These are linearly resampled
+            // versions of the same artwork, with the original kept intact.
+            holdGreenConnectorTexture = Resources.Load<Texture2D>("NeonRhythm/connectors/hold-green-smooth");
+            holdYellowConnectorTexture = Resources.Load<Texture2D>("NeonRhythm/connectors/hold-yellow-smooth");
             holdMidMintTexture = Resources.Load<Texture2D>("NeonRhythm/official/particles/slide-tick-mint") ??
                 Resources.Load<Texture2D>("NeonRhythm/particles/hold-mid-mint");
             holdMidYellowTexture = Resources.Load<Texture2D>("NeonRhythm/official/particles/slide-tick-yellow") ??
