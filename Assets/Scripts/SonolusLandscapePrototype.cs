@@ -266,14 +266,17 @@ namespace Gugarythm
         Text detailArtistLabel;
         Text detailDifficultyLabel;
         Text detailAccuracyLabel;
-        Text detailLevelLabel;
         Text detailCoverTitleLabel;
         InputField librarySearchInput;
         InputField chartEditorTitleInput;
         InputField chartEditorAuthorInput;
+        InputField chartEditorDifficultyNameInput;
         InputField chartEditorLevelInput;
         RectTransform libraryListContent;
         RectTransform difficultyButtonContent;
+        RectTransform chartEditorTagContent;
+        RectTransform settingsTagContent;
+        InputField settingsTagInput;
         Text importDecisionText;
         Text resultText;
         Text speedLabel;
@@ -2300,8 +2303,7 @@ namespace Gugarythm
             difficultyButtonContent.sizeDelta = new Vector2(450, 76);
             difficultyButtonContent.anchoredPosition = new Vector2(0, -26);
             difficultyButtonContent.anchorMin = difficultyButtonContent.anchorMax = new Vector2(.51f, .5f);
-            detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(230, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
-            detailLevelLabel = Label("CHART LEVEL\n<size=52>—</size>", detail, 18); detailLevelLabel.supportRichText = true; detailLevelLabel.alignment = TextAnchor.UpperLeft; detailLevelLabel.color = new Color(.88f, .88f, .88f); detailLevelLabel.rectTransform.sizeDelta = new Vector2(220, 100); PinToAnchor(detailLevelLabel.rectTransform, new Vector2(.75f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
+            detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(460, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
             startButton = MakeFlatButton("▶  開始遊戲", detail, Vector2.zero, StartGame, new Vector2(0, 82), new Color(.06f, .58f, .96f));
             var startRect = startButton.GetComponent<RectTransform>(); startRect.anchorMin = new Vector2(.51f, .5f); startRect.anchorMax = new Vector2(.94f, .5f); startRect.pivot = new Vector2(.5f, .5f); startRect.offsetMin = new Vector2(0, -300.5f); startRect.offsetMax = new Vector2(0, -218.5f);
             startButton.interactable = false;
@@ -2318,7 +2320,7 @@ namespace Gugarythm
             var back = MakeFlatButton("返回曲庫", settingsPanel, Vector2.zero, ReturnFromSettings, new Vector2(180, 58), new Color(.18f, .18f, .18f));
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-52, -48));
 
-            var card = Panel("Settings Card", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(760, 520), new Vector2(0, -20));
+            var card = Panel("Settings Card", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(760, 700), new Vector2(0, -20));
             var cardTitle = Label("音訊與遊玩", card, 32);
             cardTitle.rectTransform.sizeDelta = new Vector2(660, 62);
             cardTitle.rectTransform.anchoredPosition = new Vector2(0, 180);
@@ -2331,6 +2333,11 @@ namespace Gugarythm
             offset.color = new Color(.68f, .68f, .68f);
             offset.rectTransform.sizeDelta = new Vector2(620, 44);
             offset.rectTransform.anchoredPosition = new Vector2(0, -75);
+            var tagTitle = Label("難度標籤", card, 24); tagTitle.alignment = TextAnchor.MiddleLeft; tagTitle.rectTransform.sizeDelta = new Vector2(620, 40); tagTitle.rectTransform.anchoredPosition = new Vector2(0, -145);
+            settingsTagInput = MakeInputField("新增難度標籤", card, new Vector2(-85, -190), new Vector2(430, 48));
+            MakeFlatButton("＋", card, new Vector2(245, -190), CreateDifficultyTag, new Vector2(52, 48), new Color(.06f, .58f, .96f));
+            settingsTagContent = new GameObject("Settings Difficulty Tags", typeof(RectTransform)).GetComponent<RectTransform>(); settingsTagContent.SetParent(card, false); settingsTagContent.sizeDelta = new Vector2(620, 220); settingsTagContent.anchoredPosition = new Vector2(0, -360);
+            RefreshSettingsTags();
             settingsPanel.gameObject.SetActive(false);
         }
 
@@ -2346,28 +2353,34 @@ namespace Gugarythm
             var back = MakeOutlinedButton("返回曲庫", chartEditorPanel, Vector2.zero, ReturnFromChartEditor, new Vector2(130, 48));
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-56, -48));
 
-            var card = Panel("Chart Editor Card", chartEditorPanel, new Color(.14f, .14f, .14f, 1f), new Vector2(740, 610), Vector2.zero);
+            var card = Panel("Chart Editor Card", chartEditorPanel, new Color(.14f, .14f, .14f, 1f), new Vector2(740, 680), new Vector2(0, 40));
             var title = Label("編輯譜面", card, 42);
             title.alignment = TextAnchor.MiddleLeft;
             title.rectTransform.sizeDelta = new Vector2(620, 64);
-            title.rectTransform.anchoredPosition = new Vector2(0, 240);
+            title.rectTransform.anchoredPosition = new Vector2(0, 275);
             chartEditorSubtitleLabel = Label("", card, 18);
             chartEditorSubtitleLabel.alignment = TextAnchor.MiddleLeft;
             chartEditorSubtitleLabel.color = new Color(.65f, .65f, .65f);
             chartEditorSubtitleLabel.rectTransform.sizeDelta = new Vector2(620, 36);
-            chartEditorSubtitleLabel.rectTransform.anchoredPosition = new Vector2(0, 190);
+            chartEditorSubtitleLabel.rectTransform.anchoredPosition = new Vector2(0, 220);
 
-            BuildEditorField(card, "歌曲名稱", out chartEditorTitleInput, new Vector2(0, 100));
-            BuildEditorField(card, "作者名稱", out chartEditorAuthorInput, new Vector2(0, 0));
-            BuildEditorField(card, "難度", out chartEditorLevelInput, new Vector2(0, -100));
+            BuildEditorField(card, "歌曲名稱", out chartEditorTitleInput, new Vector2(0, 177.5f));
+            BuildEditorField(card, "作者名稱", out chartEditorAuthorInput, new Vector2(0, 77.5f));
+            BuildEditorField(card, "難度標籤", out chartEditorDifficultyNameInput, new Vector2(0, -22.5f));
+            chartEditorDifficultyNameInput.gameObject.SetActive(false);
+            chartEditorTagContent = new GameObject("Difficulty Tag Options", typeof(RectTransform)).GetComponent<RectTransform>();
+            chartEditorTagContent.SetParent(card, false);
+            chartEditorTagContent.sizeDelta = new Vector2(620, 56);
+            chartEditorTagContent.anchoredPosition = new Vector2(0, -34.5f);
+            BuildEditorField(card, "難度數字", out chartEditorLevelInput, new Vector2(0, -122.5f));
             chartEditorStatusLabel = Label("", card, 17);
             chartEditorStatusLabel.color = new Color(.92f, .54f, .54f);
             chartEditorStatusLabel.alignment = TextAnchor.MiddleLeft;
             chartEditorStatusLabel.rectTransform.sizeDelta = new Vector2(620, 32);
-            chartEditorStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -158);
+            chartEditorStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -245.5f);
 
-            MakeFlatButton("儲存變更", card, new Vector2(100, -225), SaveChartEditor, new Vector2(300, 64), new Color(.06f, .58f, .96f));
-            var delete = MakeOutlinedButton("刪除譜面", card, new Vector2(-220, -225), PromptDeleteChart, new Vector2(180, 64));
+            MakeFlatButton("儲存變更", card, new Vector2(100, -253.5f), SaveChartEditor, new Vector2(300, 64), new Color(.06f, .58f, .96f));
+            var delete = MakeOutlinedButton("刪除譜面", card, new Vector2(-220, -253.5f), PromptDeleteChart, new Vector2(180, 64));
             var deleteText = delete.GetComponentInChildren<Text>();
             deleteText.color = new Color(1f, .48f, .48f);
             Outline(delete.gameObject, new Color(.72f, .26f, .26f), 1);
@@ -2418,11 +2431,17 @@ namespace Gugarythm
 
             chartEditorTitleInput.text = chartEditorEntry.Title ?? string.Empty;
             chartEditorAuthorInput.text = chartEditorEntry.Artist ?? string.Empty;
+            chartEditorDifficultyNameInput.text = chartEditorEntry.DifficultyName ?? string.Empty;
             chartEditorLevelInput.text = chartEditorEntry.DifficultyLevel ?? string.Empty;
+            if (ChartSelectionSession.Ensure().TryGetEditorDraft(out var draftTitle, out var draftArtist, out var draftTag, out var draftLevel))
+            {
+                chartEditorTitleInput.text = draftTitle; chartEditorAuthorInput.text = draftArtist; chartEditorDifficultyNameInput.text = draftTag; chartEditorLevelInput.text = draftLevel;
+            }
             chartEditorSubtitleLabel.text = string.IsNullOrWhiteSpace(chartEditorEntry.DifficultyName)
                 ? string.Empty
                 : chartEditorEntry.DifficultyName;
             chartEditorStatusLabel.text = string.Empty;
+            RefreshChartEditorTagOptions();
         }
 
         void OpenChartEditor()
@@ -2445,14 +2464,68 @@ namespace Gugarythm
         {
             if (chartEditorEntry == null) return;
             if (!LocalChartLibrary.TryUpdateChartDetails(chartEditorEntry.Id, chartEditorTitleInput.text, chartEditorAuthorInput.text,
-                    chartEditorLevelInput.text, out var updated))
+                    chartEditorDifficultyNameInput.text, chartEditorLevelInput.text, out var updated))
             {
                 chartEditorStatusLabel.text = "歌曲名稱不可空白。";
                 return;
             }
 
+            currentLibraryEntry = updated;
+            selectedLibraryEntry = updated;
+            selectedDifficultyName = updated.DifficultyName ?? string.Empty;
             if (LocalChartLibrary.TryReadSource(updated, out var bytes)) ChartSelectionSession.Ensure().SetSelection(updated, bytes);
+            ChartSelectionSession.Ensure().ClearEditorDraft();
             GugarythmSceneRouter.OpenLibrary();
+        }
+
+        void RefreshChartEditorTagOptions()
+        {
+            if (chartEditorTagContent == null || chartEditorDifficultyNameInput == null) return;
+            ClearChildren(chartEditorTagContent);
+            var tags = LocalChartLibrary.LoadDifficultyTags().ToArray();
+            for (var index = 0; index < tags.Length; index++)
+            {
+                var tag = tags[index];
+                var active = string.Equals(chartEditorDifficultyNameInput.text, tag, StringComparison.OrdinalIgnoreCase);
+                var button = MakeFlatButton(tag, chartEditorTagContent, Vector2.zero,
+                    () => { chartEditorDifficultyNameInput.text = string.Equals(chartEditorDifficultyNameInput.text, tag, StringComparison.OrdinalIgnoreCase) ? string.Empty : tag; RefreshChartEditorTagOptions(); },
+                    new Vector2(145, 36), new Color(.18f, .18f, .18f));
+                var rect = button.GetComponent<RectTransform>();
+                rect.anchorMin = rect.anchorMax = new Vector2(0, .5f);
+                rect.pivot = new Vector2(0, .5f);
+                rect.anchoredPosition = new Vector2(index * 155, 0);
+                if (active) Outline(button.gameObject, new Color(.05f, .60f, 1f), 2);
+            }
+            var add = MakeFlatButton("＋", chartEditorTagContent, Vector2.zero, OpenSettingsForDifficultyTags, new Vector2(36, 36), new Color(.06f, .58f, .96f));
+            var addRect = add.GetComponent<RectTransform>(); addRect.anchorMin = addRect.anchorMax = new Vector2(0, .5f); addRect.pivot = new Vector2(0, .5f); addRect.anchoredPosition = new Vector2(tags.Length * 155 + 10, 0);
+        }
+
+        void OpenSettingsForDifficultyTags()
+        {
+            ChartSelectionSession.Ensure().SetEditorDraft(chartEditorTitleInput.text, chartEditorAuthorInput.text, chartEditorDifficultyNameInput.text, chartEditorLevelInput.text);
+            GugarythmSceneRouter.OpenSettings();
+        }
+
+        void CreateDifficultyTag()
+        {
+            if (!LocalChartLibrary.TryCreateDifficultyTag(settingsTagInput.text, out var error)) { settingsTagInput.text = error; return; }
+            settingsTagInput.text = string.Empty; RefreshSettingsTags();
+        }
+
+        void RefreshSettingsTags()
+        {
+            if (settingsTagContent == null) return; ClearChildren(settingsTagContent);
+            var tags = LocalChartLibrary.LoadDifficultyTags();
+            for (var index = 0; index < tags.Count; index++)
+            {
+                var tag = tags[index];
+                var row = Panel("Difficulty Tag Row", settingsTagContent, new Color(.18f, .18f, .18f), new Vector2(500, 40), Vector2.zero);
+                row.anchorMin = row.anchorMax = new Vector2(.5f, 1); row.anchoredPosition = new Vector2(-35, -index * 48 - 20);
+                var handle = Label("☰", row, 20); handle.alignment = TextAnchor.MiddleCenter; handle.rectTransform.sizeDelta = new Vector2(40, 40); handle.rectTransform.anchoredPosition = new Vector2(-225, 0);
+                var label = Label(tag, row, 18); label.alignment = TextAnchor.MiddleLeft; label.rectTransform.sizeDelta = new Vector2(360, 40); label.rectTransform.anchoredPosition = new Vector2(-25, 0);
+                var drag = row.gameObject.AddComponent<DifficultyTagDragHandle>(); drag.Index = index; drag.Moved = (from, to) => { LocalChartLibrary.MoveDifficultyTag(from, to); RefreshSettingsTags(); };
+                MakeOutlinedButton("刪除", row, new Vector2(210, 0), () => { LocalChartLibrary.DeleteDifficultyTag(tag); RefreshSettingsTags(); }, new Vector2(74, 36));
+            }
         }
 
         void PromptDeleteChart()
@@ -2589,7 +2662,6 @@ namespace Gugarythm
                 detailCoverTitleLabel.text = "選擇一份\n譜面";
                 detailDifficultyLabel.text = "選擇難度";
                 detailAccuracyLabel.text = "BEST ACCURACY\n<size=52>—</size>";
-                detailLevelLabel.text = "CHART LEVEL\n<size=52>—</size>";
                 return;
             }
             detailTitleLabel.text = group.Title;
@@ -2612,7 +2684,6 @@ namespace Gugarythm
                 button.GetComponentInChildren<Text>().color = active ? new Color(.22f, .68f, 1f) : new Color(.78f, .78f, .78f);
             }
             detailAccuracyLabel.text = current.BestAccuracy < 0 ? "BEST ACCURACY\n<size=52>—</size>" : $"BEST ACCURACY\n<size=52>{current.BestAccuracy:F2}%</size>";
-            detailLevelLabel.text = $"CHART LEVEL\n<size=52>{(string.IsNullOrWhiteSpace(current.DifficultyLevel) ? "—" : current.DifficultyLevel)}</size>";
         }
 
         static bool ContainsIgnoreCase(string value, string part) => (value ?? string.Empty).IndexOf(part ?? string.Empty, StringComparison.OrdinalIgnoreCase) >= 0;
@@ -2701,7 +2772,8 @@ namespace Gugarythm
         {
             calibrationActive = false;
             StopCalibrationTickAudio();
-            GugarythmSceneRouter.OpenLibrary();
+            if (ChartSelectionSession.Ensure().TryGetEditorDraft(out _, out _, out _, out _)) GugarythmSceneRouter.OpenChartEditor();
+            else GugarythmSceneRouter.OpenLibrary();
         }
 
         void BuildLatencyCalibration(RectTransform root)
@@ -3067,6 +3139,7 @@ namespace Gugarythm
             var rect = icon.GetComponent<RectTransform>();
             rect.SetParent(parent, false);
             rect.sizeDelta = new Vector2(34, 34);
+            rect.anchoredPosition = new Vector2(2, 2);
             icon.GetComponent<PencilIconGraphic>().raycastTarget = false;
         }
 

@@ -14,6 +14,11 @@ namespace Gugarythm
 
         LocalChartEntry selectedEntry;
         byte[] selectedGgrBytes;
+        public string DraftTitle { get; private set; }
+        public string DraftArtist { get; private set; }
+        public string DraftTag { get; private set; }
+        public string DraftLevel { get; private set; }
+        public bool ReturnToEditor { get; private set; }
 
         public bool HasSelection => selectedEntry != null && selectedGgrBytes is { Length: > 0 };
 
@@ -62,6 +67,18 @@ namespace Gugarythm
             if (selectedGgrBytes != null) Array.Clear(selectedGgrBytes, 0, selectedGgrBytes.Length);
             selectedGgrBytes = null;
         }
+
+        public void SetEditorDraft(string title, string artist, string tag, string level)
+        {
+            DraftTitle = title ?? string.Empty; DraftArtist = artist ?? string.Empty; DraftTag = tag ?? string.Empty; DraftLevel = level ?? string.Empty; ReturnToEditor = true;
+        }
+
+        public bool TryGetEditorDraft(out string title, out string artist, out string tag, out string level)
+        {
+            title = DraftTitle; artist = DraftArtist; tag = DraftTag; level = DraftLevel; return ReturnToEditor;
+        }
+
+        public void ClearEditorDraft() { DraftTitle = DraftArtist = DraftTag = DraftLevel = string.Empty; ReturnToEditor = false; }
 
         void Awake()
         {
