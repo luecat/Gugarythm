@@ -43,4 +43,6 @@ CLAUDE.md
 GEMINI.md
 .agents/
 .codex/
+.superpowers/
+.utmp/
 docs/superpowers/
