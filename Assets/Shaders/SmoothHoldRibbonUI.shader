@@ -22,7 +22,6 @@ Shader "Gugarythm/Smooth Hold Ribbon UI"
 
         fixed4 frag(v2f input) : SV_Target
         {
-            fixed4 source = tex2D(_MainTex, input.uv);
             // The old 4px-high source alpha turns into visible steps when a
             // wide Hold is magnified.  Reconstruct a continuous horizontal
             // shoulder from the ribbon UV and broaden its edge by one pixel.
@@ -31,7 +30,10 @@ Shader "Gugarythm/Smooth Hold Ribbon UI"
             float left = smoothstep(0, feather, input.uv.x);
             float right = smoothstep(0, feather, 1 - input.uv.x);
             fixed4 value;
-            value.rgb = source.rgb * input.color.rgb;
+            // The source RGB contains a dark shoulder intended to accompany
+            // its old alpha ramp.  Using it after replacing that alpha creates
+            // a visible drop-shadow, so the runtime Hold tint is authoritative.
+            value.rgb = input.color.rgb;
             // Do not reuse the source's stepped alpha profile: it is the
             // artifact being replaced.  Keep the original .8 centre opacity
             // before the renderer's Hold opacity is applied.
