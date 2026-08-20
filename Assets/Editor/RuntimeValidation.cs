@@ -218,6 +218,8 @@ public static class RuntimeValidation
             "A Hold ribbon's visible fill must align with its USC-authored head width");
         Require(Math.Abs(SonolusLandscapePrototype.HoldConnectorLaneWidth(147.5f) - 147.5f) < .0001f,
             "A rendered Hold ribbon must stay within its authored lane span instead of expanding into a neighboring lane");
+        Require(Math.Abs((1 - SonolusLandscapePrototype.HoldConnectorSourceUvInset * 2) * 306 - 240) < .0001f,
+            "A lane-confined Hold ribbon must map only the texture's visible core across its authored lane span");
 
         var clippedConnectorWidth = typeof(SonolusLandscapePrototype).GetMethod(
             "HoldConnectorRenderWidth", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,

@@ -18,6 +18,7 @@ namespace Gugarythm
         public float glowWidthScale = 1.12f;
         public float glowPadding = 2;
         public float edgeWidth = 4;
+        [Range(0, .49f)] public float sourceUvInset;
 
         Vector2[] path = new Vector2[2];
         float[] widths = new float[2];
@@ -101,7 +102,7 @@ namespace Gugarythm
 
         // Each time slice stays horizontal. This makes the ribbon meet the left and
         // right edges of the rectangular head/tail notes exactly, even on curves.
-        static void AddBand(VertexHelper helper, Vector2 start, Vector2 end, float widthA, float widthB, float insetA, float insetB, Color32 tintA, Color32 tintB, bool right = false)
+        void AddBand(VertexHelper helper, Vector2 start, Vector2 end, float widthA, float widthB, float insetA, float insetB, Color32 tintA, Color32 tintB, bool right = false)
         {
             Vector2 a;
             Vector2 b;
@@ -128,13 +129,15 @@ namespace Gugarythm
                 c = end + Vector2.right * widthB * .5f;
                 d = end + Vector2.right * (widthB * .5f - insetB);
             }
+            var uvMin = Mathf.Clamp(sourceUvInset, 0, .49f);
+            var uvMax = 1 - uvMin;
             var first = helper.currentVertCount;
             var vertex = UIVertex.simpleVert; vertex.color = tintA;
-            vertex.position = a; vertex.uv0 = new Vector2(0, 0); helper.AddVert(vertex);
-            vertex.position = b; vertex.uv0 = new Vector2(1, 0); helper.AddVert(vertex);
+            vertex.position = a; vertex.uv0 = new Vector2(uvMin, 0); helper.AddVert(vertex);
+            vertex.position = b; vertex.uv0 = new Vector2(uvMax, 0); helper.AddVert(vertex);
             vertex.color = tintB;
-            vertex.position = c; vertex.uv0 = new Vector2(1, 1); helper.AddVert(vertex);
-            vertex.position = d; vertex.uv0 = new Vector2(0, 1); helper.AddVert(vertex);
+            vertex.position = c; vertex.uv0 = new Vector2(uvMax, 1); helper.AddVert(vertex);
+            vertex.position = d; vertex.uv0 = new Vector2(uvMin, 1); helper.AddVert(vertex);
             helper.AddTriangle(first, first + 1, first + 2);
             helper.AddTriangle(first, first + 2, first + 3);
         }
