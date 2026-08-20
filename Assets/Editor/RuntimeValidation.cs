@@ -212,6 +212,16 @@ public static class RuntimeValidation
             SonolusLandscapePrototype.HoldConnectorRenderWidth(147.5f));
         Require(Math.Abs(connectorVisibleWidth - 147.5f) < .0001f,
             "A Hold ribbon's visible fill must align with its USC-authored head width");
+
+        var clippedConnectorWidth = typeof(SonolusLandscapePrototype).GetMethod(
+            "HoldConnectorRenderWidth", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
+            null, new[] { typeof(float), typeof(float), typeof(float), typeof(float) }, null);
+        Require(clippedConnectorWidth != null,
+            "Hold connectors must expose the same edge-clamped width calculation used by Hold heads");
+        var clippedRenderWidth = (float)clippedConnectorWidth.Invoke(null, new object[] { 1000f, 0f, 6f, 1f });
+        var clippedVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(clippedRenderWidth);
+        Require(clippedVisibleWidth < 1000f,
+            "An edge-clamped Hold connector must shrink with its head instead of retaining its authored full width");
     }
 
     // This fixture deliberately has no .5-beat interior spans, so PlayableCount
