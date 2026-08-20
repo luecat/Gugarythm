@@ -1331,7 +1331,8 @@ namespace Gugarythm
                 line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : null;
                 SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
                 if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
-                    holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root))
+                    holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root) &&
+                    ShouldRenderPersistentHoldHead(root))
                 {
                     var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
                     RenderPersistentHoldHead(root, connector, headT);
@@ -1606,6 +1607,8 @@ namespace Gugarythm
             approachProgress >= JudgmentBottomApproach && grade != JudgmentGrade.Pending;
         public static bool ShouldHideAttachedHoldParticle(RuntimeNote note, float approachProgress) =>
             note != null && IsHoldMid(note) && !note.Judged && note.HoldRootIndex >= 0 && approachProgress >= 1f;
+        public static bool ShouldRenderPersistentHoldHead(RuntimeNote root) =>
+            root != null && root.Visible && root.Judged;
         static bool ShouldHideHoldHead(RuntimeNote note, float approachProgress) =>
             ShouldHideAttachedHoldParticle(note, approachProgress)
                 ? true
