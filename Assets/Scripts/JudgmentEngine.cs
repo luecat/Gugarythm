@@ -105,6 +105,9 @@ namespace Gugarythm
 
     public sealed class JudgmentEngine
     {
+        const double JusticeCriticalWindow = 2.0 / 60.0;
+        const double JusticeWindow = 4.0 / 60.0;
+        const double AttackWindow = 6.0 / 60.0;
         public const double SustainLateWindow = 5.0 / 60.0;
         public const double CommitGrace = .025;
         public const float LaneForgiveness = .85f;
@@ -113,6 +116,14 @@ namespace Gugarythm
         readonly List<RuntimeNote> notes;
         readonly ScoreState score;
         readonly Dictionary<int, TapProtectionPair[]> tapProtectionPairs;
+
+        enum ProtectionBand
+        {
+            Outside,
+            Critical,
+            Justice,
+            Attack,
+        }
 
         readonly struct TapProtectionPair
         {
@@ -181,16 +192,34 @@ namespace Gugarythm
                 {
                     if (note.Grade != JudgmentGrade.Pending || IsContactNote(note) || note.Kind != input.Kind) continue;
                     if (input.Kind != RuntimeNoteKind.Flick && !LaneMatches(note, input.Lane)) continue;
-                    var eventTime = input.Kind == RuntimeNoteKind.Flick ? FlickIntersectionTime(input, note) : input.Time;
+                    var protectionLane = input.Lane;
+                    var eventTime = input.Kind == RuntimeNoteKind.Flick
+                        ? FlickIntersectionTime(input, note, out protectionLane)
+                        : input.Time;
                     if (!eventTime.HasValue) continue;
                     var grade = GradeFor(note, eventTime.Value - note.Time);
                     if (grade == JudgmentGrade.Pending) continue;
                     if (JudgmentProtectionEnabled &&
-                        IsProtectedCandidate(note, grade, eventTime.Value, input.Lane)) continue;
+                        IsProtectedCandidate(note, eventTime.Value, protectionLane)) continue;
                     var spatial = Math.Abs(input.Lane - note.Lane);
                     edges.Add(new Edge(inputIndex, note, eventTime.Value, grade, Math.Abs(eventTime.Value - note.Time), spatial));
                 }
             }
+
+            // A rub can emit several neighbouring cell activations in one
+            // batch. If one of them is inside a note's authored span, do not
+            // let an earlier forgiveness-only edge reserve that note first.
+            var bestAuthoredMatches = edges
+                .Where(edge => inputs[edge.InputIndex].Kind != RuntimeNoteKind.Flick &&
+                               LaneInAuthoredSpan(edge.Note, inputs[edge.InputIndex].Lane))
+                .GroupBy(edge => (edge.Note.Index, inputs[edge.InputIndex].FingerId))
+                .ToDictionary(group => group.Key, group => group.Aggregate((best, candidate) =>
+                    CompareEdges(candidate, best) < 0 ? candidate : best));
+            edges.RemoveAll(edge => bestAuthoredMatches.TryGetValue(
+                    (edge.Note.Index, inputs[edge.InputIndex].FingerId), out var authored) &&
+                inputs[edge.InputIndex].Kind != RuntimeNoteKind.Flick &&
+                !LaneInAuthoredSpan(edge.Note, inputs[edge.InputIndex].Lane) &&
+                CompareEdges(authored, edge) <= 0);
 
             var candidates = edges.GroupBy(edge => edge.InputIndex).ToDictionary(group => group.Key, group => group.OrderBy(edge => GradeRank(edge.Grade))
                 .ThenBy(edge => edge.TimeError).ThenBy(edge => edge.SpaceError).ThenBy(edge => edge.Note.Index).ToList());
@@ -293,8 +322,9 @@ namespace Gugarythm
             return path.StartLane + (path.EndLane - path.StartLane) * (float)progress;
         }
 
-        static double? FlickIntersectionTime(InputToken input, RuntimeNote note)
+        static double? FlickIntersectionTime(InputToken input, RuntimeNote note, out float intersectionLane)
         {
+            intersectionLane = input.Lane;
             if (Math.Abs(input.Lane - input.PreviousLane) < .0001f && input.Time > input.PreviousTime) return null;
             var min = note.Lane - note.Size - LaneForgiveness;
             var max = note.Lane + note.Size + LaneForgiveness;
@@ -307,17 +337,25 @@ namespace Gugarythm
             var duration = input.Time - input.PreviousTime;
             var t = (desired - input.PreviousTime) / duration;
             var laneAtDesired = input.PreviousLane + (input.Lane - input.PreviousLane) * (float)t;
-            if (laneAtDesired >= min && laneAtDesired <= max) return desired;
+            if (laneAtDesired >= min && laneAtDesired <= max)
+            {
+                intersectionLane = laneAtDesired;
+                return desired;
+            }
 
             var boundary = laneAtDesired < min ? min : max;
             var laneDelta = input.Lane - input.PreviousLane;
             if (Math.Abs(laneDelta) < .0001f) return input.Time;
             var crossing = (boundary - input.PreviousLane) / laneDelta;
+            intersectionLane = boundary;
             return input.PreviousTime + duration * Math.Clamp(crossing, 0, 1);
         }
 
         public static bool LaneMatches(RuntimeNote note, float lane) =>
             lane >= note.Lane - note.Size - LaneForgiveness && lane <= note.Lane + note.Size + LaneForgiveness;
+
+        static bool LaneInAuthoredSpan(RuntimeNote note, float lane) =>
+            lane >= note.Lane - note.Size && lane <= note.Lane + note.Size;
 
         static Dictionary<int, TapProtectionPair[]> BuildTapProtectionPairs(IReadOnlyList<RuntimeNote> notes)
         {
@@ -335,7 +373,7 @@ namespace Gugarythm
 
                     var sharedMinimum = Math.Max(earlier.Lane - earlier.Size, later.Lane - later.Size);
                     var sharedMaximum = Math.Min(earlier.Lane + earlier.Size, later.Lane + later.Size);
-                    if (sharedMinimum > sharedMaximum) continue;
+                    if (sharedMinimum >= sharedMaximum) continue;
 
                     var pair = new TapProtectionPair(earlier, later, sharedMinimum, sharedMaximum);
                     AddProtectionPair(mutable, earlier.Index, pair);
@@ -358,56 +396,59 @@ namespace Gugarythm
             pairs.Add(pair);
         }
 
-        bool IsProtectedCandidate(RuntimeNote note, JudgmentGrade grade, double eventTime, float inputLane)
+        bool IsProtectedCandidate(RuntimeNote note, double eventTime, float inputLane)
         {
             if (!IsTapProtectionKind(note.Kind) ||
                 !tapProtectionPairs.TryGetValue(note.Index, out var pairs)) return false;
 
+            var band = ProtectionBandFor(eventTime - note.Time);
+            if (band == ProtectionBand.Outside) return false;
             foreach (var pair in pairs)
             {
                 var wrongHalf = ReferenceEquals(note, pair.Earlier)
                     ? eventTime > pair.Boundary
                     : eventTime < pair.Boundary;
-                if (grade is JudgmentGrade.Great or JudgmentGrade.Good)
-                {
-                    if (wrongHalf) return true;
-                }
-                else if (grade == JudgmentGrade.Perfect && pair.ContainsSharedLane(inputLane) && wrongHalf)
-                {
-                    return true;
-                }
+                if (!wrongHalf) continue;
+                if (band is ProtectionBand.Justice or ProtectionBand.Attack) return true;
+                if (band == ProtectionBand.Critical && pair.ContainsSharedLane(inputLane)) return true;
             }
 
             return false;
+        }
+
+        static ProtectionBand ProtectionBandFor(double delta)
+        {
+            var absolute = Math.Abs(delta);
+            if (absolute <= JusticeCriticalWindow) return ProtectionBand.Critical;
+            if (absolute <= JusticeWindow) return ProtectionBand.Justice;
+            if (absolute <= AttackWindow) return ProtectionBand.Attack;
+            return ProtectionBand.Outside;
         }
 
         public static JudgmentGrade GradeFor(RuntimeNote note, double delta)
         {
             var early = delta < 0;
             var absolute = Math.Abs(delta);
-            const double jc = 2.0 / 60.0;
-            const double justice = 4.0 / 60.0;
-            const double attack = 6.0 / 60.0;
             if (note.Kind == RuntimeNoteKind.Flick)
             {
-                if (early && absolute <= attack) return JudgmentGrade.Perfect;
-                if (absolute <= jc) return JudgmentGrade.Perfect;
-                if (absolute <= justice) return JudgmentGrade.Great;
-                return absolute <= attack ? JudgmentGrade.Good : JudgmentGrade.Pending;
+                if (early && absolute <= AttackWindow) return JudgmentGrade.Perfect;
+                if (absolute <= JusticeCriticalWindow) return JudgmentGrade.Perfect;
+                if (absolute <= JusticeWindow) return JudgmentGrade.Great;
+                return absolute <= AttackWindow ? JudgmentGrade.Good : JudgmentGrade.Pending;
             }
 
             if (note.Kind == RuntimeNoteKind.Tap && note.Critical)
-                return absolute <= attack
+                return absolute <= AttackWindow
                     ? JudgmentGrade.Perfect
                     : JudgmentGrade.Pending;
 
-            if (absolute <= jc) return JudgmentGrade.Perfect;
-            if (absolute <= justice) return JudgmentGrade.Great;
-            return absolute <= attack ? JudgmentGrade.Good : JudgmentGrade.Pending;
+            if (absolute <= JusticeCriticalWindow) return JudgmentGrade.Perfect;
+            if (absolute <= JusticeWindow) return JudgmentGrade.Great;
+            return absolute <= AttackWindow ? JudgmentGrade.Good : JudgmentGrade.Pending;
         }
 
-        static double OuterLateWindow(RuntimeNote note) => 6.0 / 60.0;
-        static double OuterEarlyWindow(RuntimeNote note) => 6.0 / 60.0;
+        static double OuterLateWindow(RuntimeNote note) => AttackWindow;
+        static double OuterEarlyWindow(RuntimeNote note) => AttackWindow;
         static int GradeRank(JudgmentGrade grade) => grade switch { JudgmentGrade.Perfect => 0, JudgmentGrade.Great => 1, JudgmentGrade.Good => 2, _ => 3 };
 
         void Register(RuntimeNote note, JudgmentGrade grade, double delta, List<JudgmentEvent> output)
