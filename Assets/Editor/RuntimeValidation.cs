@@ -136,9 +136,21 @@ public static class RuntimeValidation
         ValidateJudgmentRules();
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
+        ValidateLatencyCalibrationMath();
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateLatencyCalibrationMath()
+    {
+        var samples = new[] { .010d, .020d, .030d, .040d };
+        Require(LatencyCalibrationMath.TryGetCalibrationAverage(samples, out var average) && Math.Abs(average - .025d) < .000001d,
+            "Four calibration rounds must average their valid fourth-beat taps");
+        Require(!LatencyCalibrationMath.TryGetCalibrationAverage(new[] { .010d, double.NaN, .030d, .040d }, out _),
+            "Calibration must reject a round containing an invalid tap");
+        Require(!LatencyCalibrationMath.TryGetCalibrationAverage(new[] { .010d, .020d, .030d }, out _),
+            "Calibration must reject an incomplete set of rounds");
     }
 
     static void ValidateUscLeadingMeasurePadding()

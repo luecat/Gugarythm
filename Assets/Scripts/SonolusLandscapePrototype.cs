@@ -261,6 +261,7 @@ namespace Gugarythm
         RectTransform pauseOverlay;
         RectTransform pauseMenuContent;
         RectTransform resultPanel;
+        RectTransform calibrationBackdrop;
         Text accuracyLabel;
         Text comboLabel;
         Text judgmentLabel;
@@ -292,10 +293,11 @@ namespace Gugarythm
         Text settingsDelayLabel;
         Text difficultyTagConfirmationText;
         Text calibrationLabel;
-        Text calibrationOffsetLabel;
         Text chartEditorSubtitleLabel;
         Text chartEditorStatusLabel;
         Button calibrationTapButton;
+        Button calibrationRestartButton;
+        Button calibrationCloseButton;
         Button calibrationDecreaseOffsetButton;
         Button calibrationIncreaseOffsetButton;
         Button calibrationResetOffsetButton;
@@ -313,6 +315,7 @@ namespace Gugarythm
         bool libraryScrollPositionInitialized;
         Button pauseButton;
         RectTransform calibrationPanel;
+        readonly RectTransform[] calibrationProgressDots = new RectTransform[CalibrationRoundCount];
         Toggle autoPlayToggle;
         Slider speedSlider;
         Slider settingsMusicVolumeSlider;
@@ -342,6 +345,8 @@ namespace Gugarythm
         double calibrationStartDsp;
         readonly List<double> calibrationOffsets = new();
         bool calibrationActive;
+        int calibrationRoundIndex;
+        bool calibrationFourthBeatTapRegistered;
         float scrollSpeed = 8f;
         float judgmentHideAt = -1f;
 
@@ -739,7 +744,7 @@ namespace Gugarythm
 
         void OpenAutoAdjustPanel()
         {
-            // The new automatic-adjustment flow will be designed separately.
+            StartLatencyCalibration();
         }
 
         void StartLatencyCalibration()
@@ -747,16 +752,19 @@ namespace Gugarythm
             if (running || calibrationPanel == null) return;
             StopCalibrationTickAudio();
             calibrationOffsets.Clear();
+            calibrationRoundIndex = 0;
+            calibrationFourthBeatTapRegistered = false;
             calibrationStartDsp = AudioDeviceRecovery.ChartAnchorDspForAudioOffset(AudioSettings.dspTime + .8d, audioOffsetSeconds);
             ScheduleCalibrationTicks();
             calibrationActive = true;
+            calibrationBackdrop?.gameObject.SetActive(true);
             calibrationPanel.gameObject.SetActive(true);
             RefreshManualAudioOffsetControls();
-            calibrationLabel.gameObject.SetActive(true);
-            calibrationLabel.text = "四拍循環中\n按下 TAP 測試延遲";
-            calibrationTapButton.gameObject.SetActive(true);
+            calibrationLabel.text = "第 1 / 4 輪";
             calibrationTapButton.interactable = true;
-            RefreshCalibrationOffsetLabel();
+            calibrationRestartButton.interactable = true;
+            calibrationCloseButton.interactable = true;
+            RefreshCalibrationProgress();
         }
 
         void ReturnFromLatencyCalibration()
@@ -764,6 +772,7 @@ namespace Gugarythm
             calibrationActive = false;
             StopCalibrationTickAudio();
             RefreshManualAudioOffsetControls();
+            calibrationBackdrop?.gameObject.SetActive(false);
             calibrationPanel?.gameObject.SetActive(false);
         }
 
@@ -778,14 +787,34 @@ namespace Gugarythm
             if (!calibrationActive || calibrationPanel == null) return;
             if (AudioSettings.dspTime >= CalibrationBeatDsp(CalibrationBeatsPerRound - 1) + CalibrationTapWindowSeconds)
             {
-                if (LatencyCalibrationMath.TryGetAverageOffset(calibrationOffsets, out var average))
+                calibrationRoundIndex++;
+
+                if (calibrationRoundIndex >= CalibrationRoundCount)
                 {
-                    SetAudioOffset(average);
-                    calibrationLabel.text = $"四拍平均  {average * 1000d:+0;-0;0} ms";
+                    if (LatencyCalibrationMath.TryGetCalibrationAverage(calibrationOffsets, out var average))
+                    {
+                        SetAudioOffset(average);
+                        calibrationLabel.text = $"{average * 1000d:+0;-0;0} ms";
+                    }
+                    else
+                    {
+                        calibrationLabel.text = "未完成";
+                    }
+                    calibrationActive = false;
+                    StopCalibrationTickAudio();
+                    RefreshManualAudioOffsetControls();
+                    calibrationTapButton.interactable = false;
+                    calibrationRestartButton.interactable = true;
+                    calibrationCloseButton.interactable = true;
+                    RefreshCalibrationProgress();
+                    return;
                 }
-                calibrationOffsets.Clear();
-                calibrationStartDsp = AudioSettings.dspTime + .15d;
+
+                calibrationFourthBeatTapRegistered = false;
+                calibrationStartDsp = AudioSettings.dspTime + CalibrationRoundGapSeconds;
                 ScheduleCalibrationTicks();
+                calibrationLabel.text = $"第 {calibrationRoundIndex + 1} / {CalibrationRoundCount} 輪";
+                RefreshCalibrationProgress();
             }
         }
 
@@ -793,13 +822,15 @@ namespace Gugarythm
 
         void RegisterCalibrationTap(double inputDsp)
         {
-            if (!calibrationActive || calibrationOffsets.Count >= CalibrationBeatsPerRound) return;
-            var expectedBeatDsp = CalibrationBeatDsp(calibrationOffsets.Count);
+            if (!calibrationActive || calibrationFourthBeatTapRegistered) return;
+            var fourthBeatDsp = CalibrationBeatDsp(CalibrationBeatsPerRound - 1);
+            if (inputDsp < fourthBeatDsp - CalibrationTapWindowSeconds ||
+                inputDsp > fourthBeatDsp + CalibrationTapWindowSeconds) return;
+            var expectedBeatDsp = fourthBeatDsp;
             var offset = CalibrationAudioOffsetForTap(inputDsp, expectedBeatDsp);
             if (!LatencyCalibrationMath.IsTapOffsetValid(offset)) return;
             calibrationOffsets.Add(offset);
-            calibrationLabel.text = $"本次偏移  {offset * 1000d:+0;-0;0} ms\n第 {calibrationOffsets.Count}/4 拍";
-            calibrationOffsetLabel.text = $"目前套用  {audioOffsetSeconds * 1000d:+0;-0;0} ms\n按下 TAP 測試你這次的聲音與畫面差距";
+            calibrationFourthBeatTapRegistered = true;
         }
 
         public static double CalibrationAudioOffsetForTap(double inputDsp, double audibleBeatDsp)
@@ -817,9 +848,11 @@ namespace Gugarythm
         void SetAudioOffset(double value)
         {
             audioOffsetSeconds = double.IsNaN(value) || double.IsInfinity(value) ? 0d : Math.Clamp(value, -.3d, .3d);
+            settingsDelayOffsetSeconds = audioOffsetSeconds;
             PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
+            PlayerPrefs.SetFloat("gugarythm-settings-delay-offset-seconds", (float)settingsDelayOffsetSeconds);
             PlayerPrefs.Save();
-            RefreshCalibrationOffsetLabel();
+            RefreshSettingsDelayLabel();
         }
 
         void SetManualAudioOffset(double value)
@@ -838,17 +871,26 @@ namespace Gugarythm
             if (calibrationResetOffsetButton != null) calibrationResetOffsetButton.interactable = interactable;
         }
 
-        void RefreshCalibrationOffsetLabel()
+        void RefreshCalibrationProgress()
         {
-            if (calibrationOffsetLabel != null)
-                calibrationOffsetLabel.text = $"聲音偏移  {audioOffsetSeconds * 1000d:+0;-0;0} ms\n＋延後聲音／−提前聲音；不影響判定";
+            for (var index = 0; index < calibrationProgressDots.Length; index++)
+            {
+                if (calibrationProgressDots[index] == null) continue;
+                var image = calibrationProgressDots[index].GetComponent<Image>();
+                image.color = index < calibrationRoundIndex
+                    ? new Color(.06f, .58f, .96f)
+                    : index == calibrationRoundIndex && calibrationActive
+                        ? new Color(.25f, .78f, 1f)
+                        : new Color(.30f, .32f, .35f);
+            }
         }
 
         const int CalibrationBeatsPerRound = LatencyCalibrationMath.TapsPerRound;
-        const int CalibrationRoundCount = 1;
+        const int CalibrationRoundCount = LatencyCalibrationMath.CalibrationRoundCount;
         const int CalibrationTickCount = CalibrationBeatsPerRound;
         const double CalibrationBeatDurationSeconds = .6d;
         const double CalibrationTapWindowSeconds = .3d;
+        const double CalibrationRoundGapSeconds = .8d;
 
         double CalibrationBeatDsp(int beatIndex) =>
             calibrationStartDsp + beatIndex * CalibrationBeatDurationSeconds + audioOffsetSeconds;
@@ -862,6 +904,7 @@ namespace Gugarythm
                 source.clip = beatIndex % CalibrationBeatsPerRound == CalibrationBeatsPerRound - 1 && greatSound != null
                     ? greatSound
                     : perfectSound;
+                source.volume = beatIndex == CalibrationBeatsPerRound - 1 ? .95f : .62f;
                 source.PlayScheduled(CalibrationBeatDsp(beatIndex));
             }
         }
@@ -2177,6 +2220,7 @@ namespace Gugarythm
             BuildHud(safeAreaRoot, root);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
+            BuildLatencyCalibration(safeAreaRoot);
             BuildChartEditor(safeAreaRoot);
             BuildImportDecision(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
@@ -2302,8 +2346,7 @@ namespace Gugarythm
                 settingsPanel.localScale = Vector3.one;
             }
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
-            if (!GugarythmSceneRouter.IsSettings)
-                FitOverlayPanel(calibrationPanel, new Vector2(520, 760), logicalSafeSize);
+            FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
             FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
         }
@@ -2973,25 +3016,43 @@ namespace Gugarythm
 
         void BuildLatencyCalibration(RectTransform root)
         {
-            calibrationPanel = Panel("Latency Calibration Preview", root, new Color(.04f, .06f, .14f, .98f), new Vector2(520, 760), new Vector2(590, -20));
-            Outline(calibrationPanel.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
-            var title = Label("延遲測試預覽", calibrationPanel, 34);
-            title.rectTransform.sizeDelta = new Vector2(450, 62);
-            title.rectTransform.anchoredPosition = new Vector2(0, 325);
-            calibrationLabel = Label("", calibrationPanel, 24);
-            calibrationLabel.rectTransform.sizeDelta = new Vector2(440, 80);
-            calibrationLabel.rectTransform.anchoredPosition = new Vector2(0, 250);
-            calibrationTapButton = MakeButton("TAP\n點擊節拍", calibrationPanel, new Vector2(0, 70), RegisterCalibrationTapFromButton, new Vector2(420, 260));
-            calibrationOffsetLabel = Label("", calibrationPanel, 20);
-            calibrationOffsetLabel.rectTransform.sizeDelta = new Vector2(470, 64);
-            calibrationOffsetLabel.rectTransform.anchoredPosition = new Vector2(0, -115);
-            calibrationDecreaseOffsetButton = MakeButton("−10 ms", calibrationPanel, new Vector2(-150, -75), () => AdjustAudioOffset(-.01d), new Vector2(140, 48));
-            calibrationIncreaseOffsetButton = MakeButton("＋10 ms", calibrationPanel, new Vector2(0, -75), () => AdjustAudioOffset(.01d), new Vector2(140, 48));
-            calibrationResetOffsetButton = MakeButton("歸零", calibrationPanel, new Vector2(150, -75), () => SetManualAudioOffset(0), new Vector2(110, 48));
-            MakeButton("重新開始", calibrationPanel, new Vector2(-92, -220), RestartLatencyCalibration, new Vector2(170, 42));
-            MakeButton("停止預覽", calibrationPanel, new Vector2(92, -220), ReturnFromLatencyCalibration, new Vector2(170, 42));
-            RefreshCalibrationOffsetLabel();
+            calibrationBackdrop = Panel("Latency Calibration Backdrop", root, new Color(0, 0, 0, .56f), Vector2.zero, Vector2.zero, true);
+            MakeInvisibleButton(calibrationBackdrop, ReturnFromLatencyCalibration);
+            calibrationPanel = Panel("Latency Calibration Dialog", root, new Color(.12f, .12f, .13f, .99f), new Vector2(560, 440), Vector2.zero);
+            Outline(calibrationPanel.gameObject, new Color(.34f, .35f, .38f, .95f), 1);
+            var title = Label("自動調整延遲", calibrationPanel, 28);
+            title.alignment = TextAnchor.MiddleLeft;
+            title.rectTransform.sizeDelta = new Vector2(430, 46);
+            title.rectTransform.anchoredPosition = new Vector2(-20, 184);
+            var divider = Panel("Calibration Divider", calibrationPanel, new Color(.28f, .29f, .31f), new Vector2(470, 1), new Vector2(0, 145));
+            divider.GetComponent<Image>().raycastTarget = false;
+            calibrationLabel = Label("", calibrationPanel, 22);
+            calibrationLabel.rectTransform.sizeDelta = new Vector2(430, 36);
+            calibrationLabel.rectTransform.anchoredPosition = new Vector2(0, 108);
+            for (var index = 0; index < calibrationProgressDots.Length; index++)
+            {
+                calibrationProgressDots[index] = Panel($"Calibration Progress {index + 1}", calibrationPanel,
+                    new Color(.30f, .32f, .35f), new Vector2(10, 10), new Vector2((index - 1.5f) * 36f, 68));
+                calibrationProgressDots[index].GetComponent<Image>().raycastTarget = false;
+            }
+            calibrationTapButton = MakeFlatButton("TAP", calibrationPanel, new Vector2(0, -12), RegisterCalibrationTapFromButton, new Vector2(230, 98), new Color(.08f, .43f, .76f));
+            var tapText = calibrationTapButton.GetComponentInChildren<Text>();
+            tapText.alignment = TextAnchor.MiddleCenter;
+            tapText.fontSize = 30;
+            var calibrationActionRow = new GameObject("Calibration Actions", typeof(RectTransform)).GetComponent<RectTransform>();
+            calibrationActionRow.SetParent(calibrationPanel, false);
+            calibrationActionRow.anchorMin = calibrationActionRow.anchorMax = new Vector2(.5f, .5f);
+            calibrationActionRow.pivot = new Vector2(.5f, .5f);
+            calibrationActionRow.sizeDelta = new Vector2(320, 44);
+            // Keep the restart/close actions at the approved lower position.
+            calibrationActionRow.anchoredPosition = new Vector2(0, -134.5f);
+            calibrationRestartButton = MakeFlatButton("重新開始", calibrationActionRow, new Vector2(-85, 0), RestartLatencyCalibration, new Vector2(150, 44), new Color(.06f, .58f, .96f));
+            calibrationRestartButton.GetComponentInChildren<Text>().alignment = TextAnchor.MiddleCenter;
+            calibrationCloseButton = MakeOutlinedButton("關閉", calibrationActionRow, new Vector2(85, 0), ReturnFromLatencyCalibration, new Vector2(150, 44));
+            calibrationCloseButton.GetComponentInChildren<Text>().alignment = TextAnchor.MiddleCenter;
             RefreshManualAudioOffsetControls();
+            RefreshCalibrationProgress();
+            calibrationBackdrop.gameObject.SetActive(false);
             calibrationPanel.gameObject.SetActive(false);
         }
 
