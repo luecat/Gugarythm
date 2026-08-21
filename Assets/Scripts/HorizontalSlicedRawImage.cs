@@ -8,6 +8,8 @@ namespace Gugarythm
     [AddComponentMenu("UI/Horizontal Sliced Raw Image")]
     public sealed class HorizontalSlicedRawImage : MaskableGraphic
     {
+        public RawImage TraceParticle { get; set; }
+        public RawImage FlickArrow { get; set; }
         [SerializeField] Texture sourceTexture;
         [SerializeField, Range(0, .49f)] float sourceCapRatio = .3f;
         Vector2 surfaceUpperLeft;

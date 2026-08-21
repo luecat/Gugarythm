@@ -183,6 +183,25 @@ public static class RuntimeValidation
             new object[] { firstVisualTime, -1.097d, 0d, 2d, .25d });
         Require(Math.Abs(initialWaterfallTime - (firstVisualTime - 2.25d)) < .0001,
             "A 193 BPM chart with negative offset must begin off-screen before its first beat-4 object");
+
+        var scaledChart = new RuntimeChart { DefaultTimeScaleGroup = "scaled" };
+        scaledChart.TimeScaleGroups["scaled"] = new RuntimeTimeScaleGroup("scaled", new[] { (time: 0d, scale: .5d) });
+        scaledChart.Notes.Add(new RuntimeNote { Time = 4d, TimeScaleGroup = "scaled", Visible = true });
+        var firstVisualTimeMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "FirstWaterfallVisualTime", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(firstVisualTimeMethod != null, "Gameplay must expose its first visual-time calculation");
+        var scaledFirstVisualTime = (double)firstVisualTimeMethod.Invoke(null, new object[] { scaledChart });
+        Require(Math.Abs(scaledFirstVisualTime - 2d) < .0001,
+            "The first waterfall time must use the note's time-scale visual position");
+        var firstSongTimeMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "FirstWaterfallSongTime", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(firstSongTimeMethod != null, "Gameplay must expose its first waterfall song-time calculation");
+        var scaledFirstSongTime = (double)firstSongTimeMethod.Invoke(null, new object[] { scaledChart });
+        Require(Math.Abs(scaledFirstSongTime + .5d) < .0001,
+            "The first waterfall song time must invert the time-scale visual position");
+
+        Require(Math.Abs(SonolusLandscapePrototype.DifficultyButtonWidthForText("未標示難度") - 170f) < .0001,
+            "The unmarked difficulty button must reserve enough width for mobile text");
         Debug.Log("GUGARYTHM_WATERFALL_VALIDATION_OK");
     }
 
