@@ -79,6 +79,8 @@ public static class CreatePrototypeScene
         Build();
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
         PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarythm");
+        PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
+        PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
         PlayerSettings.productName = "Gugarythm";
         PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
         var directory = "Builds";
