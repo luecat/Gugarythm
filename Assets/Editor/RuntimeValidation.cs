@@ -35,6 +35,7 @@ public static class RuntimeValidation
         ValidateHeadlessCriticalSlideStart();
         ValidateNoteRenderWidths();
         ValidateNoteRenderVisibilityWindow();
+        ValidateLibrarySelectionFrameGeometry();
         ValidateNoteSurfaceProjection();
         ValidateHeadlessHoldRendering();
         ValidatePersistentHoldVisualRouting();
@@ -141,6 +142,21 @@ public static class RuntimeValidation
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateLibrarySelectionFrameGeometry()
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Static;
+        var insetField = typeof(SonolusLandscapePrototype).GetField("LibrarySelectedRowInset", flags);
+        var widthField = typeof(SonolusLandscapePrototype).GetField("LibrarySelectionFrameWidth", flags);
+        var frameGraphicType = typeof(SonolusLandscapePrototype).GetNestedType("SelectionFrameGraphic", flags);
+        Require(insetField != null && Math.Abs((float)insetField.GetRawConstantValue() - 2f) < .0001f,
+            "Selected library rows must keep their original two-unit horizontal inset");
+        Require(widthField != null && Math.Abs((float)widthField.GetRawConstantValue() - 4f) < .0001f,
+            "The library selection frame must remain four units wide for mobile visibility");
+        Require(frameGraphicType != null && typeof(UnityEngine.UI.MaskableGraphic).IsAssignableFrom(frameGraphicType),
+            "The library selection frame must render all four sides as one mask-safe graphic");
     }
 
     static void ValidateLatencyCalibrationMath()
