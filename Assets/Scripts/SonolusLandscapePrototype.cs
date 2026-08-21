@@ -310,6 +310,7 @@ namespace Gugarythm
         string pendingDifficultyTagDelete;
         ChartLibrarySort librarySort = ChartLibrarySort.Accuracy;
         bool librarySortAscending;
+        bool libraryScrollPositionInitialized;
         Button pauseButton;
         RectTransform calibrationPanel;
         Toggle autoPlayToggle;
@@ -2740,6 +2741,9 @@ namespace Gugarythm
         void RefreshLibraryUI()
         {
             if (libraryListContent == null) return;
+            var libraryScroll = libraryListContent.parent == null ? null : libraryListContent.parent.GetComponent<ScrollRect>();
+            var restoreLibraryScrollPosition = libraryScrollPositionInitialized && libraryScroll != null;
+            var preservedLibraryScrollPosition = restoreLibraryScrollPosition ? libraryScroll.verticalNormalizedPosition : 1f;
             var entries = LocalChartLibrary.Load();
             var groups = ChartLibraryGrouping.Group(entries);
             var filter = librarySearchInput == null ? string.Empty : librarySearchInput.text.Trim();
@@ -2766,6 +2770,16 @@ namespace Gugarythm
             libraryListContent.sizeDelta = new Vector2(0, Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height, groups.Count * rowHeight + 8));
             for (var index = 0; index < groups.Count; index++) BuildLibraryRow(groups[index], index, rowHeight);
             RefreshDetailUI(groups);
+
+            // Selecting a chart rebuilds the rows so the highlight and details
+            // stay in sync. Keep the user's current list position instead of
+            // implicitly focusing the selected chart or jumping to the top.
+            if (restoreLibraryScrollPosition)
+            {
+                Canvas.ForceUpdateCanvases();
+                libraryScroll.verticalNormalizedPosition = preservedLibraryScrollPosition;
+            }
+            libraryScrollPositionInitialized = true;
         }
 
         void BuildLibraryRow(LocalChartGroup group, int index, float rowHeight)
@@ -3412,6 +3426,9 @@ namespace Gugarythm
             var mask = root.gameObject.AddComponent<Mask>(); mask.showMaskGraphic = false;
             var content = new GameObject("Content", typeof(RectTransform)).GetComponent<RectTransform>();
             content.SetParent(root, false); content.anchorMin = new Vector2(0, 1); content.anchorMax = new Vector2(1, 1); content.pivot = new Vector2(.5f, 1); content.anchoredPosition = Vector2.zero; content.sizeDelta = new Vector2(0, size.y);
+            // Reserve a gutter for the scrollbar so row hit areas and selected
+            // outlines never extend underneath the draggable handle.
+            content.offsetMax = new Vector2(-18, 0);
             var scroll = root.gameObject.AddComponent<ScrollRect>();
             scroll.viewport = root;
             scroll.content = content;
