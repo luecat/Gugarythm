@@ -3309,7 +3309,14 @@ namespace Gugarythm
             var content = new GameObject("Content", typeof(RectTransform)).GetComponent<RectTransform>();
             content.SetParent(root, false); content.anchorMin = new Vector2(0, 1); content.anchorMax = new Vector2(1, 1); content.pivot = new Vector2(.5f, 1); content.anchoredPosition = Vector2.zero; content.sizeDelta = new Vector2(0, size.y);
             var scroll = root.gameObject.AddComponent<ScrollRect>();
-            scroll.viewport = root; scroll.content = content; scroll.horizontal = false; scroll.vertical = true; scroll.movementType = ScrollRect.MovementType.Clamped; scroll.scrollSensitivity = 28;
+            scroll.viewport = root;
+            scroll.content = content;
+            scroll.horizontal = false;
+            scroll.vertical = true;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.inertia = true;
+            scroll.decelerationRate = .135f;
+            scroll.scrollSensitivity = 28;
             return content;
         }
 
@@ -3368,7 +3375,9 @@ namespace Gugarythm
         static Text Label(string content, RectTransform parent, int size)
         {
             var go = new GameObject("Text", typeof(RectTransform), typeof(Text)); var text = go.GetComponent<Text>(); text.rectTransform.SetParent(parent, false);
-            var mobileScale = Screen.width > 0 && Screen.width <= 1440 ? 1.18f : 1f;
+            // High-resolution phones can be wider than 1440 px in landscape,
+            // so screen width alone must not decide whether mobile text is scaled.
+            var mobileScale = Application.isMobilePlatform || (Screen.width > 0 && Screen.width <= 1440) ? 1.18f : 1f;
             text.text = content; text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); text.fontSize = Mathf.RoundToInt(size * mobileScale); text.fontStyle = FontStyle.Bold; text.alignment = TextAnchor.MiddleCenter; text.color = Color.white;
             // Labels sit above their buttons visually but must not intercept the
             // pointer raycast intended for the clickable parent graphic.
