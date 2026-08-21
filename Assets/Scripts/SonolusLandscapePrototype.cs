@@ -252,6 +252,9 @@ namespace Gugarythm
         RectTransform menuPanel;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
+        RectTransform settingsAudioPanel;
+        RectTransform settingsTagsPanel;
+        RectTransform difficultyTagConfirmationPanel;
         RectTransform chartEditorPanel;
         RectTransform deleteChartConfirmationPanel;
         RectTransform importDecisionPanel;
@@ -284,6 +287,10 @@ namespace Gugarythm
         Text importDecisionText;
         Text resultText;
         Text speedLabel;
+        Text settingsMusicVolumeLabel;
+        Text settingsKeyVolumeLabel;
+        Text settingsDelayLabel;
+        Text difficultyTagConfirmationText;
         Text calibrationLabel;
         Text calibrationOffsetLabel;
         Text chartEditorSubtitleLabel;
@@ -292,18 +299,23 @@ namespace Gugarythm
         Button calibrationDecreaseOffsetButton;
         Button calibrationIncreaseOffsetButton;
         Button calibrationResetOffsetButton;
+        Button settingsAudioNavigationButton;
+        Button settingsTagsNavigationButton;
         Text resumeCountdownLabel;
         Text pauseTitle;
         Button startButton;
         LocalChartEntry selectedLibraryEntry;
         LocalChartEntry chartEditorEntry;
         string selectedDifficultyName = "";
+        string pendingDifficultyTagDelete;
         ChartLibrarySort librarySort = ChartLibrarySort.Accuracy;
         bool librarySortAscending;
         Button pauseButton;
         RectTransform calibrationPanel;
         Toggle autoPlayToggle;
         Slider speedSlider;
+        Slider settingsMusicVolumeSlider;
+        Slider settingsKeyVolumeSlider;
         Material laneMaterial;
         Material missedHoldMaterial;
         bool running;
@@ -324,6 +336,7 @@ namespace Gugarythm
         double lastObservedSongTime;
         double interruptedSongTime;
         double audioOffsetSeconds;
+        double settingsDelayOffsetSeconds;
         double visualOffsetSeconds;
         double calibrationStartDsp;
         readonly List<double> calibrationOffsets = new();
@@ -422,6 +435,8 @@ namespace Gugarythm
             scrollSpeed = PlayerPrefs.GetFloat("gugarythm-scroll-speed", 8f);
             var storedAudioOffset = PlayerPrefs.GetFloat("gugarythm-audio-offset-seconds", 0f);
             audioOffsetSeconds = SanitizeAudioOffset(storedAudioOffset);
+            settingsDelayOffsetSeconds = SettingsDelayAdjustment.Clamp(PlayerPrefs.GetFloat("gugarythm-settings-delay-offset-seconds", (float)audioOffsetSeconds));
+            audioOffsetSeconds = settingsDelayOffsetSeconds;
             if (Math.Abs(audioOffsetSeconds - storedAudioOffset) > .000001d)
             {
                 PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
@@ -459,7 +474,6 @@ namespace Gugarythm
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(false);
                 settingsPanel.gameObject.SetActive(true);
-                StartLatencyCalibration();
                 yield break;
             }
 
@@ -665,8 +679,66 @@ namespace Gugarythm
             if (speedSlider != null && !Mathf.Approximately(speedSlider.value, value))
                 speedSlider.SetValueWithoutNotify(value);
             if (speedLabel != null)
-                speedLabel.text = $"流速  {value:F1}  ·  按鈕／← → 每次 0.1";
+                speedLabel.text = $"{value:F1}";
             PlayerPrefs.SetFloat("gugarythm-scroll-speed", value);
+        }
+
+        void SetSettingsMusicVolume(float value)
+        {
+            value = Mathf.Clamp01(value);
+            if (music != null) music.volume = value;
+            if (settingsMusicVolumeLabel != null) settingsMusicVolumeLabel.text = $"{value * 100f:0}%";
+            PlayerPrefs.SetFloat("gugarythm-music-volume", value);
+            PlayerPrefs.Save();
+        }
+
+        void SetSettingsKeyVolume(float value)
+        {
+            value = Mathf.Clamp01(value);
+            if (effects != null) effects.volume = value;
+            if (holdEffects != null) holdEffects.volume = value;
+            if (settingsKeyVolumeLabel != null) settingsKeyVolumeLabel.text = $"{value * 100f:0}%";
+            PlayerPrefs.SetFloat("gugarythm-key-volume", value);
+            PlayerPrefs.Save();
+        }
+
+        void AdjustSettingsDelay(double delta)
+        {
+            settingsDelayOffsetSeconds = SettingsDelayAdjustment.Step(settingsDelayOffsetSeconds, delta);
+            audioOffsetSeconds = settingsDelayOffsetSeconds;
+            PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
+            PlayerPrefs.SetFloat("gugarythm-settings-delay-offset-seconds", (float)settingsDelayOffsetSeconds);
+            PlayerPrefs.Save();
+            RefreshSettingsDelayLabel();
+        }
+
+        void RefreshSettingsDelayLabel()
+        {
+            if (settingsDelayLabel != null)
+                settingsDelayLabel.text = $"{settingsDelayOffsetSeconds * 1000d:+0;-0;0} ms";
+        }
+
+        void ShowSettingsAudio()
+        {
+            if (settingsAudioPanel == null || settingsTagsPanel == null) return;
+            settingsAudioPanel.gameObject.SetActive(true);
+            settingsTagsPanel.gameObject.SetActive(false);
+            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
+            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+        }
+
+        void ShowSettingsTags()
+        {
+            if (settingsAudioPanel == null || settingsTagsPanel == null) return;
+            settingsAudioPanel.gameObject.SetActive(false);
+            settingsTagsPanel.gameObject.SetActive(true);
+            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
+        }
+
+        void OpenAutoAdjustPanel()
+        {
+            // The new automatic-adjustment flow will be designed separately.
         }
 
         void StartLatencyCalibration()
@@ -679,7 +751,8 @@ namespace Gugarythm
             calibrationActive = true;
             calibrationPanel.gameObject.SetActive(true);
             RefreshManualAudioOffsetControls();
-            calibrationLabel.gameObject.SetActive(false);
+            calibrationLabel.gameObject.SetActive(true);
+            calibrationLabel.text = "四拍循環中\n按下 TAP 測試延遲";
             calibrationTapButton.gameObject.SetActive(true);
             calibrationTapButton.interactable = true;
             RefreshCalibrationOffsetLabel();
@@ -2105,7 +2178,6 @@ namespace Gugarythm
             BuildSettings(safeAreaRoot);
             BuildChartEditor(safeAreaRoot);
             BuildImportDecision(safeAreaRoot);
-            BuildLatencyCalibration(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
@@ -2229,7 +2301,8 @@ namespace Gugarythm
                 settingsPanel.localScale = Vector3.one;
             }
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
-            FitOverlayPanel(calibrationPanel, new Vector2(500, 530), logicalSafeSize);
+            if (!GugarythmSceneRouter.IsSettings)
+                FitOverlayPanel(calibrationPanel, new Vector2(520, 760), logicalSafeSize);
             FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
         }
@@ -2348,24 +2421,80 @@ namespace Gugarythm
             var back = MakeFlatButton("返回曲庫", settingsPanel, Vector2.zero, ReturnFromSettings, new Vector2(180, 58), new Color(.18f, .18f, .18f));
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-52, -48));
 
-            var card = Panel("Settings Card", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(760, 700), new Vector2(0, -20));
-            var cardTitle = Label("音訊與遊玩", card, 32);
-            cardTitle.rectTransform.sizeDelta = new Vector2(660, 62);
-            cardTitle.rectTransform.anchoredPosition = new Vector2(0, 180);
-            var description = Label("調整遊玩延遲與輸入同步", card, 22);
-            description.color = new Color(.72f, .82f, 1f, 1);
-            description.rectTransform.sizeDelta = new Vector2(660, 44);
-            description.rectTransform.anchoredPosition = new Vector2(0, 125);
-            MakeFlatButton("校正聲音偏移", card, new Vector2(0, 15), StartLatencyCalibration, new Vector2(420, 76), new Color(.06f, .58f, .96f));
-            var offset = Label($"目前聲音偏移  {audioOffsetSeconds * 1000d:+0;-0;0} ms", card, 19);
-            offset.color = new Color(.68f, .68f, .68f);
-            offset.rectTransform.sizeDelta = new Vector2(620, 44);
-            offset.rectTransform.anchoredPosition = new Vector2(0, -75);
-            var tagTitle = Label("難度標籤", card, 24); tagTitle.alignment = TextAnchor.MiddleLeft; tagTitle.rectTransform.sizeDelta = new Vector2(620, 40); tagTitle.rectTransform.anchoredPosition = new Vector2(0, -145);
-            settingsTagInput = MakeInputField("新增難度標籤", card, new Vector2(-85, -190), new Vector2(430, 48));
-            MakeFlatButton("＋", card, new Vector2(245, -190), CreateDifficultyTag, new Vector2(52, 48), new Color(.06f, .58f, .96f));
-            settingsTagContent = new GameObject("Settings Difficulty Tags", typeof(RectTransform)).GetComponent<RectTransform>(); settingsTagContent.SetParent(card, false); settingsTagContent.sizeDelta = new Vector2(620, 220); settingsTagContent.anchoredPosition = new Vector2(0, -360);
+            var navigation = Panel("Settings Navigation", settingsPanel, new Color(.13f, .13f, .13f, 1f), new Vector2(270, 760), new Vector2(-600, -20));
+            settingsAudioNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
+            settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 205), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            var card = Panel("Settings Audio Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            settingsAudioPanel = card;
+
+            var musicVolumeTitle = Label("音樂音量", card, 24);
+            musicVolumeTitle.alignment = TextAnchor.MiddleLeft;
+            musicVolumeTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            musicVolumeTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
+            settingsMusicVolumeSlider = MakeSlider(card, new Vector2(0, 225), 0f, 1f, PlayerPrefs.GetFloat("gugarythm-music-volume", 1f), SetSettingsMusicVolume);
+            settingsMusicVolumeSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
+            settingsMusicVolumeLabel = Label("100%", card, 20);
+            settingsMusicVolumeLabel.rectTransform.sizeDelta = new Vector2(700, 36);
+            settingsMusicVolumeLabel.rectTransform.anchoredPosition = new Vector2(0, 175);
+
+            var keyVolumeTitle = Label("按鍵音量", card, 24);
+            keyVolumeTitle.alignment = TextAnchor.MiddleLeft;
+            keyVolumeTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            keyVolumeTitle.rectTransform.anchoredPosition = new Vector2(0, 105);
+            settingsKeyVolumeSlider = MakeSlider(card, new Vector2(0, 50), 0f, 1f, PlayerPrefs.GetFloat("gugarythm-key-volume", 1f), SetSettingsKeyVolume);
+            settingsKeyVolumeSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
+            settingsKeyVolumeLabel = Label("100%", card, 20);
+            settingsKeyVolumeLabel.rectTransform.sizeDelta = new Vector2(700, 36);
+            settingsKeyVolumeLabel.rectTransform.anchoredPosition = new Vector2(0, 0);
+            SetSettingsMusicVolume(settingsMusicVolumeSlider.value);
+            SetSettingsKeyVolume(settingsKeyVolumeSlider.value);
+
+            var delayTitle = Label("延遲調整", card, 24);
+            delayTitle.alignment = TextAnchor.MiddleLeft;
+            delayTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            delayTitle.rectTransform.anchoredPosition = new Vector2(0, -245);
+            MakeFlatButton("−1 ms", card, new Vector2(-300, -300), () => AdjustSettingsDelay(-SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            Panel("Delay Value Background", card, new Color(.18f, .18f, .18f), new Vector2(180, 52), new Vector2(-100, -300));
+            settingsDelayLabel = Label("", card, 20);
+            settingsDelayLabel.alignment = TextAnchor.MiddleCenter;
+            settingsDelayLabel.rectTransform.sizeDelta = new Vector2(180, 52);
+            settingsDelayLabel.rectTransform.anchoredPosition = new Vector2(-100, -300);
+            MakeFlatButton("＋1 ms", card, new Vector2(100, -300), () => AdjustSettingsDelay(SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            MakeFlatButton("自動調整", card, new Vector2(300, -300), OpenAutoAdjustPanel, new Vector2(150, 52), new Color(.18f, .28f, .38f));
+            RefreshSettingsDelayLabel();
+
+            var speedTitle = Label("速度", card, 24);
+            speedTitle.alignment = TextAnchor.MiddleLeft;
+            speedTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            speedTitle.rectTransform.anchoredPosition = new Vector2(0, -70);
+            speedSlider = MakeSlider(card, new Vector2(0, -120), 1f, 20f, scrollSpeed, SetScrollSpeed);
+            speedSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
+            speedLabel = Label("", card, 20);
+            speedLabel.alignment = TextAnchor.MiddleLeft;
+            speedLabel.rectTransform.sizeDelta = new Vector2(700, 36);
+            speedLabel.rectTransform.anchoredPosition = new Vector2(0, -165);
+            SetScrollSpeed(scrollSpeed);
+
+            settingsTagsPanel = Panel("Settings Tags Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            var tagTitle = Label("難度標籤", settingsTagsPanel, 32); tagTitle.alignment = TextAnchor.MiddleLeft; tagTitle.rectTransform.sizeDelta = new Vector2(940, 62); tagTitle.rectTransform.anchoredPosition = new Vector2(0, 330);
+            var tagDescription = Label("拖移可調整順序（上到下對應左到右）", settingsTagsPanel, 22); tagDescription.color = new Color(.72f, .82f, 1f, 1); tagDescription.rectTransform.sizeDelta = new Vector2(940, 44); tagDescription.rectTransform.anchoredPosition = new Vector2(0, 275);
+            settingsTagInput = MakeInputField("新增難度標籤", settingsTagsPanel, new Vector2(-100, 190), new Vector2(650, 56));
+            MakeFlatButton("＋ 新增", settingsTagsPanel, new Vector2(350, 190), CreateDifficultyTag, new Vector2(150, 56), new Color(.06f, .58f, .96f));
+            settingsTagContent = new GameObject("Settings Difficulty Tags", typeof(RectTransform)).GetComponent<RectTransform>(); settingsTagContent.SetParent(settingsTagsPanel, false); settingsTagContent.anchorMin = settingsTagContent.anchorMax = new Vector2(.5f, .5f); settingsTagContent.pivot = new Vector2(.5f, .5f); settingsTagContent.sizeDelta = new Vector2(850, 430); settingsTagContent.anchoredPosition = new Vector2(0, -100);
             RefreshSettingsTags();
+            difficultyTagConfirmationPanel = Panel("Difficulty Tag Confirmation", settingsTagsPanel, new Color(.07f, .07f, .07f, .99f), new Vector2(560, 300), Vector2.zero);
+            Outline(difficultyTagConfirmationPanel.gameObject, new Color(.78f, .28f, .28f), 2);
+            var confirmationTitle = Label("刪除難度標籤？", difficultyTagConfirmationPanel, 30);
+            confirmationTitle.rectTransform.sizeDelta = new Vector2(500, 54);
+            confirmationTitle.rectTransform.anchoredPosition = new Vector2(0, 92);
+            difficultyTagConfirmationText = Label("", difficultyTagConfirmationPanel, 20);
+            difficultyTagConfirmationText.rectTransform.sizeDelta = new Vector2(500, 54);
+            difficultyTagConfirmationText.rectTransform.anchoredPosition = new Vector2(0, 35);
+            var confirmTagDelete = MakeFlatButton("刪除", difficultyTagConfirmationPanel, new Vector2(120, -82), ConfirmDifficultyTagDelete, new Vector2(160, 54), new Color(.68f, .12f, .12f));
+            confirmTagDelete.GetComponentInChildren<Text>().color = Color.white;
+            MakeOutlinedButton("取消", difficultyTagConfirmationPanel, new Vector2(-120, -82), CancelDifficultyTagDelete, new Vector2(160, 54));
+            difficultyTagConfirmationPanel.gameObject.SetActive(false);
+            settingsTagsPanel.gameObject.SetActive(false);
             settingsPanel.gameObject.SetActive(false);
         }
 
@@ -2540,6 +2669,27 @@ namespace Gugarythm
             settingsTagInput.text = string.Empty; RefreshSettingsTags();
         }
 
+        void PromptDeleteDifficultyTag(string tag)
+        {
+            pendingDifficultyTagDelete = tag;
+            difficultyTagConfirmationText.text = $"確定要刪除「{tag}」嗎？";
+            difficultyTagConfirmationPanel.gameObject.SetActive(true);
+        }
+
+        void CancelDifficultyTagDelete()
+        {
+            pendingDifficultyTagDelete = null;
+            difficultyTagConfirmationPanel?.gameObject.SetActive(false);
+        }
+
+        void ConfirmDifficultyTagDelete()
+        {
+            if (!string.IsNullOrWhiteSpace(pendingDifficultyTagDelete))
+                LocalChartLibrary.DeleteDifficultyTag(pendingDifficultyTagDelete);
+            CancelDifficultyTagDelete();
+            RefreshSettingsTags();
+        }
+
         void RefreshSettingsTags()
         {
             if (settingsTagContent == null) return; ClearChildren(settingsTagContent);
@@ -2547,12 +2697,15 @@ namespace Gugarythm
             for (var index = 0; index < tags.Count; index++)
             {
                 var tag = tags[index];
-                var row = Panel("Difficulty Tag Row", settingsTagContent, new Color(.18f, .18f, .18f), new Vector2(500, 40), Vector2.zero);
-                row.anchorMin = row.anchorMax = new Vector2(.5f, 1); row.anchoredPosition = new Vector2(-35, -index * 48 - 20);
-                var handle = Label("☰", row, 20); handle.alignment = TextAnchor.MiddleCenter; handle.rectTransform.sizeDelta = new Vector2(40, 40); handle.rectTransform.anchoredPosition = new Vector2(-225, 0);
-                var label = Label(tag, row, 18); label.alignment = TextAnchor.MiddleLeft; label.rectTransform.sizeDelta = new Vector2(360, 40); label.rectTransform.anchoredPosition = new Vector2(-25, 0);
+                var row = Panel("Difficulty Tag Row", settingsTagContent, new Color(.18f, .18f, .18f), new Vector2(850, 56), Vector2.zero);
+                row.anchorMin = row.anchorMax = new Vector2(.5f, 1); row.anchoredPosition = new Vector2(0, -index * 64 - 28);
+                var handle = Label("☰", row, 20); handle.alignment = TextAnchor.MiddleCenter; handle.rectTransform.sizeDelta = new Vector2(48, 56); handle.rectTransform.anchoredPosition = new Vector2(-380, 0);
+                var label = Label(tag, row, 18); label.color = Color.white; label.raycastTarget = false; label.horizontalOverflow = HorizontalWrapMode.Overflow; label.verticalOverflow = VerticalWrapMode.Truncate; label.alignment = TextAnchor.MiddleLeft; label.rectTransform.anchorMin = Vector2.zero; label.rectTransform.anchorMax = Vector2.one; label.rectTransform.offsetMin = new Vector2(80, 0); label.rectTransform.offsetMax = new Vector2(-130, 0);
                 var drag = row.gameObject.AddComponent<DifficultyTagDragHandle>(); drag.Index = index; drag.Moved = (from, to) => { LocalChartLibrary.MoveDifficultyTag(from, to); RefreshSettingsTags(); };
-                MakeOutlinedButton("刪除", row, new Vector2(210, 0), () => { LocalChartLibrary.DeleteDifficultyTag(tag); RefreshSettingsTags(); }, new Vector2(74, 36));
+                var delete = MakeOutlinedButton("刪除", row, new Vector2(360, 0), () => PromptDeleteDifficultyTag(tag), new Vector2(96, 42));
+                var deleteText = delete.GetComponentInChildren<Text>();
+                deleteText.color = new Color(1f, .35f, .35f);
+                Outline(delete.gameObject, new Color(.78f, .28f, .28f), 1);
             }
         }
 
@@ -2806,23 +2959,23 @@ namespace Gugarythm
 
         void BuildLatencyCalibration(RectTransform root)
         {
-            calibrationPanel = Panel("Latency Calibration", root, new Color(.04f, .06f, .14f, .98f), new Vector2(500, 410), Vector2.zero);
+            calibrationPanel = Panel("Latency Calibration Preview", root, new Color(.04f, .06f, .14f, .98f), new Vector2(520, 760), new Vector2(590, -20));
             Outline(calibrationPanel.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
-            var title = Label("校正聲音偏移", calibrationPanel, 34);
+            var title = Label("延遲測試預覽", calibrationPanel, 34);
             title.rectTransform.sizeDelta = new Vector2(450, 62);
-            title.rectTransform.anchoredPosition = new Vector2(0, 145);
+            title.rectTransform.anchoredPosition = new Vector2(0, 325);
             calibrationLabel = Label("", calibrationPanel, 24);
             calibrationLabel.rectTransform.sizeDelta = new Vector2(440, 80);
-            calibrationLabel.rectTransform.anchoredPosition = new Vector2(0, 70);
-            calibrationTapButton = MakeButton("TAP", calibrationPanel, new Vector2(0, 70), RegisterCalibrationTapFromButton, new Vector2(300, 70));
+            calibrationLabel.rectTransform.anchoredPosition = new Vector2(0, 250);
+            calibrationTapButton = MakeButton("TAP\n點擊節拍", calibrationPanel, new Vector2(0, 70), RegisterCalibrationTapFromButton, new Vector2(420, 260));
             calibrationOffsetLabel = Label("", calibrationPanel, 20);
             calibrationOffsetLabel.rectTransform.sizeDelta = new Vector2(470, 64);
-            calibrationOffsetLabel.rectTransform.anchoredPosition = new Vector2(0, 0);
+            calibrationOffsetLabel.rectTransform.anchoredPosition = new Vector2(0, -115);
             calibrationDecreaseOffsetButton = MakeButton("−10 ms", calibrationPanel, new Vector2(-150, -75), () => AdjustAudioOffset(-.01d), new Vector2(140, 48));
             calibrationIncreaseOffsetButton = MakeButton("＋10 ms", calibrationPanel, new Vector2(0, -75), () => AdjustAudioOffset(.01d), new Vector2(140, 48));
             calibrationResetOffsetButton = MakeButton("歸零", calibrationPanel, new Vector2(150, -75), () => SetManualAudioOffset(0), new Vector2(110, 48));
-            MakeButton("重新開始", calibrationPanel, new Vector2(-92, -135), RestartLatencyCalibration, new Vector2(170, 42));
-            MakeButton("返回", calibrationPanel, new Vector2(92, -135), ReturnFromLatencyCalibration, new Vector2(170, 42));
+            MakeButton("重新開始", calibrationPanel, new Vector2(-92, -220), RestartLatencyCalibration, new Vector2(170, 42));
+            MakeButton("停止預覽", calibrationPanel, new Vector2(92, -220), ReturnFromLatencyCalibration, new Vector2(170, 42));
             RefreshCalibrationOffsetLabel();
             RefreshManualAudioOffsetControls();
             calibrationPanel.gameObject.SetActive(false);

@@ -1,0 +1,30 @@
+using System;
+using System.Collections.Generic;
+
+namespace Gugarythm
+{
+    public static class LatencyCalibrationMath
+    {
+        public const int TapsPerRound = 4;
+        public const double TapWindowSeconds = .3d;
+
+        public static bool IsTapOffsetValid(double offset) =>
+            !double.IsNaN(offset) && !double.IsInfinity(offset) && Math.Abs(offset) <= TapWindowSeconds;
+
+        public static bool TryGetAverageOffset(IReadOnlyList<double> offsets, out double average)
+        {
+            average = 0d;
+            if (offsets == null || offsets.Count != TapsPerRound) return false;
+
+            double total = 0d;
+            for (var index = 0; index < offsets.Count; index++)
+            {
+                if (!IsTapOffsetValid(offsets[index])) return false;
+                total += offsets[index];
+            }
+
+            average = total / offsets.Count;
+            return true;
+        }
+    }
+}
