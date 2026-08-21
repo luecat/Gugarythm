@@ -24,6 +24,10 @@ public static class RuntimeValidation
     public static void ValidateRuntime()
     {
         ValidateGgrPackageReader();
+        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationSeconds - 2f) < .0001f,
+            "Notes must use a fixed two-second approach duration");
+        ValidateUscLeadingMeasurePadding();
+        ValidateInitialWaterfallTiming();
         ValidateGgrUscHoldRoots();
         ValidateAttachedGgrPlayableCount();
         ValidateUscSlideRoleClassification();
@@ -135,6 +139,39 @@ public static class RuntimeValidation
         Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateUscLeadingMeasurePadding()
+    {
+        var result = new UscChartImporter().Import("leading-note.usc", System.Text.Encoding.UTF8.GetBytes(
+            "{\"usc\":{\"objects\":[{\"type\":\"bpm\",\"beat\":0,\"bpm\":120},{\"type\":\"single\",\"beat\":0,\"lane\":0}]}}"));
+        Require(result.Success, "USC leading-note fixture must import successfully");
+        Require(result.Chart.Notes.Count == 1 && Math.Abs(result.Chart.Notes[0].Beat - 4) < .0001 &&
+                Math.Abs(result.Chart.Notes[0].Time - 2) < .0001,
+            "A USC chart whose first note starts before beat 4 must gain one empty measure");
+        Require(Math.Abs(result.Chart.BgmStartDelaySeconds - 2) < .0001,
+            "The BGM must be delayed by the same duration as the inserted empty measure");
+
+        var alreadyStarted = new UscChartImporter().Import("already-started.usc", System.Text.Encoding.UTF8.GetBytes(
+            "{\"usc\":{\"objects\":[{\"type\":\"bpm\",\"beat\":0,\"bpm\":120},{\"type\":\"single\",\"beat\":4,\"lane\":0}]}}"));
+        Require(alreadyStarted.Success && Math.Abs(alreadyStarted.Chart.Notes[0].Beat - 4) < .0001 &&
+                Math.Abs(alreadyStarted.Chart.BgmStartDelaySeconds) < .0001,
+            "A USC chart already starting after the first measure must not be shifted");
+
+    }
+
+    public static void ValidateInitialWaterfallTiming()
+    {
+        var initialWaterfallTimeMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "InitialWaterfallSongTime", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(initialWaterfallTimeMethod != null,
+            "Gameplay must expose the initial waterfall song-time calculation");
+        var firstVisualTime = 4d * 60d / 193d;
+        var initialWaterfallTime = (double)initialWaterfallTimeMethod.Invoke(null,
+            new object[] { firstVisualTime, -1.097d, 0d, 2d, .25d });
+        Require(Math.Abs(initialWaterfallTime - (firstVisualTime - 2.25d)) < .0001,
+            "A 193 BPM chart with negative offset must begin off-screen before its first beat-4 object");
+        Debug.Log("GUGARYTHM_WATERFALL_VALIDATION_OK");
     }
 
     static void ValidateGgrPackageReader()
@@ -325,21 +362,21 @@ public static class RuntimeValidation
         var chart = result.Chart;
         var nodes = chart.Notes.Concat(chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End }))
             .Distinct().ToArray();
-        RuntimeNote At(double beat) => nodes.Single(note => Math.Abs(note.Beat - beat) < 1e-9);
+        RuntimeNote At(int connectionIndex) => nodes.Single(note => note.SourceId == "usc-slide:" + connectionIndex);
 
-        var normalHead = At(0);
-        var normalMid = At(.125);
-        var normalTail = At(.25);
-        var traceHead = At(1);
-        var traceMid = At(1.125);
-        var traceTail = At(1.25);
-        var noneNodes = new[] { At(2), At(2.125), At(2.25) };
-        var flickTail = At(3.25);
-        var noneDirectionTail = At(4.25);
-        var noneHead = At(5);
-        var firstJudgedAfterNoneHead = At(5.125);
-        var noneHeadTail = At(5.25);
-        var terminalFirstJudgedAfterNoneHead = At(6.25);
+        var normalHead = At(1);
+        var normalMid = At(2);
+        var normalTail = At(3);
+        var traceHead = At(4);
+        var traceMid = At(5);
+        var traceTail = At(6);
+        var noneNodes = new[] { At(7), At(8), At(9) };
+        var flickTail = At(12);
+        var noneDirectionTail = At(15);
+        var noneHead = At(16);
+        var firstJudgedAfterNoneHead = At(17);
+        var noneHeadTail = At(18);
+        var terminalFirstJudgedAfterNoneHead = At(20);
 
         Require(Enum.TryParse("Tail", out HoldCheckpointSource tailSource),
             "HoldCheckpointSource must define Tail for judged Slide terminals");
@@ -471,7 +508,7 @@ public static class RuntimeValidation
         Require(result.Success, "A headless critical USC Slide fixture must import: " + result.Error);
         var nodes = result.Chart.Notes.Concat(result.Chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End }))
             .Distinct().ToArray();
-        var head = nodes.Single(note => Math.Abs(note.Beat) < 1e-9);
+        var head = nodes.Single(note => Math.Abs(note.Beat) < 1e-9 || Math.Abs(note.Beat - 4) < 1e-9);
         Require(!head.Visible && !head.Judged && !result.Chart.Notes.Contains(head),
             "A critical judgeType:none Slide start must remain a headless path anchor, not render as a yellow button");
     }

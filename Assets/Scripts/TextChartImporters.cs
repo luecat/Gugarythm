@@ -94,11 +94,25 @@ namespace Gugarythm
                     else if (type == "guide" && item["midpoints"] is JArray midpoints) AddGuide(chart, item, midpoints, tempo);
                 }
                 HoldCheckpointBuilder.Apply(chart, tempo.SecondsAt);
+                ApplyLeadingMeasurePadding(chart, tempo);
                 chart.Notes.Sort((a, b) => a.Time != b.Time ? a.Time.CompareTo(b.Time) : a.Index.CompareTo(b.Index));
                 LevelDataImporter.AttachCompanionAudio(chart, companionFiles);
                 return ImportResult.Ok(chart);
             }
             catch (Exception exception) { return ImportResult.Fail("USC 解析失敗：" + exception.Message); }
+        }
+
+        static void ApplyLeadingMeasurePadding(RuntimeChart chart, BeatTimeMap tempo)
+        {
+            var firstBeat = chart.Notes.Where(note => note.Visible).Select(note => note.Beat)
+                .Concat(chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
+                    .Where(note => note != null).Select(note => note.Beat))
+                .DefaultIfEmpty(double.PositiveInfinity).Min();
+            if (!double.IsFinite(firstBeat) || firstBeat >= 4 - 1e-9) return;
+
+            var timeDelta = tempo.SecondsAt(4) - tempo.SecondsAt(0);
+            chart.ShiftTiming(4, timeDelta);
+            chart.Warnings.Add("譜面第一顆按鍵早於第一小節，已自動補上一小節空白並延後音樂。");
         }
 
         static void AddSingle(RuntimeChart chart, JObject item, BeatTimeMap tempo, ref int index)

@@ -125,6 +125,8 @@ namespace Gugarythm
         // reaches the visible lane boundary at ±6.5.
         const float VisibleTrackLaneEdge = CentralHalfLanes + .5f;
         const float PerspectiveDepthRatio = 3.2f;
+        public const float NoteApproachDurationSeconds = 2f;
+        const float InitialOffscreenLeadSeconds = .25f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
         // keeps curved ribbons smooth, while stable boundaries prevent the
         // entire tessellation from shifting whenever the visible end is clipped.
@@ -239,6 +241,7 @@ namespace Gugarythm
         AudioSource holdEffects;
         readonly AudioSource[] calibrationTickSources = new AudioSource[CalibrationTickCount];
         RectTransform canvasRoot;
+        RectTransform backgroundLayer;
         RectTransform stage;
         RectTransform safeAreaRoot;
         RectTransform guideLayer;
@@ -247,6 +250,7 @@ namespace Gugarythm
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
         RectTransform menuPanel;
+        RectTransform libraryBackdrop;
         RectTransform settingsPanel;
         RectTransform chartEditorPanel;
         RectTransform deleteChartConfirmationPanel;
@@ -381,10 +385,33 @@ namespace Gugarythm
         // gameplay connectors leave only after reaching its lower edge.
         static float JudgmentBottomApproach => 1f + (JudgmentStripSourceHeight * .5f / HitSourceY) / PerspectiveDepthRatio;
 
-        // Speed controls the time spent approaching the judgment edge. Screen Y,
-        // lane position, and width are all derived from the same perspective
-        // projection below, so distant notes converge at the vanishing point.
-        float ApproachDuration => (TopY - HitY) / (210f + scrollSpeed * 52f);
+        // Every note starts from the same far plane exactly two seconds before
+        // its judgment time, so a chart's first note cannot appear abruptly
+        // just because the viewport or scroll setting changes.
+        float ApproachDuration => NoteApproachDurationSeconds;
+
+        static double FirstWaterfallVisualTime(RuntimeChart runtimeChart)
+        {
+            if (runtimeChart == null) return 0;
+            var firstTime = runtimeChart.Notes.Where(note => note != null && note.Visible).Select(note => note.Time)
+                .Concat(runtimeChart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
+                    .Where(note => note != null).Select(note => note.Time))
+                .DefaultIfEmpty(0d).Min();
+            return double.IsFinite(firstTime) ? firstTime : 0;
+        }
+
+        public static double InitialWaterfallSongTime(double firstVisualTime, double bgmOffset, double audioOffset,
+            double approachDuration, double offscreenLead)
+        {
+            if (!double.IsFinite(firstVisualTime)) firstVisualTime = 0;
+            if (!double.IsFinite(bgmOffset)) bgmOffset = 0;
+            if (!double.IsFinite(audioOffset)) audioOffset = 0;
+            approachDuration = double.IsFinite(approachDuration) ? Math.Max(0, approachDuration) : 0;
+            offscreenLead = double.IsFinite(offscreenLead) ? Math.Max(0, offscreenLead) : 0;
+            var waterfallStart = firstVisualTime - approachDuration - offscreenLead;
+            var earliestAudioSafeStart = -bgmOffset + audioOffset;
+            return Math.Min(0d, Math.Min(waterfallStart, earliestAudioSafeStart));
+        }
 
         void Awake()
         {
@@ -417,6 +444,7 @@ namespace Gugarythm
             // selected package crosses the boundary through ChartSelectionSession.
             if (GugarythmSceneRouter.IsLibrary)
             {
+                SetGameplayStageVisible(false);
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(true);
                 settingsPanel.gameObject.SetActive(false);
@@ -427,6 +455,7 @@ namespace Gugarythm
 
             if (GugarythmSceneRouter.IsSettings)
             {
+                SetGameplayStageVisible(false);
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(false);
                 settingsPanel.gameObject.SetActive(true);
@@ -435,6 +464,7 @@ namespace Gugarythm
 
             if (GugarythmSceneRouter.IsChartEditor)
             {
+                SetGameplayStageVisible(false);
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(false);
                 settingsPanel.gameObject.SetActive(false);
@@ -452,6 +482,7 @@ namespace Gugarythm
                 yield break;
             }
 
+            SetGameplayStageVisible(true);
             yield return LoadGameplaySelection(entry, bytes);
         }
 
@@ -461,6 +492,12 @@ namespace Gugarythm
             if (comboLabel != null) comboLabel.gameObject.SetActive(false);
             if (judgmentLabel != null) judgmentLabel.gameObject.SetActive(visible);
             if (pauseButton != null) pauseButton.gameObject.SetActive(false);
+        }
+
+        void SetGameplayStageVisible(bool visible)
+        {
+            if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(visible);
+            if (stage != null) stage.gameObject.SetActive(visible);
         }
 
         void RestoreLibrarySelection()
@@ -490,7 +527,7 @@ namespace Gugarythm
 
             chart = result.Chart;
             musicLoadSucceeded = false;
-            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
+            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
             if (!musicLoadSucceeded)
             {
                 Debug.LogError("跨場景選取的 GGR 音樂無法解碼。");
@@ -584,7 +621,7 @@ namespace Gugarythm
             if (chart.BgmBytes != null)
             {
                 musicLoadSucceeded = false;
-                yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
+                yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
                 if (!musicLoadSucceeded) { SetStatus("GGR 音樂格式不支援或無法解碼。"); loading = false; yield break; }
             }
             else SetStatus("GGR 缺少 USC 譜面或音樂。");
@@ -768,7 +805,30 @@ namespace Gugarythm
                 if (source != null) source.Stop();
         }
 
-        IEnumerator LoadMusic(byte[] bytes, string extension)
+        static AudioClip PrependLeadingSilence(AudioClip source, double leadingSilenceSeconds)
+        {
+            if (source == null || !double.IsFinite(leadingSilenceSeconds) || leadingSilenceSeconds <= 1e-9 ||
+                source.samples <= 0 || source.channels <= 0 || source.frequency <= 0)
+                return source;
+
+            var silenceSamples = (int)Math.Round(leadingSilenceSeconds * source.frequency);
+            if (silenceSamples <= 0) return source;
+            var sourceData = new float[source.samples * source.channels];
+            if (!source.GetData(sourceData, 0)) return source;
+
+            var paddedSamples = checked(source.samples + silenceSamples);
+            var paddedData = new float[paddedSamples * source.channels];
+            Array.Copy(sourceData, 0, paddedData, silenceSamples * source.channels, sourceData.Length);
+            var padded = AudioClip.Create(source.name + " (leading silence)", paddedSamples, source.channels, source.frequency, false);
+            if (!padded.SetData(paddedData, 0))
+            {
+                Destroy(padded);
+                return source;
+            }
+            return padded;
+        }
+
+        IEnumerator LoadMusic(byte[] bytes, string extension, double leadingSilenceSeconds = 0)
         {
             musicLoadSucceeded = false;
             music.clip = null;
@@ -797,11 +857,14 @@ namespace Gugarythm
                 _ => AudioType.MPEG,
             };
             using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, type);
+            if (request.downloadHandler is DownloadHandlerAudioClip audioHandler) audioHandler.streamAudio = false;
             yield return request.SendWebRequest();
             if (request.result != UnityWebRequest.Result.Success) yield break;
             try
             {
-                music.clip = DownloadHandlerAudioClip.GetContent(request);
+                var decodedClip = DownloadHandlerAudioClip.GetContent(request);
+                music.clip = PrependLeadingSilence(decodedClip, leadingSilenceSeconds);
+                if (music.clip != decodedClip && decodedClip != null) Destroy(decodedClip);
                 musicLoadSucceeded = music.clip != null;
             }
             catch (Exception)
@@ -848,11 +911,18 @@ namespace Gugarythm
             accumulatedPause = 0;
             Interlocked.Exchange(ref audioDeviceChangePending, 0);
             resumeNeedsAudioReschedule = false;
-            lastObservedSongTime = -chart.BgmOffset;
             effects.UnPause();
             holdEffects.UnPause();
-            scheduledDsp = AudioDeviceRecovery.ChartAnchorDspForAudioOffset(AudioSettings.dspTime + .25d, audioOffsetSeconds);
+            var playbackReadyDsp = AudioSettings.dspTime + .25d;
+            var initialSongTime = InitialWaterfallSongTime(FirstWaterfallVisualTime(chart), chart.BgmOffset,
+                audioOffsetSeconds, NoteApproachDurationSeconds, InitialOffscreenLeadSeconds);
+            scheduledDsp = playbackReadyDsp - chart.BgmOffset - initialSongTime;
             music.time = 0;
+            // Prebuild every chart object at its off-screen perspective
+            // position before the scheduled audio begins. Objects then move
+            // through the track instead of being created at the screen edge.
+            lastObservedSongTime = CurrentSongTime();
+            UpdateVisuals(lastObservedSongTime + visualOffsetSeconds);
             music.PlayScheduled(scheduledDsp + audioOffsetSeconds);
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
             ShowJudgment("", Color.white);
@@ -1336,7 +1406,7 @@ namespace Gugarythm
                 var headApproach = ApproachProgress(guide.Head.Time, visualTime, guide.Head.TimeScaleGroup);
                 var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, guide.Tail.TimeScaleGroup);
                 var headY = ScreenY(PerspectiveProgress(headApproach));
-                var show = headY <= TopY + 8 && HasVisibleDecorationSegment(headApproach, tailApproach);
+                var show = HasVisibleDecorationSegment(headApproach, tailApproach);
                 if (!show)
                 {
                     if (guideViews.TryGetValue(guide, out var oldGuide)) ReleaseGuide(guide, oldGuide);
@@ -1361,8 +1431,7 @@ namespace Gugarythm
                 var bY = ScreenY(bScreen);
                 var leadingApproach = Mathf.Max(aApproach, bApproach);
                 var trailingApproach = Mathf.Min(aApproach, bApproach);
-                var visible = Mathf.Min(aY, bY) <= TopY + 8 &&
-                    HasVisibleDecorationSegment(leadingApproach, trailingApproach);
+                var visible = HasVisibleDecorationSegment(leadingApproach, trailingApproach);
                 if (!visible)
                 {
                     if (simLineViews.TryGetValue(simLine, out var oldLine)) ReleaseSimLine(simLine, oldLine);
@@ -1399,7 +1468,7 @@ namespace Gugarythm
                 var approachProgress = ApproachProgress(note, visualTime);
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
-                var visible = note.Visible && y <= TopY + 8 && y >= NoteExitY &&
+                var visible = note.Visible && y >= NoteExitY &&
                     !ShouldHideHoldHead(note, approachProgress);
                 if (!visible)
                 {
@@ -1465,9 +1534,9 @@ namespace Gugarythm
                 var startY = ScreenY(startScreen);
                 var endY = ScreenY(endScreen);
                 var holdMode = ResolveConnectorRenderMode(connector);
-                var show = startY <= TopY + 8 && (holdMode == HoldConnectorRenderMode.AnchorClipped
+                var show = holdMode == HoldConnectorRenderMode.AnchorClipped
                     ? endApproach < JudgmentBottomApproach
-                    : endY >= NoteExitY);
+                    : endY >= NoteExitY;
                 if (!show)
                 {
                     if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
@@ -2009,7 +2078,7 @@ namespace Gugarythm
             canvasRoot = canvasObject.GetComponent<RectTransform>();
             var root = canvasRoot;
             Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
-            RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
+            backgroundLayer = RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
             var trackObject = new GameObject("Track Depth", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var trackRect = trackObject.GetComponent<RectTransform>(); trackRect.SetParent(stage, false); Fill(trackRect);
@@ -2050,6 +2119,7 @@ namespace Gugarythm
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
+            SetGameplayStageVisible(false);
         }
 
         void BuildInputLaneFeedback(RectTransform root)
@@ -2235,6 +2305,13 @@ namespace Gugarythm
 
         void BuildMenu(RectTransform root)
         {
+            // The safe-area container intentionally stops at a device cutout.
+            // Keep the library's left-column color behind it so the excluded
+            // strip never reveals the gameplay stage underneath.
+            var fullScreenRoot = root.parent as RectTransform;
+            libraryBackdrop = Panel("Library Cutout Backdrop", fullScreenRoot, new Color(.16f, .16f, .16f, 1f), Vector2.zero, Vector2.zero, true);
+            libraryBackdrop.SetSiblingIndex(root.GetSiblingIndex());
+            libraryBackdrop.gameObject.SetActive(GugarythmSceneRouter.IsLibrary);
             menuPanel = Panel("Chart Library", root, new Color(.11f, .11f, .11f, 1f), new Vector2(1500, 820), Vector2.zero);
             Fill(menuPanel);
             menuPanel.localScale = Vector3.one;
@@ -2353,7 +2430,7 @@ namespace Gugarythm
             var back = MakeOutlinedButton("返回曲庫", chartEditorPanel, Vector2.zero, ReturnFromChartEditor, new Vector2(130, 48));
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-56, -48));
 
-            var card = Panel("Chart Editor Card", chartEditorPanel, new Color(.14f, .14f, .14f, 1f), new Vector2(740, 680), new Vector2(0, 40));
+            var card = Panel("Chart Editor Card", chartEditorPanel, new Color(.14f, .14f, .14f, 1f), new Vector2(740, 680), new Vector2(0, 0));
             var title = Label("編輯譜面", card, 42);
             title.alignment = TextAnchor.MiddleLeft;
             title.rectTransform.sizeDelta = new Vector2(620, 64);
@@ -2641,7 +2718,7 @@ namespace Gugarythm
             if (!result.Success) { SetStatus("譜面載入失敗：" + result.Error); loading = false; yield break; }
             chart = result.Chart;
             musicLoadSucceeded = false;
-            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
+            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
             if (!musicLoadSucceeded) { SetStatus("GGR 音樂格式不支援或無法解碼。"); loading = false; yield break; }
             currentLibraryEntry = entry;
             selectedLibraryEntry = entry;
@@ -3291,7 +3368,8 @@ namespace Gugarythm
         static Text Label(string content, RectTransform parent, int size)
         {
             var go = new GameObject("Text", typeof(RectTransform), typeof(Text)); var text = go.GetComponent<Text>(); text.rectTransform.SetParent(parent, false);
-            text.text = content; text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); text.fontSize = size; text.fontStyle = FontStyle.Bold; text.alignment = TextAnchor.MiddleCenter; text.color = Color.white;
+            var mobileScale = Screen.width > 0 && Screen.width <= 1440 ? 1.18f : 1f;
+            text.text = content; text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); text.fontSize = Mathf.RoundToInt(size * mobileScale); text.fontStyle = FontStyle.Bold; text.alignment = TextAnchor.MiddleCenter; text.color = Color.white;
             // Labels sit above their buttons visually but must not intercept the
             // pointer raycast intended for the clickable parent graphic.
             text.raycastTarget = false;
