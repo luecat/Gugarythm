@@ -251,6 +251,7 @@ namespace Gugarythm
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
         RectTransform menuPanel;
+        RectTransform gameplayLoadingOverlay;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
         RectTransform settingsAudioPanel;
@@ -267,6 +268,7 @@ namespace Gugarythm
         Text comboLabel;
         Text judgmentLabel;
         Text loadStatus;
+        Text gameplayLoadingLabel;
         Text libraryCountLabel;
         Text librarySortLabel;
         Text librarySortModeLabel;
@@ -536,9 +538,8 @@ namespace Gugarythm
                 yield break;
             }
 
-            // Keep gameplay presentation hidden until the chart has been
-            // imported and the initial off-screen views have been prepared.
-            SetGameplayStageVisible(false);
+            SetGameplayStageVisible(true);
+            SetGameplayLoadingVisible(true, "正在準備譜面…");
             yield return LoadGameplaySelection(entry, bytes);
         }
 
@@ -556,6 +557,12 @@ namespace Gugarythm
             if (stage != null) stage.gameObject.SetActive(visible);
         }
 
+        void SetGameplayLoadingVisible(bool visible, string message = null)
+        {
+            if (gameplayLoadingLabel != null && message != null) gameplayLoadingLabel.text = message;
+            if (gameplayLoadingOverlay != null) gameplayLoadingOverlay.gameObject.SetActive(visible);
+        }
+
         void RestoreLibrarySelection()
         {
             if (!ChartSelectionSession.Ensure().TryGetSelection(out var remembered, out _)) return;
@@ -570,9 +577,12 @@ namespace Gugarythm
         {
             loading = true;
             startButton.interactable = false;
+            SetGameplayLoadingVisible(true, "正在載入 " + entry.Title + "…");
             SetStatus("正在載入 " + entry.Title + "…");
             yield return null;
 
+            SetGameplayLoadingVisible(true, "正在解析譜面…");
+            yield return null;
             var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
             if (!result.Success)
             {
@@ -583,7 +593,11 @@ namespace Gugarythm
 
             chart = result.Chart;
             musicLoadSucceeded = false;
-            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+            if (chart.BgmBytes != null)
+            {
+                SetGameplayLoadingVisible(true, "正在準備音訊…");
+                yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+            }
             if (!musicLoadSucceeded)
             {
                 Debug.LogError("跨場景選取的 GGR 音樂無法解碼。");
@@ -1072,11 +1086,13 @@ namespace Gugarythm
             scheduledDsp = playbackReadyDsp - chart.BgmOffset - initialSongTime;
             music.time = 0;
             // Prebuild every chart object at its off-screen perspective
-            // position before the scheduled audio begins. Objects then move
-            // through the track instead of being created at the screen edge.
+            // position before the scheduled audio begins. Only objects near
+            // the visible waterfall are kept active; the pool absorbs the
+            // first activation without rendering the whole chart at once.
             lastObservedSongTime = CurrentSongTime();
             SetGameplayStageVisible(true);
             UpdateVisuals(lastObservedSongTime + visualOffsetSeconds);
+            SetGameplayLoadingVisible(false);
             music.PlayScheduled(scheduledDsp + audioOffsetSeconds);
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
             ShowJudgment("", Color.white);
@@ -1560,7 +1576,7 @@ namespace Gugarythm
                 var headApproach = ApproachProgress(guide.Head.Time, visualTime, guide.Head.TimeScaleGroup);
                 var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, guide.Tail.TimeScaleGroup);
                 var headY = ScreenY(PerspectiveProgress(headApproach));
-                var show = HasVisibleDecorationSegment(headApproach, tailApproach);
+                var show = headY <= TopY + 8 && HasVisibleDecorationSegment(headApproach, tailApproach);
                 if (!show)
                 {
                     if (guideViews.TryGetValue(guide, out var oldGuide)) ReleaseGuide(guide, oldGuide);
@@ -1585,7 +1601,7 @@ namespace Gugarythm
                 var bY = ScreenY(bScreen);
                 var leadingApproach = Mathf.Max(aApproach, bApproach);
                 var trailingApproach = Mathf.Min(aApproach, bApproach);
-                var visible = HasVisibleDecorationSegment(leadingApproach, trailingApproach);
+                var visible = Mathf.Min(aY, bY) <= TopY + 8 && HasVisibleDecorationSegment(leadingApproach, trailingApproach);
                 if (!visible)
                 {
                     if (simLineViews.TryGetValue(simLine, out var oldLine)) ReleaseSimLine(simLine, oldLine);
@@ -1622,7 +1638,7 @@ namespace Gugarythm
                 var approachProgress = ApproachProgress(note, visualTime);
                 var screenProgress = PerspectiveProgress(approachProgress);
                 var y = ScreenY(screenProgress);
-                var visible = note.Visible && y >= NoteExitY &&
+                var visible = note.Visible && IsInNoteRenderWindow(y, TopY, NoteExitY) &&
                     !ShouldHideHoldHead(note, approachProgress);
                 if (!visible)
                 {
@@ -1688,9 +1704,9 @@ namespace Gugarythm
                 var startY = ScreenY(startScreen);
                 var endY = ScreenY(endScreen);
                 var holdMode = ResolveConnectorRenderMode(connector);
-                var show = holdMode == HoldConnectorRenderMode.AnchorClipped
+                var show = startY <= TopY + 8 && (holdMode == HoldConnectorRenderMode.AnchorClipped
                     ? endApproach < JudgmentBottomApproach
-                    : endY >= NoteExitY;
+                    : endY >= NoteExitY);
                 if (!show)
                 {
                     if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
@@ -1953,6 +1969,10 @@ namespace Gugarythm
         }
 
         static float ScreenY(float screenProgress) => Mathf.LerpUnclamped(TopY, HitY, screenProgress);
+
+        public static bool IsInNoteRenderWindow(float screenY, float topY, float exitY) =>
+            screenY <= topY + 8f && screenY >= exitY;
+
         /// <summary>
         /// Keep note height on the same continuous depth function as the lane
         /// edges.  A note becomes smaller toward the vanishing point and grows
@@ -2263,6 +2283,7 @@ namespace Gugarythm
             noteLayer = Layer("Notes", stage);
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
+            BuildGameplayLoadingOverlay(safeAreaRoot);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
             BuildLatencyCalibration(safeAreaRoot);
@@ -2272,6 +2293,18 @@ namespace Gugarythm
             BuildResult(safeAreaRoot);
             UpdateSafeAreaLayout(true);
             SetGameplayStageVisible(false);
+        }
+
+        void BuildGameplayLoadingOverlay(RectTransform root)
+        {
+            gameplayLoadingOverlay = Panel("Gameplay Loading Overlay", root, new Color(.015f, .02f, .06f, .82f), Vector2.zero, Vector2.zero, true);
+            var card = Panel("Gameplay Loading Card", gameplayLoadingOverlay, new Color(.08f, .12f, .20f, .96f), new Vector2(620, 220), Vector2.zero);
+            Outline(card.gameObject, new Color(.25f, .65f, .90f, .85f), 2);
+            gameplayLoadingLabel = Label("正在準備譜面…", card, 30);
+            gameplayLoadingLabel.alignment = TextAnchor.MiddleCenter;
+            gameplayLoadingLabel.rectTransform.sizeDelta = new Vector2(560, 120);
+            gameplayLoadingLabel.rectTransform.anchoredPosition = new Vector2(0, 8);
+            gameplayLoadingOverlay.gameObject.SetActive(false);
         }
 
         void BuildInputLaneFeedback(RectTransform root)
@@ -2455,7 +2488,7 @@ namespace Gugarythm
             AddSortArrowIcon(libraryDirectionIcon);
             MakeInvisibleButton(libraryDirectionIcon, () => { librarySortAscending = !librarySortAscending; RefreshLibraryUI(); });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
-            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-22, -300);
+            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -300);
 
             var importButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
             var importRect = importButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
@@ -2878,9 +2911,10 @@ namespace Gugarythm
             row.anchorMin = new Vector2(0, 1);
             row.anchorMax = new Vector2(1, 1);
             row.pivot = new Vector2(.5f, 1);
-            row.offsetMin = new Vector2(0, -rowHeight * (index + 1) + 2);
-            row.offsetMax = new Vector2(0, -rowHeight * index);
-            if (selected) Outline(row.gameObject, new Color(.05f, .60f, 1f), 2);
+            const float rowTopInset = 2f;
+            var horizontalInset = selected ? 2f : 0f;
+            row.offsetMin = new Vector2(horizontalInset, -rowHeight * (index + 1));
+            row.offsetMax = new Vector2(-horizontalInset, -rowHeight * index - rowTopInset);
             if (index > 0)
             {
                 var divider = Panel("Chart Divider", row, new Color(.27f, .27f, .27f, .72f), new Vector2(0, 1), Vector2.zero);
@@ -2894,6 +2928,7 @@ namespace Gugarythm
                 var level = Label(hasSelectedDifficulty.DifficultyLevel, row, 20); level.color = new Color(.78f, .78f, .78f); level.rectTransform.sizeDelta = new Vector2(62, 50); PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-18, 0));
             }
             MakeInvisibleButton(row, () => SelectLibraryEntry(hasSelectedDifficulty ?? group.Difficulties[0], true));
+            if (selected) AddSelectionFrame(row, new Color(.05f, .60f, 1f), 2f);
         }
 
         void SelectLibraryEntry(LocalChartEntry entry, bool loadSource)
@@ -3535,9 +3570,9 @@ namespace Gugarythm
             var mask = root.gameObject.AddComponent<Mask>(); mask.showMaskGraphic = false;
             var content = new GameObject("Content", typeof(RectTransform)).GetComponent<RectTransform>();
             content.SetParent(root, false); content.anchorMin = new Vector2(0, 1); content.anchorMax = new Vector2(1, 1); content.pivot = new Vector2(.5f, 1); content.anchoredPosition = Vector2.zero; content.sizeDelta = new Vector2(0, size.y);
-            // Reserve a gutter for the scrollbar so row hit areas and selected
-            // outlines never extend underneath the draggable handle.
-            content.offsetMax = new Vector2(-18, 0);
+            // Reserve a wider gutter for the scrollbar so row hit areas and
+            // selected outlines never extend underneath the draggable handle.
+            content.offsetMax = new Vector2(-38, 0);
             var scroll = root.gameObject.AddComponent<ScrollRect>();
             scroll.viewport = root;
             scroll.content = content;
@@ -3550,7 +3585,7 @@ namespace Gugarythm
             var track = Panel("Scroll Track", root, new Color(.35f, .35f, .35f, .34f), new Vector2(6, 0), Vector2.zero);
             track.anchorMin = new Vector2(1, 0); track.anchorMax = new Vector2(1, 1); track.pivot = new Vector2(1, .5f);
             track.offsetMin = new Vector2(-10, 8); track.offsetMax = new Vector2(-4, -8);
-            var handle = Panel("Scroll Handle", track, new Color(.12f, .62f, 1f, .9f), new Vector2(6, 40), Vector2.zero);
+            var handle = Panel("Scroll Handle", track, new Color(1f, 1f, 1f, .9f), new Vector2(6, 40), Vector2.zero);
             handle.anchorMin = new Vector2(0, 1); handle.anchorMax = new Vector2(1, 1); handle.pivot = new Vector2(.5f, 1);
             handle.offsetMin = new Vector2(0, -40); handle.offsetMax = Vector2.zero;
             var scrollbar = track.gameObject.AddComponent<Scrollbar>();
@@ -3568,7 +3603,10 @@ namespace Gugarythm
                 fadeDuration = .1f,
             };
             scroll.verticalScrollbar = scrollbar;
-            scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
+            // Hide the scrollbar when the list fits in the viewport; otherwise
+            // Unity expands the handle to the full track and it looks like a
+            // non-draggable decoration rather than a scroll thumb.
+            scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
             return content;
         }
 
@@ -3638,6 +3676,22 @@ namespace Gugarythm
         }
 
         static void Fill(RectTransform rect) { rect.anchorMin = Vector2.zero; rect.anchorMax = Vector2.one; rect.offsetMin = Vector2.zero; rect.offsetMax = Vector2.zero; }
+        static void AddSelectionFrame(RectTransform target, Color color, float width)
+        {
+            var top = Panel("Selection Frame Top", target, color, Vector2.zero, Vector2.zero);
+            top.anchorMin = new Vector2(0, 1); top.anchorMax = new Vector2(1, 1); top.offsetMin = new Vector2(0, -width); top.offsetMax = Vector2.zero;
+            var bottom = Panel("Selection Frame Bottom", target, color, Vector2.zero, Vector2.zero);
+            bottom.anchorMin = Vector2.zero; bottom.anchorMax = new Vector2(1, 0); bottom.offsetMin = Vector2.zero; bottom.offsetMax = new Vector2(0, width);
+            var left = Panel("Selection Frame Left", target, color, Vector2.zero, Vector2.zero);
+            left.anchorMin = Vector2.zero; left.anchorMax = new Vector2(0, 1); left.offsetMin = Vector2.zero; left.offsetMax = new Vector2(width, 0);
+            var right = Panel("Selection Frame Right", target, color, Vector2.zero, Vector2.zero);
+            right.anchorMin = new Vector2(1, 0); right.anchorMax = Vector2.one; right.offsetMin = new Vector2(-width, 0); right.offsetMax = Vector2.zero;
+            top.GetComponent<Image>().raycastTarget = false;
+            bottom.GetComponent<Image>().raycastTarget = false;
+            left.GetComponent<Image>().raycastTarget = false;
+            right.GetComponent<Image>().raycastTarget = false;
+        }
+
         static void Outline(GameObject go, Color color, int width) { var outline = go.AddComponent<Outline>(); outline.effectColor = color; outline.effectDistance = new Vector2(width, -width); }
         struct TouchMemory { public float Lane; public int GridRow; public Vector2 ScreenPosition; public double EventTime; public double StartTime; public double LastInputRecordTime; }
     }

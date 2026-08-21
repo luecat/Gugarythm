@@ -34,6 +34,7 @@ public static class RuntimeValidation
         ValidateUscSlideMidpointRoles();
         ValidateHeadlessCriticalSlideStart();
         ValidateNoteRenderWidths();
+        ValidateNoteRenderVisibilityWindow();
         ValidateNoteSurfaceProjection();
         ValidateHeadlessHoldRendering();
         ValidatePersistentHoldVisualRouting();
@@ -298,6 +299,19 @@ public static class RuntimeValidation
         var clippedVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(clippedRenderWidth);
         Require(clippedVisibleWidth < 1000f,
             "An edge-clamped Hold connector must shrink with its head instead of retaining its authored full width");
+    }
+
+    static void ValidateNoteRenderVisibilityWindow()
+    {
+        var method = typeof(SonolusLandscapePrototype).GetMethod(
+            "IsInNoteRenderWindow", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(method != null, "Gameplay must expose its note render-window rule");
+
+        var inside = (bool)method.Invoke(null, new object[] { 0f, 100f, -100f });
+        var tooFar = (bool)method.Invoke(null, new object[] { 150f, 100f, -100f });
+        var alreadyExited = (bool)method.Invoke(null, new object[] { -150f, 100f, -100f });
+        Require(inside && !tooFar && !alreadyExited,
+            "Only notes between the upper render boundary and exit boundary may stay in the active UI pool");
     }
 
     static void ValidateNoteSurfaceProjection()
