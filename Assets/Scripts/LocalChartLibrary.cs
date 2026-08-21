@@ -124,8 +124,10 @@ namespace Gugarythm
 
         public static string FindMatchingGroupId(string title, string artist)
         {
-            var key = Normalize(title);
-            return Load().FirstOrDefault(entry => Normalize(entry.Title) == key)?.GroupId;
+            var titleKey = Normalize(title);
+            var artistKey = Normalize(artist);
+            return Load().FirstOrDefault(entry =>
+                Normalize(entry.Title) == titleKey && Normalize(entry.Artist) == artistKey)?.GroupId;
         }
 
         public static bool TryReadSource(LocalChartEntry entry, out byte[] bytes)
