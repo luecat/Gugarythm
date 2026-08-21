@@ -171,6 +171,7 @@ namespace Gugarythm
         // Button sprites begin their visible antialiased edge at pixel 44.
         // Using the old 40px glow bound made every normal Tap visibly narrow.
         const float NormalButtonVisibleEdgePaddingPixels = 44f;
+        const float DifficultyButtonSpacing = 180f;
         const int MouseContactId = int.MinValue;
         // Missed notes keep travelling beyond the judgment line until their
         // sprite leaves the viewport. Successful hits return to the pool at once.
@@ -412,10 +413,42 @@ namespace Gugarythm
         static double FirstWaterfallVisualTime(RuntimeChart runtimeChart)
         {
             if (runtimeChart == null) return 0;
-            var firstTime = runtimeChart.Notes.Where(note => note != null && note.Visible).Select(note => note.Time)
-                .Concat(runtimeChart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
-                    .Where(note => note != null).Select(note => note.Time))
-                .DefaultIfEmpty(0d).Min();
+            var firstTime = double.PositiveInfinity;
+            foreach (var note in runtimeChart.Notes)
+            {
+                if (note == null || !note.Visible) continue;
+                firstTime = Math.Min(firstTime, runtimeChart.VisualPosition(note.Time, note.TimeScaleGroup));
+            }
+            foreach (var connector in runtimeChart.Connectors)
+            {
+                if (connector?.Start != null)
+                    firstTime = Math.Min(firstTime, runtimeChart.VisualPosition(connector.Start.Time, connector.Start.TimeScaleGroup));
+                if (connector?.End != null)
+                    firstTime = Math.Min(firstTime, runtimeChart.VisualPosition(connector.End.Time, connector.End.TimeScaleGroup));
+            }
+            return double.IsFinite(firstTime) ? firstTime : 0;
+        }
+
+        public static float DifficultyButtonWidthForText(string text) =>
+            string.Equals(text, "未標示難度", StringComparison.Ordinal) ? 170f : 136f;
+
+        static double FirstWaterfallSongTime(RuntimeChart runtimeChart)
+        {
+            if (runtimeChart == null) return 0;
+            var firstTime = double.PositiveInfinity;
+            Action<RuntimeNote> Add = note =>
+            {
+                if (note == null || !note.Visible) return;
+                var firstVisual = runtimeChart.VisualPosition(note.Time, note.TimeScaleGroup);
+                var targetVisual = firstVisual - NoteApproachDurationSeconds - InitialOffscreenLeadSeconds;
+                firstTime = Math.Min(firstTime, runtimeChart.TimeAtVisualPosition(targetVisual, note.TimeScaleGroup));
+            };
+            foreach (var note in runtimeChart.Notes) Add(note);
+            foreach (var connector in runtimeChart.Connectors)
+            {
+                Add(connector?.Start);
+                Add(connector?.End);
+            }
             return double.IsFinite(firstTime) ? firstTime : 0;
         }
 
@@ -503,7 +536,9 @@ namespace Gugarythm
                 yield break;
             }
 
-            SetGameplayStageVisible(true);
+            // Keep gameplay presentation hidden until the chart has been
+            // imported and the initial off-screen views have been prepared.
+            SetGameplayStageVisible(false);
             yield return LoadGameplaySelection(entry, bytes);
         }
 
@@ -613,7 +648,14 @@ namespace Gugarythm
             }
             UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
-            if (songTime > chart.LastNoteTime + .75 && chart.Notes.All(note => !note.Judged || note.Grade != JudgmentGrade.Pending)) FinishGame();
+            if (songTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
+        }
+
+        bool AreAllNotesResolved()
+        {
+            foreach (var note in chart.Notes)
+                if (note.Judged && note.Grade == JudgmentGrade.Pending) return false;
+            return true;
         }
 
         IEnumerator ImportBytes(string fileName, byte[] bytes)
@@ -1024,14 +1066,16 @@ namespace Gugarythm
             effects.UnPause();
             holdEffects.UnPause();
             var playbackReadyDsp = AudioSettings.dspTime + .25d;
-            var initialSongTime = InitialWaterfallSongTime(FirstWaterfallVisualTime(chart), chart.BgmOffset,
-                audioOffsetSeconds, NoteApproachDurationSeconds, InitialOffscreenLeadSeconds);
+            var firstWaterfallSongTime = FirstWaterfallSongTime(chart);
+            var earliestAudioSafeStart = -chart.BgmOffset + audioOffsetSeconds;
+            var initialSongTime = Math.Min(0d, Math.Min(firstWaterfallSongTime, earliestAudioSafeStart));
             scheduledDsp = playbackReadyDsp - chart.BgmOffset - initialSongTime;
             music.time = 0;
             // Prebuild every chart object at its off-screen perspective
             // position before the scheduled audio begins. Objects then move
             // through the track instead of being created at the screen edge.
             lastObservedSongTime = CurrentSongTime();
+            SetGameplayStageVisible(true);
             UpdateVisuals(lastObservedSongTime + visualOffsetSeconds);
             music.PlayScheduled(scheduledDsp + audioOffsetSeconds);
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
@@ -1603,7 +1647,7 @@ namespace Gugarythm
                 var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
                 ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
                 view.color = IsHoldMid(note) ? Color.clear : Color.white;
-                var traceParticle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
+                var traceParticle = view.TraceParticle;
                 if (traceParticle != null)
                 {
                     // Both official tick layouts use the same square as the
@@ -1614,7 +1658,7 @@ namespace Gugarythm
                     traceParticle.rectTransform.sizeDelta = new Vector2(height * particleAspect, height);
                     traceParticle.color = Color.white;
                 }
-                var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
+                var flickArrow = view.FlickArrow;
                 if (flickArrow != null && flickArrow.gameObject.activeSelf && flickArrow.texture != null)
                 {
                     var spriteIndex = FlickSpriteIndex(note.Size);
@@ -1691,9 +1735,9 @@ namespace Gugarythm
                     : buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var holdTexture) ? holdTexture : null;
                 view.color = Color.white;
                 view.capRatio = NoteCapRatio;
-                var particle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
+                var particle = view.TraceParticle;
                 if (particle != null) particle.gameObject.SetActive(false);
-                var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
+                var flickArrow = view.FlickArrow;
                 if (flickArrow != null) flickArrow.gameObject.SetActive(false);
             }
             var laneProgress = EaseConnector(progress, connector.Ease);
@@ -2190,6 +2234,7 @@ namespace Gugarythm
             Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
             backgroundLayer = RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
+            stage.gameObject.AddComponent<Canvas>();
             var trackObject = new GameObject("Track Depth", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var trackRect = trackObject.GetComponent<RectTransform>(); trackRect.SetParent(stage, false); Fill(trackRect);
             var trackGraphic = trackObject.GetComponent<TaperedConnectorGraphic>(); trackGraphic.raycastTarget = false; trackGraphic.color = new Color(0, 0, .035f, .72f);
@@ -2907,17 +2952,18 @@ namespace Gugarythm
             detailCoverTitleLabel.text = group.Title.Replace(" ", "\n");
             detailDifficultyLabel.text = "選擇難度";
             var current = group.Difficulties.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id) ?? group.Difficulties[0];
+            difficultyButtonContent.sizeDelta = new Vector2(Mathf.Max(450f, group.Difficulties.Count * DifficultyButtonSpacing), 76f);
             for (var index = 0; index < group.Difficulties.Count; index++)
             {
                 var entry = group.Difficulties[index];
                 var text = DisplayDifficulty(entry);
                 var active = entry.Id == current.Id;
-                var button = MakeFlatButton(text, difficultyButtonContent, new Vector2(index * 150, 0),
-                    () => SelectLibraryEntry(entry, true), new Vector2(136, 52), active ? new Color(.10f, .20f, .29f) : new Color(.15f, .15f, .15f));
+                var button = MakeFlatButton(text, difficultyButtonContent, new Vector2(index * DifficultyButtonSpacing, 0),
+                    () => SelectLibraryEntry(entry, true), new Vector2(DifficultyButtonWidthForText(text), 52), active ? new Color(.10f, .20f, .29f) : new Color(.15f, .15f, .15f));
                 var buttonRect = button.GetComponent<RectTransform>();
                 buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(0, .5f);
                 buttonRect.pivot = new Vector2(0, .5f);
-                buttonRect.anchoredPosition = new Vector2(index * 150, 0);
+                buttonRect.anchoredPosition = new Vector2(index * DifficultyButtonSpacing, 0);
                 Outline(button.gameObject, active ? new Color(.08f, .62f, 1f) : new Color(.34f, .34f, .34f), active ? 3 : 1);
                 button.GetComponentInChildren<Text>().color = active ? new Color(.22f, .68f, 1f) : new Color(.78f, .78f, .78f);
             }
@@ -3142,9 +3188,11 @@ namespace Gugarythm
             var particle = RawPanel("Trace Particle", view.rectTransform, null, Color.white, new Vector2(52, 52), Vector2.zero).GetComponent<RawImage>();
             particle.raycastTarget = false;
             particle.gameObject.SetActive(false);
+            view.TraceParticle = particle;
             var flickArrow = RawPanel("Flick Arrow", view.rectTransform, null, Color.white, new Vector2(72, 58), new Vector2(0, 32)).GetComponent<RawImage>();
             flickArrow.raycastTarget = false;
             flickArrow.gameObject.SetActive(false);
+            view.FlickArrow = flickArrow;
             return view;
         }
 
@@ -3173,7 +3221,7 @@ namespace Gugarythm
             // UI white texture and produces an unwanted bar.
             view.color = holdMid ? Color.clear : Color.white;
             view.capRatio = NoteCapRatio;
-            var particle = view.transform.Find("Trace Particle")?.GetComponent<RawImage>();
+            var particle = view.TraceParticle;
             if (particle != null)
             {
                 particle.texture = holdMid
@@ -3182,7 +3230,7 @@ namespace Gugarythm
                     traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture;
                 particle.gameObject.SetActive(ShouldShowNoteParticle(note, particle.texture != null));
             }
-            var flickArrow = view.transform.Find("Flick Arrow")?.GetComponent<RawImage>();
+            var flickArrow = view.FlickArrow;
             if (flickArrow != null)
             {
                 var side = note.Direction != 0;

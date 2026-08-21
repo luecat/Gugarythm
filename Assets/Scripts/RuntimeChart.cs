@@ -93,6 +93,24 @@ namespace Gugarythm
             return point.Position + (time - point.Time) * point.Scale;
         }
 
+        public double TimeAtPosition(double position)
+        {
+            var first = points[0];
+            if (position <= first.Position)
+                return first.Time + (position - first.Position) / Math.Max(1e-9, first.Scale);
+
+            for (var index = 1; index < points.Count; index++)
+            {
+                var previous = points[index - 1];
+                var current = points[index];
+                if (position > current.Position) continue;
+                return previous.Time + (position - previous.Position) / Math.Max(1e-9, previous.Scale);
+            }
+
+            var last = points[^1];
+            return last.Time + (position - last.Position) / Math.Max(1e-9, last.Scale);
+        }
+
         readonly struct Point
         {
             public readonly double Time;
@@ -225,6 +243,12 @@ namespace Gugarythm
         {
             var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
             return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.PositionAt(time) : time;
+        }
+
+        public double TimeAtVisualPosition(double position, string group)
+        {
+            var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
+            return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.TimeAtPosition(position) : position;
         }
     }
 
