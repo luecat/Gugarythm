@@ -459,6 +459,7 @@ namespace Gugarythm
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(false);
                 settingsPanel.gameObject.SetActive(true);
+                StartLatencyCalibration();
                 yield break;
             }
 
@@ -701,15 +702,16 @@ namespace Gugarythm
         void UpdateLatencyCalibration()
         {
             if (!calibrationActive || calibrationPanel == null) return;
-            if (AudioSettings.dspTime >= CalibrationBeatDsp(CalibrationTickCount - 1) + CalibrationTapWindowSeconds)
+            if (AudioSettings.dspTime >= CalibrationBeatDsp(CalibrationBeatsPerRound - 1) + CalibrationTapWindowSeconds)
             {
-                calibrationActive = false;
-                StopCalibrationTickAudio();
-                RefreshManualAudioOffsetControls();
-                calibrationTapButton.gameObject.SetActive(false);
-                calibrationLabel.gameObject.SetActive(true);
-                calibrationLabel.text = "校正未完成，請重新開始";
-                return;
+                if (LatencyCalibrationMath.TryGetAverageOffset(calibrationOffsets, out var average))
+                {
+                    SetAudioOffset(average);
+                    calibrationLabel.text = $"四拍平均  {average * 1000d:+0;-0;0} ms";
+                }
+                calibrationOffsets.Clear();
+                calibrationStartDsp = AudioSettings.dspTime + .15d;
+                ScheduleCalibrationTicks();
             }
         }
 
@@ -717,20 +719,13 @@ namespace Gugarythm
 
         void RegisterCalibrationTap(double inputDsp)
         {
-            if (!calibrationActive || calibrationOffsets.Count >= CalibrationRoundCount) return;
-            var expectedFourthBeatDsp = CalibrationBeatDsp(CalibrationFourthBeatIndex(calibrationOffsets.Count));
-            var offset = CalibrationAudioOffsetForTap(inputDsp, expectedFourthBeatDsp);
-            if (Math.Abs(offset) > CalibrationTapWindowSeconds) return;
+            if (!calibrationActive || calibrationOffsets.Count >= CalibrationBeatsPerRound) return;
+            var expectedBeatDsp = CalibrationBeatDsp(calibrationOffsets.Count);
+            var offset = CalibrationAudioOffsetForTap(inputDsp, expectedBeatDsp);
+            if (!LatencyCalibrationMath.IsTapOffsetValid(offset)) return;
             calibrationOffsets.Add(offset);
-            if (calibrationOffsets.Count < CalibrationRoundCount) return;
-
-            SetAudioOffset(calibrationOffsets.Average());
-            calibrationActive = false;
-            StopCalibrationTickAudio();
-            RefreshManualAudioOffsetControls();
-            calibrationTapButton.gameObject.SetActive(false);
-            calibrationLabel.gameObject.SetActive(true);
-            calibrationLabel.text = $"完成：{audioOffsetSeconds * 1000d:+0;-0;0} ms";
+            calibrationLabel.text = $"本次偏移  {offset * 1000d:+0;-0;0} ms\n第 {calibrationOffsets.Count}/4 拍";
+            calibrationOffsetLabel.text = $"目前套用  {audioOffsetSeconds * 1000d:+0;-0;0} ms\n按下 TAP 測試你這次的聲音與畫面差距";
         }
 
         public static double CalibrationAudioOffsetForTap(double inputDsp, double audibleBeatDsp)
@@ -775,13 +770,11 @@ namespace Gugarythm
                 calibrationOffsetLabel.text = $"聲音偏移  {audioOffsetSeconds * 1000d:+0;-0;0} ms\n＋延後聲音／−提前聲音；不影響判定";
         }
 
-        const int CalibrationBeatsPerRound = 4;
-        const int CalibrationRoundCount = 4;
-        const int CalibrationTickCount = CalibrationBeatsPerRound * CalibrationRoundCount;
+        const int CalibrationBeatsPerRound = LatencyCalibrationMath.TapsPerRound;
+        const int CalibrationRoundCount = 1;
+        const int CalibrationTickCount = CalibrationBeatsPerRound;
         const double CalibrationBeatDurationSeconds = .6d;
         const double CalibrationTapWindowSeconds = .3d;
-
-        int CalibrationFourthBeatIndex(int round) => round * CalibrationBeatsPerRound + CalibrationBeatsPerRound - 1;
 
         double CalibrationBeatDsp(int beatIndex) =>
             calibrationStartDsp + beatIndex * CalibrationBeatDurationSeconds + audioOffsetSeconds;
@@ -2101,9 +2094,6 @@ namespace Gugarythm
             var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
             BuildInputLaneFeedback(stage);
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            BuildJudgmentDebugGrid(stage);
-#endif
             guideLayer = Layer("Decoration Guides", stage);
             connectorLayer = Layer("Hold Connectors", stage);
             simLineLayer = Layer("Synchronization Lines", stage);
@@ -2191,44 +2181,6 @@ namespace Gugarythm
                 if (inputLaneFeedback[cell] != null) inputLaneFeedback[cell].gameObject.SetActive(false);
             }
         }
-
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-        static void BuildJudgmentDebugGrid(RectTransform root)
-        {
-            var grid = Layer("Judgment Debug Grid", root);
-            var bottom = -CanvasHeight * .5f;
-            var top = JudgmentInputTop(CanvasHeight);
-            var rowHeight = JudgmentInputBandHeight(CanvasHeight);
-            // Keep every cell edge phase-locked to the visible purple judgment
-            // strip, whose centre is HitY and whose source height is 45 pixels.
-            var stripTop = HitY + rowHeight * .5f;
-            var firstRow = Mathf.FloorToInt((bottom - stripTop) / rowHeight);
-            var lastRow = Mathf.CeilToInt((top - stripTop) / rowHeight) - 1;
-            for (var cell = 0; cell < JudgmentDebugCellCount; cell++)
-            {
-                var leftLane = VirtualSliderInput.MinimumLane + cell * JudgmentDebugCellWidth;
-                var rightLane = leftLane + JudgmentDebugCellWidth;
-                var left = JudgmentDebugCanvasXAtLane(leftLane);
-                var right = JudgmentDebugCanvasXAtLane(rightLane);
-                var segmentLeft = left + (cell == 0 ? 0f : 1f);
-                var segmentRight = right - (cell == JudgmentDebugCellCount - 1 ? 0f : 1f);
-                for (var row = firstRow; row <= lastRow; row++)
-                {
-                    var rowBottom = Mathf.Max(bottom, stripTop + row * rowHeight);
-                    var rowTop = Mathf.Min(top, stripTop + (row + 1) * rowHeight);
-                    // Mirror the vertical cell gutters so the virtual touch
-                    // panel visibly reads as judgment-height tiles.
-                    var segmentBottom = rowBottom + (row == firstRow ? 0f : 1f);
-                    var segmentTop = rowTop - (row == lastRow ? 0f : 1f);
-                    if (segmentTop <= segmentBottom) continue;
-                    var segment = Panel($"Cell {cell + 1:00}-{row:00}", grid, new Color(.68f, .24f, 1f, .42f),
-                        new Vector2(Mathf.Max(1f, segmentRight - segmentLeft), segmentTop - segmentBottom),
-                        new Vector2((segmentLeft + segmentRight) * .5f, (segmentTop + segmentBottom) * .5f));
-                    segment.GetComponent<Image>().raycastTarget = false;
-                }
-            }
-        }
-#endif
 
         void BuildHud(RectTransform root, RectTransform canvasRoot)
         {
@@ -2330,19 +2282,18 @@ namespace Gugarythm
             librarySearchInput = MakeInputField("搜尋", library, Vector2.zero, new Vector2(0, 56));
             var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -204); searchRect.offsetMax = new Vector2(-22, -148);
             librarySearchInput.onValueChanged.AddListener(_ => RefreshLibraryUI());
-            const int libraryHeaderFontSize = 19;
-            const float libraryHeaderCenterY = -287;
-            var listHeading = Label("所有譜面", library, libraryHeaderFontSize); listHeading.alignment = TextAnchor.MiddleLeft; listHeading.rectTransform.sizeDelta = new Vector2(220, 40); PinToAnchor(listHeading.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(34, libraryHeaderCenterY));
-            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleRight; librarySortLabel.rectTransform.sizeDelta = new Vector2(54, 40); PinToAnchor(librarySortLabel.rectTransform, new Vector2(1, 1), new Vector2(1, .5f), new Vector2(-215, libraryHeaderCenterY));
-            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleRight; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(78, 40); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(1, 1), new Vector2(1, .5f), new Vector2(-141, libraryHeaderCenterY));
+            const int libraryHeaderFontSize = 22;
+            const float librarySortCenterY = -250;
+            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46); PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, librarySortCenterY));
+            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, librarySortCenterY));
             MakeInvisibleButton(librarySortModeLabel.rectTransform, CycleLibrarySort);
-            libraryDirectionIcon = Panel("Sort Direction", library, Color.clear, new Vector2(42, 40), Vector2.zero);
+            libraryDirectionIcon = Panel("Sort Direction", library, Color.clear, new Vector2(58, 52), Vector2.zero);
             // Rotate around the icon centre so ascending and descending arrows share the same visual X position.
-            PinToAnchor(libraryDirectionIcon, new Vector2(1, 1), new Vector2(.5f, .5f), new Vector2(-105, libraryHeaderCenterY));
+            PinToAnchor(libraryDirectionIcon, new Vector2(0, 1), new Vector2(.5f, .5f), new Vector2(248, librarySortCenterY));
             AddSortArrowIcon(libraryDirectionIcon);
             MakeInvisibleButton(libraryDirectionIcon, () => { librarySortAscending = !librarySortAscending; RefreshLibraryUI(); });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
-            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-22, -310);
+            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-22, -300);
 
             var importButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
             var importRect = importButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
@@ -3142,7 +3093,7 @@ namespace Gugarythm
         {
             var panel = Panel(text, parent, color, size, position);
             var image = panel.GetComponent<Image>(); image.raycastTarget = true;
-            var label = Label(text, panel, 18); Fill(label.rectTransform);
+            var label = Label(text, panel, 24); Fill(label.rectTransform);
             var button = panel.gameObject.AddComponent<Button>();
             button.targetGraphic = image;
             button.onClick.AddListener(() => action());
@@ -3223,9 +3174,9 @@ namespace Gugarythm
         static void AddSortArrowIcon(RectTransform parent)
         {
             var color = new Color(.10f, .62f, 1f);
-            AddSortArrowPart("Stem", parent, new Vector2(3, 19), new Vector2(0, 4), 0, color);
-            AddSortArrowPart("Left Wing", parent, new Vector2(3, 10), new Vector2(-4, -8), 45, color);
-            AddSortArrowPart("Right Wing", parent, new Vector2(3, 10), new Vector2(4, -8), -45, color);
+            AddSortArrowPart("Stem", parent, new Vector2(4, 24), new Vector2(0, 5), 0, color);
+            AddSortArrowPart("Left Wing", parent, new Vector2(4, 13), new Vector2(-5, -10), 45, color);
+            AddSortArrowPart("Right Wing", parent, new Vector2(4, 13), new Vector2(5, -10), -45, color);
         }
 
         static void AddSortArrowPart(string name, RectTransform parent, Vector2 size, Vector2 position, float rotation, Color color)
@@ -3317,6 +3268,28 @@ namespace Gugarythm
             scroll.inertia = true;
             scroll.decelerationRate = .135f;
             scroll.scrollSensitivity = 28;
+            var track = Panel("Scroll Track", root, new Color(.35f, .35f, .35f, .34f), new Vector2(6, 0), Vector2.zero);
+            track.anchorMin = new Vector2(1, 0); track.anchorMax = new Vector2(1, 1); track.pivot = new Vector2(1, .5f);
+            track.offsetMin = new Vector2(-10, 8); track.offsetMax = new Vector2(-4, -8);
+            var handle = Panel("Scroll Handle", track, new Color(.12f, .62f, 1f, .9f), new Vector2(6, 40), Vector2.zero);
+            handle.anchorMin = new Vector2(0, 1); handle.anchorMax = new Vector2(1, 1); handle.pivot = new Vector2(.5f, 1);
+            handle.offsetMin = new Vector2(0, -40); handle.offsetMax = Vector2.zero;
+            var scrollbar = track.gameObject.AddComponent<Scrollbar>();
+            scrollbar.handleRect = handle;
+            scrollbar.direction = Scrollbar.Direction.BottomToTop;
+            scrollbar.targetGraphic = handle.GetComponent<Image>();
+            scrollbar.colors = new ColorBlock
+            {
+                normalColor = new Color(1f, 1f, 1f, .9f),
+                highlightedColor = Color.white,
+                pressedColor = Color.white,
+                selectedColor = Color.white,
+                disabledColor = new Color(1f, 1f, 1f, .4f),
+                colorMultiplier = 1,
+                fadeDuration = .1f,
+            };
+            scroll.verticalScrollbar = scrollbar;
+            scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.Permanent;
             return content;
         }
 
@@ -3378,7 +3351,7 @@ namespace Gugarythm
             // High-resolution phones can be wider than 1440 px in landscape,
             // so screen width alone must not decide whether mobile text is scaled.
             var mobileScale = Application.isMobilePlatform || (Screen.width > 0 && Screen.width <= 1440) ? 1.18f : 1f;
-            text.text = content; text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); text.fontSize = Mathf.RoundToInt(size * mobileScale); text.fontStyle = FontStyle.Bold; text.alignment = TextAnchor.MiddleCenter; text.color = Color.white;
+            text.text = content; text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); text.fontSize = Mathf.RoundToInt(size * mobileScale); text.fontStyle = FontStyle.Normal; text.alignment = TextAnchor.MiddleCenter; text.color = Color.white;
             // Labels sit above their buttons visually but must not intercept the
             // pointer raycast intended for the clickable parent graphic.
             text.raycastTarget = false;
