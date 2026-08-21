@@ -262,6 +262,7 @@ namespace Gugarythm
         RectTransform chartEditorPanel;
         RectTransform deleteChartConfirmationPanel;
         RectTransform importDecisionPanel;
+        RectTransform detailCoverFallback;
         RectTransform pauseOverlay;
         RectTransform pauseMenuContent;
         RectTransform resultPanel;
@@ -279,7 +280,9 @@ namespace Gugarythm
         Text detailArtistLabel;
         Text detailDifficultyLabel;
         Text detailAccuracyLabel;
-        Text detailCoverTitleLabel;
+        RawImage detailCoverImage;
+        Texture2D detailCoverTexture;
+        string detailCoverEntryId;
         InputField librarySearchInput;
         InputField chartEditorTitleInput;
         InputField chartEditorAuthorInput;
@@ -626,6 +629,7 @@ namespace Gugarythm
             if (EnhancedTouchSupport.enabled) EnhancedTouchSupport.Disable();
             if (laneMaterial != null) Destroy(laneMaterial);
             if (missedHoldMaterial != null) Destroy(missedHoldMaterial);
+            if (detailCoverTexture != null) Destroy(detailCoverTexture);
         }
 
         void Update()
@@ -2507,15 +2511,20 @@ namespace Gugarythm
             // Keep the no-cover fallback visually consistent with the Web archive
             // rather than showing a blank utility tile.
             cover.gameObject.AddComponent<RectMask2D>();
-            var coverMagenta = Panel("Cover Magenta", cover, new Color(.61f, .33f, .45f), new Vector2(760, 250), new Vector2(-112, 205));
+            detailCoverFallback = new GameObject("Cover Fallback", typeof(RectTransform)).GetComponent<RectTransform>();
+            detailCoverFallback.SetParent(cover, false);
+            Fill(detailCoverFallback);
+            var coverMagenta = Panel("Cover Magenta", detailCoverFallback, new Color(.61f, .33f, .45f), new Vector2(760, 250), new Vector2(-112, 205));
             coverMagenta.localRotation = Quaternion.Euler(0, 0, -45);
-            var coverCyan = Panel("Cover Cyan", cover, new Color(.29f, .55f, .68f), new Vector2(760, 320), new Vector2(0, 15));
+            var coverCyan = Panel("Cover Cyan", detailCoverFallback, new Color(.29f, .55f, .68f), new Vector2(760, 320), new Vector2(0, 15));
             coverCyan.localRotation = Quaternion.Euler(0, 0, -45);
-            var coverBlue = Panel("Cover Blue", cover, new Color(.23f, .35f, .77f), new Vector2(760, 245), new Vector2(145, -190));
+            var coverBlue = Panel("Cover Blue", detailCoverFallback, new Color(.23f, .35f, .77f), new Vector2(760, 245), new Vector2(145, -190));
             coverBlue.localRotation = Quaternion.Euler(0, 0, -45);
-            var coverLetter = Label("G", cover, 142); coverLetter.color = new Color(1f, 1f, 1f, .16f); Fill(coverLetter.rectTransform);
-            var coverBrand = Label("GUGARYTHM\nCHART ARCHIVE", cover, 15); coverBrand.alignment = TextAnchor.UpperRight; coverBrand.rectTransform.sizeDelta = new Vector2(210, 70); coverBrand.rectTransform.anchoredPosition = new Vector2(112, 185);
-            detailCoverTitleLabel = Label("選擇一份譜面", cover, 56); detailCoverTitleLabel.alignment = TextAnchor.LowerLeft; detailCoverTitleLabel.rectTransform.sizeDelta = new Vector2(430, 190); detailCoverTitleLabel.rectTransform.anchoredPosition = new Vector2(-18, -128);
+            var coverLetter = Label("G", detailCoverFallback, 142); coverLetter.color = new Color(1f, 1f, 1f, .16f); Fill(coverLetter.rectTransform);
+            var coverBrand = Label("GUGARYTHM\nCHART ARCHIVE", detailCoverFallback, 15); coverBrand.alignment = TextAnchor.UpperRight; coverBrand.rectTransform.sizeDelta = new Vector2(210, 70); coverBrand.rectTransform.anchoredPosition = new Vector2(112, 185);
+            detailCoverImage = RawPanel("Cover Artwork", cover, null, Color.white, Vector2.zero, Vector2.zero, true).GetComponent<RawImage>();
+            var coverAspect = detailCoverImage.gameObject.AddComponent<AspectRatioFitter>();
+            coverAspect.aspectMode = CoverPresentationAspectMode();
             var detailKicker = Label("CHART DETAIL", detail, 18); detailKicker.color = new Color(.64f, .64f, .64f); detailKicker.alignment = TextAnchor.MiddleLeft; detailKicker.rectTransform.sizeDelta = new Vector2(320, 34); PinToAnchor(detailKicker.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 305));
             detailTitleLabel = Label("選擇一份譜面", detail, 58); detailTitleLabel.alignment = TextAnchor.MiddleLeft; detailTitleLabel.rectTransform.sizeDelta = new Vector2(620, 92); PinToAnchor(detailTitleLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 183.5f));
             detailArtistLabel = Label("", detail, 25); detailArtistLabel.color = new Color(.68f, .68f, .68f); detailArtistLabel.alignment = TextAnchor.MiddleLeft; detailArtistLabel.rectTransform.sizeDelta = new Vector2(620, 48); PinToAnchor(detailArtistLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 113.5f));
@@ -2868,6 +2877,14 @@ namespace Gugarythm
             var restoreLibraryScrollPosition = libraryScrollPositionInitialized && libraryScroll != null;
             var preservedLibraryScrollPosition = restoreLibraryScrollPosition ? libraryScroll.verticalNormalizedPosition : 1f;
             var entries = LocalChartLibrary.Load();
+            var previousSelectionId = selectedLibraryEntry?.Id;
+            selectedLibraryEntry = LibrarySelectionReconciler.Select(entries, selectedLibraryEntry);
+            if (selectedLibraryEntry != null)
+                currentLibraryEntry = selectedLibraryEntry;
+            if (selectedLibraryEntry == null || selectedLibraryEntry.Id != previousSelectionId)
+            {
+                selectedDifficultyName = selectedLibraryEntry?.DifficultyName ?? string.Empty;
+            }
             var groups = ChartLibraryGrouping.Group(entries);
             var filter = librarySearchInput == null ? string.Empty : librarySearchInput.text.Trim();
             if (!string.IsNullOrEmpty(filter))
@@ -2876,12 +2893,12 @@ namespace Gugarythm
                     group.Difficulties.Any(entry => ContainsIgnoreCase(entry.Author, filter))).ToList();
             }
 
-            if (selectedLibraryEntry != null)
+            if (selectedLibraryEntry == null && groups.Count > 0)
             {
-                var refreshed = entries.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id);
-                if (refreshed != null) selectedLibraryEntry = refreshed;
+                selectedLibraryEntry = groups[0].Difficulties[0];
+                currentLibraryEntry = selectedLibraryEntry;
+                selectedDifficultyName = selectedLibraryEntry.DifficultyName ?? string.Empty;
             }
-            if (selectedLibraryEntry == null && groups.Count > 0) SelectLibraryEntry(groups[0].Difficulties[0], false);
             if (selectedLibraryEntry != null && string.IsNullOrWhiteSpace(selectedDifficultyName)) selectedDifficultyName = selectedLibraryEntry.DifficultyName ?? string.Empty;
 
             groups = ChartLibraryGrouping.Sort(groups, librarySort, librarySortAscending, selectedDifficultyName).ToList();
@@ -2902,6 +2919,8 @@ namespace Gugarythm
                 Canvas.ForceUpdateCanvases();
                 libraryScroll.verticalNormalizedPosition = preservedLibraryScrollPosition;
             }
+            Canvas.ForceUpdateCanvases();
+            LayoutRebuilder.ForceRebuildLayoutImmediate(libraryListContent);
             libraryScrollPositionInitialized = true;
         }
 
@@ -2979,16 +2998,16 @@ namespace Gugarythm
             {
                 detailTitleLabel.text = "選擇一份譜面";
                 detailArtistLabel.text = string.Empty;
-                detailCoverTitleLabel.text = "選擇一份\n譜面";
                 detailDifficultyLabel.text = "選擇難度";
                 detailAccuracyLabel.text = "BEST ACCURACY\n<size=52>—</size>";
+                RefreshDetailCover(null);
                 return;
             }
             detailTitleLabel.text = group.Title;
             detailArtistLabel.text = group.Artist;
-            detailCoverTitleLabel.text = group.Title.Replace(" ", "\n");
             detailDifficultyLabel.text = "選擇難度";
             var current = group.Difficulties.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id) ?? group.Difficulties[0];
+            RefreshDetailCover(current);
             difficultyButtonContent.sizeDelta = new Vector2(Mathf.Max(450f, group.Difficulties.Count * DifficultyButtonSpacing), 76f);
             for (var index = 0; index < group.Difficulties.Count; index++)
             {
@@ -3006,6 +3025,44 @@ namespace Gugarythm
             }
             detailAccuracyLabel.text = current.BestAccuracy < 0 ? "BEST ACCURACY\n<size=52>—</size>" : $"BEST ACCURACY\n<size=52>{current.BestAccuracy:F2}%</size>";
         }
+
+        void RefreshDetailCover(LocalChartEntry entry)
+        {
+            if (detailCoverImage == null || detailCoverFallback == null) return;
+            if (entry == null)
+            {
+                detailCoverEntryId = null;
+                if (detailCoverTexture != null) Destroy(detailCoverTexture);
+                detailCoverTexture = null;
+            }
+            else if (detailCoverEntryId != entry.Id)
+            {
+                detailCoverEntryId = entry.Id;
+                if (detailCoverTexture != null) Destroy(detailCoverTexture);
+                detailCoverTexture = LoadDetailCover(entry);
+            }
+
+            var hasCover = detailCoverTexture != null;
+            detailCoverImage.texture = detailCoverTexture;
+            detailCoverImage.uvRect = new Rect(0, 0, 1, 1);
+            detailCoverImage.gameObject.SetActive(hasCover);
+            detailCoverFallback.gameObject.SetActive(!hasCover);
+            if (hasCover && detailCoverImage.TryGetComponent<AspectRatioFitter>(out var aspect))
+                aspect.aspectRatio = Mathf.Max(.01f, (float)detailCoverTexture.width / detailCoverTexture.height);
+        }
+
+        static Texture2D LoadDetailCover(LocalChartEntry entry)
+        {
+            if (entry == null || !LocalChartLibrary.TryReadSource(entry, out var bytes)) return null;
+            try
+            {
+                var package = GgrPackageReader.Read(bytes);
+                return GgrChartImporter.DecodeCoverTexture(package.CoverBytes, false);
+            }
+            catch (Exception) { return null; }
+        }
+
+        static AspectRatioFitter.AspectMode CoverPresentationAspectMode() => AspectRatioFitter.AspectMode.EnvelopeParent;
 
         static bool ContainsIgnoreCase(string value, string part) => (value ?? string.Empty).IndexOf(part ?? string.Empty, StringComparison.OrdinalIgnoreCase) >= 0;
 
@@ -3191,9 +3248,22 @@ namespace Gugarythm
         void PollNativeImport()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            var path = NativeChartPicker.ConsumeResult();
-            if (!string.IsNullOrEmpty(path) && !loading) StartCoroutine(ImportPath(path));
+            if (loading) return;
+            var result = NativeChartPicker.ConsumeResult();
+            if (!string.IsNullOrEmpty(result)) StartCoroutine(ImportPaths(NativeChartPicker.SplitResultPaths(result)));
 #endif
+        }
+
+        IEnumerator ImportPaths(IReadOnlyList<string> paths)
+        {
+            if (paths == null || paths.Count == 0) yield break;
+            for (var index = 0; index < paths.Count; index++)
+            {
+                yield return ImportPath(paths[index]);
+                if (importDecisionPanel != null && importDecisionPanel.gameObject.activeSelf)
+                    yield return new WaitUntil(() => importDecisionPanel == null || !importDecisionPanel.gameObject.activeSelf);
+            }
+            SetStatus($"批量匯入完成：{paths.Count} 份");
         }
 
         void SaveToLocalLibrary(string fileName, byte[] bytes, RuntimeChart importedChart, string groupId)
