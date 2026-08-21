@@ -72,6 +72,16 @@ namespace Gugarythm
             for (var i = 0; i < unique.Count; i++) points.Add(new Point(unique[i].time, unique[i].scale, positions[i]));
         }
 
+        public void ShiftTime(double timeDelta)
+        {
+            if (!double.IsFinite(timeDelta) || Math.Abs(timeDelta) < 1e-12) return;
+            for (var index = 0; index < points.Count; index++)
+            {
+                var point = points[index];
+                points[index] = new Point(point.Time + timeDelta, point.Scale, point.Position);
+            }
+        }
+
         public double PositionAt(double time)
         {
             var point = points[0];
@@ -144,6 +154,7 @@ namespace Gugarythm
         public string DifficultyLevel = "";
         public string Engine = "";
         public double BgmOffset;
+        public double BgmStartDelaySeconds;
         public byte[] BgmBytes;
         public string BgmExtension = ".mp3";
         public string ReferencedBgm;
@@ -159,6 +170,36 @@ namespace Gugarythm
         public readonly Dictionary<string, RuntimeTimeScaleGroup> TimeScaleGroups = new(StringComparer.Ordinal);
         public string DefaultTimeScaleGroup;
         public readonly List<string> Warnings = new();
+
+        public void ShiftTiming(double beatDelta, double timeDelta)
+        {
+            if (!double.IsFinite(beatDelta) || !double.IsFinite(timeDelta)) return;
+            var shiftedNotes = new HashSet<RuntimeNote>();
+            foreach (var note in Notes) shiftedNotes.Add(note);
+            foreach (var connector in Connectors)
+            {
+                if (connector.Start != null) shiftedNotes.Add(connector.Start);
+                if (connector.End != null) shiftedNotes.Add(connector.End);
+            }
+            foreach (var note in shiftedNotes)
+            {
+                note.Beat += beatDelta;
+                note.Time += timeDelta;
+            }
+            foreach (var guide in Guides)
+            {
+                guide.Start.Beat += beatDelta;
+                guide.Start.Time += timeDelta;
+                guide.Head.Beat += beatDelta;
+                guide.Head.Time += timeDelta;
+                guide.Tail.Beat += beatDelta;
+                guide.Tail.Time += timeDelta;
+                guide.End.Beat += beatDelta;
+                guide.End.Time += timeDelta;
+            }
+            foreach (var group in TimeScaleGroups.Values) group.ShiftTime(timeDelta);
+            BgmStartDelaySeconds += timeDelta;
+        }
 
         public int PlayableCount
         {
