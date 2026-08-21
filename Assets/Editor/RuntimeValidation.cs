@@ -24,12 +24,15 @@ public static class RuntimeValidation
     public static void ValidateRuntime()
     {
         ValidateGgrPackageReader();
-        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationSeconds - 2f) < .0001f,
-            "Notes must use a fixed two-second approach duration");
+        ValidateScrollSpeedMath();
         ValidateUscLeadingMeasurePadding();
         ValidateInitialWaterfallTiming();
         ValidateGgrUscHoldRoots();
         ValidateAttachedGgrPlayableCount();
+        ValidateLibrarySelectionRestore();
+        ValidateStartupSplashConfiguration();
+        ValidateStartupBuildSceneOrder();
+        ValidateBundledChartManifest();
         ValidateUscSlideRoleClassification();
         ValidateUscSlideMidpointRoles();
         ValidateHeadlessCriticalSlideStart();
@@ -161,6 +164,50 @@ public static class RuntimeValidation
             "The library selection frame must render all four sides as one mask-safe graphic");
     }
 
+    static void ValidateStartupSplashConfiguration()
+    {
+        var startupType = typeof(SonolusLandscapePrototype).Assembly.GetType("Gugarythm.GugarythmStartupSplash");
+        Require(startupType != null, "The startup splash controller must exist");
+        var durationField = startupType.GetField("DefaultDisplaySeconds",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(durationField != null, "The startup splash duration must be exposed for validation");
+        Require(Math.Abs((float)durationField.GetRawConstantValue() - 1.5f) < .0001f,
+            "The GUGARYTHM startup page must remain visible for 1.5 seconds");
+        Debug.Log("GUGARYTHM_STARTUP_SPLASH_VALIDATION_OK duration=1.5");
+    }
+
+    static void ValidateStartupBuildSceneOrder()
+    {
+        var method = typeof(CreatePrototypeScene).GetMethod("PlayerBuildScenePaths",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(method != null, "Android builds must expose their ordered player scene paths");
+        var scenes = (string[])method.Invoke(null, null);
+        Require(scenes.Length == 5 && scenes[0] == "Assets/Scenes/StartupScene.unity",
+            "Android builds must start with StartupScene before the library scene");
+        Debug.Log("GUGARYTHM_STARTUP_BUILD_SCENE_VALIDATION_OK first=StartupScene");
+    }
+
+    static void ValidateBundledChartManifest()
+    {
+        var manifestPath = Path.Combine(Application.dataPath, "StreamingAssets/BundledCharts/bundled-ggr.txt");
+        Require(File.Exists(manifestPath), "Bundled GGR manifest is missing");
+        var names = File.ReadAllLines(manifestPath)
+            .Select(line => line.Trim())
+            .Where(line => line.Length > 0 && !line.StartsWith("#", StringComparison.Ordinal))
+            .ToArray();
+        Require(names.Length == 14, $"Expected 14 bundled GGR charts, got {names.Length}");
+        Require(names.Distinct(StringComparer.OrdinalIgnoreCase).Count() == names.Length,
+            "Bundled GGR manifest must not contain duplicate files");
+        foreach (var name in names)
+        {
+            Require(name.EndsWith(".ggr", StringComparison.OrdinalIgnoreCase),
+                "Bundled chart manifest entries must use the GGR extension");
+            Require(File.Exists(Path.Combine(Application.dataPath, "StreamingAssets/BundledCharts", name)),
+                "Bundled GGR file is missing: " + name);
+        }
+        Debug.Log("GUGARYTHM_BUNDLED_CHARTS_VALIDATION_OK count=" + names.Length);
+    }
+
     static void ValidateLatencyCalibrationMath()
     {
         var samples = new[] { .010d, .020d, .030d, .040d };
@@ -279,6 +326,31 @@ public static class RuntimeValidation
         Require(Math.Abs(SonolusLandscapePrototype.DifficultyButtonWidthForText("未標示難度") - 170f) < .0001,
             "The unmarked difficulty button must reserve enough width for mobile text");
         Debug.Log("GUGARYTHM_WATERFALL_VALIDATION_OK");
+    }
+
+    static void ValidateScrollSpeedMath()
+    {
+        Require(Math.Abs(SonolusLandscapePrototype.DefaultScrollSpeed - 4f) < .0001f,
+            "The default scroll speed must be 4");
+        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(4f) - 2f) < .0001f,
+            "Scroll speed 4 must preserve the current two-second approach duration");
+        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(8f) - 1f) < .0001f,
+            "Doubling scroll speed must halve the approach duration");
+        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(2f) - 4f) < .0001f,
+            "Halving scroll speed must double the approach duration");
+        Debug.Log("GUGARYTHM_SCROLL_SPEED_VALIDATION_OK");
+    }
+
+    static void ValidateLibrarySelectionRestore()
+    {
+        var method = typeof(SonolusLandscapePrototype).GetMethod(
+            "ShouldEnableLibraryStartButton", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(method != null, "Library selection restore must expose its start-button state rule");
+        Require((bool)method.Invoke(null, new object[] { true }),
+            "A restored library selection must enable the start button");
+        Require(!(bool)method.Invoke(null, new object[] { false }),
+            "The start button must remain disabled without a restored selection");
+        Debug.Log("GUGARYTHM_LIBRARY_SELECTION_RESTORE_VALIDATION_OK");
     }
 
     static void ValidateGgrPackageReader()

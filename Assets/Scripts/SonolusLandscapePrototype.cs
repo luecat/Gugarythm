@@ -127,6 +127,7 @@ namespace Gugarythm
         // reaches the visible lane boundary at ±6.5.
         const float VisibleTrackLaneEdge = CentralHalfLanes + .5f;
         const float PerspectiveDepthRatio = 3.2f;
+        public const float DefaultScrollSpeed = 4f;
         public const float NoteApproachDurationSeconds = 2f;
         const float InitialOffscreenLeadSeconds = .25f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
@@ -355,7 +356,7 @@ namespace Gugarythm
         bool calibrationActive;
         int calibrationRoundIndex;
         bool calibrationFourthBeatTapRegistered;
-        float scrollSpeed = 8f;
+        float scrollSpeed = DefaultScrollSpeed;
         float judgmentHideAt = -1f;
 
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
@@ -412,10 +413,15 @@ namespace Gugarythm
         // gameplay connectors leave only after reaching its lower edge.
         static float JudgmentBottomApproach => 1f + (JudgmentStripSourceHeight * .5f / HitSourceY) / PerspectiveDepthRatio;
 
-        // Every note starts from the same far plane exactly two seconds before
-        // its judgment time, so a chart's first note cannot appear abruptly
-        // just because the viewport or scroll setting changes.
-        float ApproachDuration => NoteApproachDurationSeconds;
+        // Scroll speed 4 preserves the original two-second approach. Higher
+        // values cover the same visual distance in less chart time.
+        float ApproachDuration => NoteApproachDurationForScrollSpeed(scrollSpeed);
+
+        public static float NoteApproachDurationForScrollSpeed(float value)
+        {
+            value = Mathf.Clamp(value, 1f, 20f);
+            return NoteApproachDurationSeconds * DefaultScrollSpeed / value;
+        }
 
         static double FirstWaterfallVisualTime(RuntimeChart runtimeChart)
         {
@@ -440,6 +446,9 @@ namespace Gugarythm
             string.Equals(text, "未標示難度", StringComparison.Ordinal) ? 170f : 136f;
 
         static double FirstWaterfallSongTime(RuntimeChart runtimeChart)
+            => FirstWaterfallSongTimeForApproachDuration(runtimeChart, NoteApproachDurationSeconds);
+
+        static double FirstWaterfallSongTimeForApproachDuration(RuntimeChart runtimeChart, double approachDuration)
         {
             if (runtimeChart == null) return 0;
             var firstTime = double.PositiveInfinity;
@@ -447,7 +456,7 @@ namespace Gugarythm
             {
                 if (note == null || !note.Visible) return;
                 var firstVisual = runtimeChart.VisualPosition(note.Time, note.TimeScaleGroup);
-                var targetVisual = firstVisual - NoteApproachDurationSeconds - InitialOffscreenLeadSeconds;
+                var targetVisual = firstVisual - approachDuration - InitialOffscreenLeadSeconds;
                 firstTime = Math.Min(firstTime, runtimeChart.TimeAtVisualPosition(targetVisual, note.TimeScaleGroup));
             };
             foreach (var note in runtimeChart.Notes) Add(note);
@@ -478,7 +487,7 @@ namespace Gugarythm
             Application.targetFrameRate = 120;
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
-            scrollSpeed = PlayerPrefs.GetFloat("gugarythm-scroll-speed", 8f);
+            scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
             var storedAudioOffset = PlayerPrefs.GetFloat("gugarythm-audio-offset-seconds", 0f);
             audioOffsetSeconds = SanitizeAudioOffset(storedAudioOffset);
             settingsDelayOffsetSeconds = SettingsDelayAdjustment.Clamp(PlayerPrefs.GetFloat("gugarythm-settings-delay-offset-seconds", (float)audioOffsetSeconds));
@@ -509,8 +518,9 @@ namespace Gugarythm
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(true);
                 settingsPanel.gameObject.SetActive(false);
-                RestoreLibrarySelection();
+                var restoredSelection = RestoreLibrarySelection();
                 RefreshLibraryUI();
+                startButton.interactable = ShouldEnableLibraryStartButton(restoredSelection);
                 yield break;
             }
 
@@ -568,15 +578,18 @@ namespace Gugarythm
             if (gameplayLoadingOverlay != null) gameplayLoadingOverlay.gameObject.SetActive(visible);
         }
 
-        void RestoreLibrarySelection()
+        bool RestoreLibrarySelection()
         {
-            if (!ChartSelectionSession.Ensure().TryGetSelection(out var remembered, out _)) return;
+            if (!ChartSelectionSession.Ensure().TryGetSelection(out var remembered, out _)) return false;
             var entry = LocalChartLibrary.Load().FirstOrDefault(candidate => candidate.Id == remembered.Id);
-            if (entry == null) return;
+            if (entry == null) return false;
             selectedLibraryEntry = entry;
             currentLibraryEntry = entry;
             selectedDifficultyName = entry.DifficultyName ?? string.Empty;
+            return true;
         }
+
+        static bool ShouldEnableLibraryStartButton(bool hasRestoredSelection) => hasRestoredSelection;
 
         IEnumerator LoadGameplaySelection(LocalChartEntry entry, byte[] bytes)
         {
@@ -1086,7 +1099,7 @@ namespace Gugarythm
             effects.UnPause();
             holdEffects.UnPause();
             var playbackReadyDsp = AudioSettings.dspTime + .25d;
-            var firstWaterfallSongTime = FirstWaterfallSongTime(chart);
+            var firstWaterfallSongTime = FirstWaterfallSongTimeForApproachDuration(chart, ApproachDuration);
             var earliestAudioSafeStart = -chart.BgmOffset + audioOffsetSeconds;
             var initialSongTime = Math.Min(0d, Math.Min(firstWaterfallSongTime, earliestAudioSafeStart));
             scheduledDsp = playbackReadyDsp - chart.BgmOffset - initialSongTime;
@@ -3012,7 +3025,7 @@ namespace Gugarythm
             for (var index = 0; index < group.Difficulties.Count; index++)
             {
                 var entry = group.Difficulties[index];
-                var text = DisplayDifficulty(entry);
+                var text = DifficultyNameOnly(entry);
                 var active = entry.Id == current.Id;
                 var button = MakeFlatButton(text, difficultyButtonContent, new Vector2(index * DifficultyButtonSpacing, 0),
                     () => SelectLibraryEntry(entry, true), new Vector2(DifficultyButtonWidthForText(text), 52), active ? new Color(.10f, .20f, .29f) : new Color(.15f, .15f, .15f));
@@ -3113,6 +3126,9 @@ namespace Gugarythm
             string.IsNullOrWhiteSpace(entry.DifficultyName) ? "未標示難度" :
             string.IsNullOrWhiteSpace(entry.DifficultyLevel) ? entry.DifficultyName :
             entry.DifficultyName + " " + entry.DifficultyLevel;
+
+        static string DifficultyNameOnly(LocalChartEntry entry) =>
+            string.IsNullOrWhiteSpace(entry.DifficultyName) ? "未標示難度" : entry.DifficultyName;
 
         void CommitPendingImport(bool merge)
         {
