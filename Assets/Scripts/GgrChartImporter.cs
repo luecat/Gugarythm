@@ -63,8 +63,8 @@ namespace Gugarythm
                     chart.Warnings.Add(MissingCoverWarning);
                 else if (package.CoverBytes != null)
                 {
-                    var texture = new Texture2D(2, 2);
-                    if (ImageConversion.LoadImage(texture, package.CoverBytes, true)) chart.CoverBytes = package.CoverBytes;
+                    var texture = DecodeCoverTexture(package.CoverBytes, true);
+                    if (texture != null) chart.CoverBytes = package.CoverBytes;
                     else chart.Warnings.Add(InvalidCoverWarning);
                     UnityEngine.Object.Destroy(texture);
                 }
@@ -72,6 +72,15 @@ namespace Gugarythm
             }
             catch (GgrPackageException exception) { return ImportResult.Fail(exception.Message); }
             catch (Exception) { return ImportResult.Fail(Unsupported); }
+        }
+
+        internal static Texture2D DecodeCoverTexture(byte[] bytes, bool markNonReadable)
+        {
+            if (bytes == null || bytes.Length == 0) return null;
+            var texture = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+            if (ImageConversion.LoadImage(texture, bytes, markNonReadable)) return texture;
+            UnityEngine.Object.Destroy(texture);
+            return null;
         }
 
         static JObject ParseManifest(byte[] bytes)

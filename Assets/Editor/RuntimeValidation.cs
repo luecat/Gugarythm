@@ -36,6 +36,8 @@ public static class RuntimeValidation
         ValidateNoteRenderWidths();
         ValidateNoteRenderVisibilityWindow();
         ValidateLibrarySelectionFrameGeometry();
+        ValidateLibraryDataRefreshContracts();
+        ValidateCoverPresentationContracts();
         ValidateNoteSurfaceProjection();
         ValidateHeadlessHoldRendering();
         ValidatePersistentHoldVisualRouting();
@@ -168,6 +170,63 @@ public static class RuntimeValidation
             "Calibration must reject a round containing an invalid tap");
         Require(!LatencyCalibrationMath.TryGetCalibrationAverage(new[] { .010d, .020d, .030d }, out _),
             "Calibration must reject an incomplete set of rounds");
+    }
+
+    static void ValidateLibraryDataRefreshContracts()
+    {
+        var entryType = typeof(LocalChartEntry).Assembly.GetType("Gugarythm.LibrarySelectionReconciler");
+        var selectMethod = entryType?.GetMethod("Select", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(selectMethod != null, "Library refresh must expose a selection reconciliation rule");
+
+        var entries = new[]
+        {
+            new LocalChartEntry { Id = "first" },
+            new LocalChartEntry { Id = "second" },
+        };
+        var refreshed = (LocalChartEntry)selectMethod.Invoke(null, new object[] { entries, entries[1] });
+        Require(ReferenceEquals(refreshed, entries[1]),
+            "Library refresh must preserve a selected entry that still exists");
+        var fallback = (LocalChartEntry)selectMethod.Invoke(null, new object[] { entries, new LocalChartEntry { Id = "deleted" } });
+        Require(ReferenceEquals(fallback, entries[0]),
+            "Library refresh must select the first remaining entry after deletion");
+
+        var canonicalizeMethod = typeof(LocalChartLibrary).GetMethod("CanonicalizeDifficultyTags",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(canonicalizeMethod != null, "Difficulty tags must expose a canonical merge rule");
+        var canonical = (IReadOnlyList<string>)canonicalizeMethod.Invoke(null, new object[] {
+            new[] { " APPEND ", "append", "Append", "EXPERT", "" }
+        });
+        Require(canonical.SequenceEqual(new[] { "APPEND", "EXPERT" }),
+            "Difficulty tags with the same normalized name must merge automatically");
+
+        var splitMethod = typeof(NativeChartPicker).GetMethod("SplitResultPaths",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(splitMethod != null, "Native picker must expose a batch result parser");
+        var paths = (string[])splitMethod.Invoke(null, new object[] { "/cache/a.ggr\n/cache/b.ggr\n" });
+        Require(paths.SequenceEqual(new[] { "/cache/a.ggr", "/cache/b.ggr" }),
+            "Native picker must preserve every selected file path");
+    }
+
+    static void ValidateCoverPresentationContracts()
+    {
+        var source = new Texture2D(2, 2, TextureFormat.RGBA32, false);
+        source.SetPixels(new[] { Color.red, Color.green, Color.blue, Color.white });
+        source.Apply();
+        var jpg = source.EncodeToJPG(90);
+        UnityEngine.Object.DestroyImmediate(source);
+
+        var decodeMethod = typeof(GgrChartImporter).GetMethod("DecodeCoverTexture",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(decodeMethod != null, "GGR cover bytes must expose a display decoder");
+        var decoded = (Texture2D)decodeMethod.Invoke(null, new object[] { jpg, false });
+        Require(decoded != null && decoded.width == 2 && decoded.height == 2,
+            "A valid GGR JPEG cover must decode into a display texture");
+        UnityEngine.Object.DestroyImmediate(decoded);
+
+        var aspectMethod = typeof(SonolusLandscapePrototype).GetMethod("CoverPresentationAspectMode",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(aspectMethod != null && string.Equals(aspectMethod.Invoke(null, null)?.ToString(), "EnvelopeParent", StringComparison.Ordinal),
+            "Cover artwork must crop into a unified square presentation");
     }
 
     static void ValidateUscLeadingMeasurePadding()

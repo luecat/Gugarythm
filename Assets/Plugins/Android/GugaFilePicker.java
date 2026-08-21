@@ -12,6 +12,8 @@ import android.database.Cursor;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.InputStream;
+import java.util.ArrayList;
+import java.util.List;
 
 public final class GugaFilePicker {
     static final int REQUEST_FILE = 6194;
@@ -42,25 +44,55 @@ public final class GugaFilePicker {
 
     public static boolean handleActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
         if (requestCode != REQUEST_FILE && requestCode != REQUEST_FOLDER) return false;
-        if (resultCode != Activity.RESULT_OK || data == null || data.getData() == null) return true;
-        Uri uri = data.getData();
+        if (resultCode != Activity.RESULT_OK || data == null) return true;
         try {
             File root = new File(activity.getCacheDir(), "GugarythmImports");
             if (!root.exists() && !root.mkdirs()) throw new IllegalStateException("Cannot create import cache");
-            File target;
+            List<String> results = new ArrayList<>();
             if (requestCode == REQUEST_FOLDER) {
+                if (data.getData() == null) return true;
+                Uri uri = data.getData();
+                File target;
                 target = new File(root, "folder-" + System.currentTimeMillis());
                 if (!target.mkdirs()) throw new IllegalStateException("Cannot create folder import cache");
                 copyTree(activity, uri, DocumentsContract.getTreeDocumentId(uri), target, new long[] { 0 }, new int[] { 0 });
+                results.add(target.getAbsolutePath());
             } else {
-                target = new File(root, sanitize(displayName(activity, uri)));
-                copyFile(activity, uri, target, new long[] { 0 });
+                List<Uri> uris = selectedUris(data);
+                if (uris.isEmpty()) return true;
+                long[] total = new long[] { 0 };
+                for (int index = 0; index < uris.size(); index++) {
+                    Uri uri = uris.get(index);
+                    File target = new File(root, System.currentTimeMillis() + "-" + index + "-" + sanitize(displayName(activity, uri)));
+                    copyFile(activity, uri, target, total);
+                    results.add(target.getAbsolutePath());
+                }
             }
-            activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(RESULT, target.getAbsolutePath()).apply();
+            activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(RESULT, joinResults(results)).apply();
         } catch (Exception exception) {
             activity.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString(RESULT, "ERROR:" + exception.getMessage()).apply();
         }
         return true;
+    }
+
+    private static List<Uri> selectedUris(Intent data) {
+        List<Uri> uris = new ArrayList<>();
+        if (data.getClipData() != null) {
+            for (int index = 0; index < data.getClipData().getItemCount(); index++)
+                uris.add(data.getClipData().getItemAt(index).getUri());
+        } else if (data.getData() != null) {
+            uris.add(data.getData());
+        }
+        return uris;
+    }
+
+    private static String joinResults(List<String> results) {
+        StringBuilder joined = new StringBuilder();
+        for (String result : results) {
+            if (joined.length() > 0) joined.append('\n');
+            joined.append(result);
+        }
+        return joined.toString();
     }
 
     private static void copyTree(Context context, Uri treeUri, String documentId, File target, long[] total, int[] count) throws Exception {

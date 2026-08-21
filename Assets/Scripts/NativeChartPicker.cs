@@ -1,4 +1,6 @@
 using UnityEngine;
+using System;
+using System.Linq;
 
 namespace Gugarythm
 {
@@ -41,5 +43,9 @@ namespace Gugarythm
             return null;
 #endif
         }
+
+        internal static string[] SplitResultPaths(string value) =>
+            (value ?? string.Empty).Split(new[] { '\n' }, StringSplitOptions.RemoveEmptyEntries)
+                .Select(path => path.Trim()).Where(path => path.Length > 0).ToArray();
     }
 }

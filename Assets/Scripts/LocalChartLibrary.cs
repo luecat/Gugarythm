@@ -26,6 +26,16 @@ namespace Gugarythm
         public long ImportedAtUnixMilliseconds;
     }
 
+    public static class LibrarySelectionReconciler
+    {
+        public static LocalChartEntry Select(IReadOnlyList<LocalChartEntry> entries, LocalChartEntry selected)
+        {
+            if (entries == null || entries.Count == 0 || selected == null) return null;
+            var refreshed = entries.FirstOrDefault(entry => entry != null && entry.Id == selected.Id);
+            return refreshed ?? entries.FirstOrDefault(entry => entry != null);
+        }
+    }
+
     public static class LocalChartLibrary
     {
         const string ManifestFile = "library.json";
@@ -38,11 +48,26 @@ namespace Gugarythm
         public static IReadOnlyList<string> LoadDifficultyTags()
         {
             var tags = ReadDifficultyTags();
-            var imported = Load().Select(entry => NormalizeTag(entry.DifficultyName)).Where(tag => tag != "未標示");
-            foreach (var tag in imported)
-                if (!tags.Contains(tag, StringComparer.OrdinalIgnoreCase)) tags.Add(tag);
-            SaveDifficultyTags(tags);
-            return tags;
+            var entries = Load().ToList();
+            var imported = entries.Select(entry => NormalizeTag(entry.DifficultyName)).Where(tag => tag != "未標示");
+            var canonical = CanonicalizeDifficultyTags(tags.Concat(imported));
+            var entriesChanged = false;
+            foreach (var entry in entries)
+            {
+                var normalized = NormalizeTag(entry.DifficultyName);
+                if (normalized == "未標示") continue;
+                var canonicalTag = canonical.FirstOrDefault(tag => string.Equals(tag, normalized, StringComparison.OrdinalIgnoreCase));
+                if (canonicalTag == null || entry.DifficultyName == canonicalTag) continue;
+                entry.DifficultyName = canonicalTag;
+                entriesChanged = true;
+            }
+            if (!tags.SequenceEqual(canonical, StringComparer.Ordinal)) SaveDifficultyTags(canonical);
+            if (entriesChanged)
+            {
+                Directory.CreateDirectory(Root);
+                File.WriteAllText(ManifestPath, JsonConvert.SerializeObject(entries, Formatting.Indented));
+            }
+            return canonical;
         }
 
         public static bool TryCreateDifficultyTag(string value, out string error)
@@ -72,14 +97,33 @@ namespace Gugarythm
 
         static List<string> ReadDifficultyTags()
         {
-            try { return File.Exists(DifficultyTagsPath) ? JsonConvert.DeserializeObject<List<string>>(File.ReadAllText(DifficultyTagsPath)) ?? new List<string>() : new List<string>(); }
+            try
+            {
+                var tags = File.Exists(DifficultyTagsPath)
+                    ? JsonConvert.DeserializeObject<List<string>>(File.ReadAllText(DifficultyTagsPath))
+                    : null;
+                return CanonicalizeDifficultyTags(tags ?? new List<string>());
+            }
             catch { return new List<string>(); }
         }
 
         static void SaveDifficultyTags(IEnumerable<string> tags)
         {
             Directory.CreateDirectory(Root);
-            File.WriteAllText(DifficultyTagsPath, JsonConvert.SerializeObject(tags.Select(NormalizeTag).Where(tag => tag != "未標示").Distinct(StringComparer.OrdinalIgnoreCase).ToList(), Formatting.Indented));
+            File.WriteAllText(DifficultyTagsPath, JsonConvert.SerializeObject(CanonicalizeDifficultyTags(tags), Formatting.Indented));
+        }
+
+        static List<string> CanonicalizeDifficultyTags(IEnumerable<string> tags)
+        {
+            var result = new List<string>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var value in tags ?? Enumerable.Empty<string>())
+            {
+                var tag = NormalizeTag(value);
+                if (tag == "未標示" || !seen.Add(tag)) continue;
+                result.Add(tag);
+            }
+            return result;
         }
 
         static string NormalizeTag(string value) => string.IsNullOrWhiteSpace(value) ? "未標示" : value.Trim();
