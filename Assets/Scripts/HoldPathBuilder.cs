@@ -132,8 +132,24 @@ namespace Gugarythm
 
             var rootIndex = head.HoldRootIndex >= 0 ? head.HoldRootIndex : head.Index;
             foreach (var node in orderedNodes) node.HoldRootIndex = rootIndex;
+            var semanticNodes = new List<RuntimeNote>(orderedNodes);
+            var semanticNodeSet = new HashSet<RuntimeNote>(orderedNodes);
+            foreach (var note in chart.Notes)
+            {
+                if (note.HoldCheckpointSource == HoldCheckpointSource.Auto || note.HoldRootIndex != rootIndex ||
+                    !semanticNodeSet.Add(note)) continue;
+                semanticNodes.Add(note);
+            }
+            semanticNodes.Sort((left, right) =>
+            {
+                var beat = left.Beat.CompareTo(right.Beat);
+                return beat != 0 ? beat : left.Index.CompareTo(right.Index);
+            });
             var runs = BuildRenderRuns(orderedSegments);
-            path = new RuntimeHoldPath(rootIndex, orderedNodes, orderedSegments, runs);
+            var preserveLegacyPlayableRange = semanticNodes.TrueForAll(node =>
+                node.SlideNodeRole == SlideNodeRole.Unspecified && node.SlideJudgeMode == SlideJudgeMode.Unspecified);
+            path = new RuntimeHoldPath(rootIndex, orderedNodes, semanticNodes, orderedSegments, runs,
+                preserveLegacyPlayableRange);
             return true;
         }
 
