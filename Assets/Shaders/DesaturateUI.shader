@@ -1,4 +1,4 @@
-Shader "Gugarythm/Desaturate UI"
+Shader "Gugarhythm/Desaturate UI"
 {
     Properties { [PerRendererData] _MainTex ("Texture", 2D) = "white" {} _Color ("Tint", Color) = (1,1,1,1) }
     SubShader { Tags { "Queue"="Transparent" "RenderType"="Transparent" } Cull Off Lighting Off ZWrite Off ZTest [unity_GUIZTestMode] Blend SrcAlpha OneMinusSrcAlpha

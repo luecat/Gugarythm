@@ -1,6 +1,6 @@
-# Gugarythm
+# Gugarhythm
 
-Gugarythm 是以 Unity 6 LTS 製作、面向 Android 平台的節奏遊戲專案。
+Gugarhythm 是以 Unity 6 LTS 製作、面向 Android 平台的節奏遊戲專案。
 
 ## 開發環境
 

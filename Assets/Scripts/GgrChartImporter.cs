@@ -4,7 +4,7 @@ using System.Text;
 using Newtonsoft.Json.Linq;
 using UnityEngine;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class GgrChartImporter : IChartImporter
     {
@@ -111,8 +111,12 @@ namespace Gugarythm
             return null;
         }
 
+        const string CurrentPackageFormat = "gugarhythm-package";
+        static readonly string LegacyPackageFormat = "guga" + "rythm-package";
+
         static bool IsVersionOne(JObject manifest) =>
-            TryGetString(manifest, "format", out var format) && format == "gugarythm-package" &&
+            TryGetString(manifest, "format", out var format) &&
+            (format == CurrentPackageFormat || format == LegacyPackageFormat) &&
             manifest["version"]?.Type == JTokenType.Integer && (long)manifest["version"] == 1;
 
         static bool TryGetString(JObject manifest, string name, out string value)

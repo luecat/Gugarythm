@@ -7,7 +7,7 @@ using System.Linq;
 using System.Text;
 using Newtonsoft.Json.Linq;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class ScpChartImporter : IChartImporter
     {

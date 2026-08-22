@@ -4,12 +4,12 @@ using UnityEngine.UI;
 using Unity.Profiling;
 #endif
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class TaperedConnectorGraphic : MaskableGraphic
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-        static readonly ProfilerMarker MeshRebuildProfiler = new("Gugarythm.HoldMeshRebuild");
+        static readonly ProfilerMarker MeshRebuildProfiler = new("Gugarhythm.HoldMeshRebuild");
 #endif
         public Texture texture;
         public override Texture mainTexture => texture != null ? texture : Texture2D.whiteTexture;

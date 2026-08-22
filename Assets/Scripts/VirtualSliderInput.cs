@@ -1,7 +1,7 @@
 using System;
 using System.Collections.Generic;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     /// <summary>
     /// Converts continuous touch motion into CHUNITHM-style virtual slider

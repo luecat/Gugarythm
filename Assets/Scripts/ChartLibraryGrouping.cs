@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public enum ChartLibrarySort { Accuracy, Difficulty, Title }
 

@@ -7,7 +7,7 @@ using System.Text;
 using Newtonsoft.Json;
 using UnityEngine;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     [Serializable]
     public sealed class LocalChartEntry

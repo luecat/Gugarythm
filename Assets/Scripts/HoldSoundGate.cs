@@ -1,6 +1,6 @@
 using System.Collections.Generic;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     /// <summary>
     /// Tracks which Hold roots currently require the shared looping Hold voice.

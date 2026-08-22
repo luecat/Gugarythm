@@ -1,4 +1,4 @@
-using Gugarythm;
+using Gugarhythm;
 using UnityEditor;
 using UnityEditor.Android;
 using UnityEditor.SceneManagement;
@@ -15,31 +15,31 @@ public static class CreatePrototypeScene
     const string SettingsScenePath = "Assets/Scenes/SettingsScene.unity";
     const string ChartEditorScenePath = "Assets/Scenes/ChartEditorScene.unity";
     const string GameplayScenePath = "Assets/Scenes/RhythmPrototype.unity";
-    const string ApplicationIconPath = "Assets/Art/AppIcon/gugarythm-icon.png";
-    const string SplashScreenPath = "Assets/Art/SplashScreen/gugarythm-splash.png";
+    const string ApplicationIconPath = "Assets/Art/AppIcon/gugarhythm-icon.png";
+    const string SplashScreenPath = "Assets/Art/SplashScreen/gugarhythm-splash.png";
 
-    [MenuItem("Gugarythm/Open Rhythm Prototype")]
+    [MenuItem("Gugarhythm/Open Rhythm Prototype")]
     public static void Open()
     {
         EnsurePlayerScenes();
         EditorSceneManager.OpenScene(GameplayScenePath, OpenSceneMode.Single);
     }
 
-    [MenuItem("Gugarythm/Open Chart Library")]
+    [MenuItem("Gugarhythm/Open Chart Library")]
     public static void OpenLibrary()
     {
         EnsurePlayerScenes();
         EditorSceneManager.OpenScene(LibraryScenePath, OpenSceneMode.Single);
     }
 
-    [MenuItem("Gugarythm/Open Settings")]
+    [MenuItem("Gugarhythm/Open Settings")]
     public static void OpenSettings()
     {
         EnsurePlayerScenes();
         EditorSceneManager.OpenScene(SettingsScenePath, OpenSceneMode.Single);
     }
 
-    [MenuItem("Gugarythm/Open Chart Editor")]
+    [MenuItem("Gugarhythm/Open Chart Editor")]
     public static void OpenChartEditor()
     {
         EnsurePlayerScenes();
@@ -51,15 +51,15 @@ public static class CreatePrototypeScene
         if (!File.Exists(StartupScenePath) || !File.Exists(LibraryScenePath) || !File.Exists(SettingsScenePath) || !File.Exists(ChartEditorScenePath) || !File.Exists(GameplayScenePath)) Build();
     }
 
-    [MenuItem("Gugarythm/Rebuild Player Scenes")]
+    [MenuItem("Gugarhythm/Rebuild Player Scenes")]
     public static void Build()
     {
         var splash = ImportSplashSprite();
         BuildStartupScene(splash);
-        BuildScene(LibraryScenePath, "Gugarythm Library");
-        BuildScene(SettingsScenePath, "Gugarythm Settings");
-        BuildScene(ChartEditorScenePath, "Gugarythm Chart Editor");
-        BuildScene(GameplayScenePath, "Gugarythm Prototype");
+        BuildScene(LibraryScenePath, "Gugarhythm Library");
+        BuildScene(SettingsScenePath, "Gugarhythm Settings");
+        BuildScene(ChartEditorScenePath, "Gugarhythm Chart Editor");
+        BuildScene(GameplayScenePath, "Gugarhythm Prototype");
         EditorBuildSettings.scenes = PlayerScenes();
         AssetDatabase.SaveAssets();
     }
@@ -75,9 +75,9 @@ public static class CreatePrototypeScene
     static void BuildStartupScene(Sprite splash)
     {
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
-        var root = new GameObject("Gugarythm Startup");
-        var startup = root.AddComponent<GugarythmStartupSplash>();
-        startup.Configure(splash, GugarythmStartupSplash.DefaultDisplaySeconds);
+        var root = new GameObject("Gugarhythm Startup");
+        var startup = root.AddComponent<GugarhythmStartupSplash>();
+        startup.Configure(splash, GugarhythmStartupSplash.DefaultDisplaySeconds);
         EditorSceneManager.SaveScene(scene, StartupScenePath);
     }
 
@@ -93,7 +93,7 @@ public static class CreatePrototypeScene
     static EditorBuildSettingsScene[] PlayerScenes() => PlayerBuildScenePaths()
         .Select(path => new EditorBuildSettingsScene(path, true)).ToArray();
 
-    [MenuItem("Gugarythm/Build Android Debug APK")]
+    [MenuItem("Gugarhythm/Build Android Debug APK")]
     public static void BuildAndroidDebug()
     {
         Build();
@@ -103,14 +103,14 @@ public static class CreatePrototypeScene
         PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarythm");
         PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
         PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
-        PlayerSettings.productName = "Gugarythm";
+        PlayerSettings.productName = "Gugarhythm";
         PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
         var directory = "Builds";
         Directory.CreateDirectory(directory);
         var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
         {
             scenes = PlayerBuildScenePaths(),
-            locationPathName = Path.Combine(directory, "Gugarythm-debug.apk"),
+            locationPathName = Path.Combine(directory, "Gugarhythm-debug.apk"),
             target = BuildTarget.Android,
             options = BuildOptions.Development,
         });

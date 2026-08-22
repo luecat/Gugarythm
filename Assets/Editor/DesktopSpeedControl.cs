@@ -1,23 +1,23 @@
-using Gugarythm;
+using Gugarhythm;
 using UnityEditor;
 using UnityEngine;
 
 public sealed class DesktopSpeedControl : EditorWindow
 {
-    const string PreferenceKey = "gugarythm-scroll-speed";
+    const string PreferenceKey = "gugarhythm-scroll-speed";
 
-    [MenuItem("Gugarythm/Desktop Speed Control")]
+    [MenuItem("Gugarhythm/Desktop Speed Control")]
     public static void Open()
     {
-        var window = GetWindow<DesktopSpeedControl>(true, "Gugarythm Speed", true);
+        var window = GetWindow<DesktopSpeedControl>(true, "Gugarhythm Speed", true);
         window.minSize = new Vector2(360, 150);
         window.Show();
     }
 
-    [MenuItem("Gugarythm/Speed/Decrease 0.1")]
+    [MenuItem("Gugarhythm/Speed/Decrease 0.1")]
     public static void Decrease() => Apply(Mathf.Round((CurrentSpeed() - .1f) * 10f) / 10f);
 
-    [MenuItem("Gugarythm/Speed/Increase 0.1")]
+    [MenuItem("Gugarhythm/Speed/Increase 0.1")]
     public static void Increase() => Apply(Mathf.Round((CurrentSpeed() + .1f) * 10f) / 10f);
 
     void OnGUI()
@@ -39,6 +39,7 @@ public sealed class DesktopSpeedControl : EditorWindow
 
     static float CurrentSpeed()
     {
+        GugarhythmPreferenceMigration.Migrate();
         var controller = Object.FindFirstObjectByType<SonolusLandscapePrototype>();
         return controller != null ? controller.ScrollSpeed : PlayerPrefs.GetFloat(PreferenceKey, 8f);
     }

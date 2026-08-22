@@ -4,7 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Text;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class GgrPackageException : Exception
     {
