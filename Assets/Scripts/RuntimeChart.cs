@@ -7,6 +7,8 @@ namespace Gugarythm
     public enum RuntimeNoteKind { Tap, Flick, Sustain, Release }
     public enum JudgmentGrade { Pending, Perfect, Great, Good, Miss }
     public enum HoldCheckpointSource { None, Mid, Auto, Tail }
+    public enum SlideNodeRole { Unspecified, Start, Tick, Attach, End }
+    public enum SlideJudgeMode { Unspecified, None, Normal, Trace, Flick }
 
     [Serializable]
     public sealed class RuntimeNote
@@ -26,6 +28,8 @@ namespace Gugarythm
         public bool Visible = true;
         public bool Judged = true;
         public HoldCheckpointSource HoldCheckpointSource;
+        public SlideNodeRole SlideNodeRole;
+        public SlideJudgeMode SlideJudgeMode;
         public int HoldRootIndex = -1;
         public bool IsHoldTerminal;
     }
@@ -35,6 +39,7 @@ namespace Gugarythm
         readonly List<Point> points = new();
 
         public string SourceId { get; }
+        public bool SupportsVisualTimeInversion { get; }
 
         public RuntimeTimeScaleGroup(string sourceId, IEnumerable<(double time, double scale)> source)
         {
@@ -64,6 +69,7 @@ namespace Gugarythm
             }
 
             var zero = unique.FindIndex(value => Math.Abs(value.time) < 1e-9);
+            SupportsVisualTimeInversion = unique.TrueForAll(value => value.scale > 1e-9);
             var positions = new double[unique.Count];
             for (var i = zero + 1; i < unique.Count; i++)
                 positions[i] = positions[i - 1] + (unique[i].time - unique[i - 1].time) * unique[i - 1].scale;
@@ -179,6 +185,8 @@ namespace Gugarythm
         public byte[] CoverBytes;
         public readonly List<RuntimeNote> Notes = new();
         public readonly List<RuntimeConnector> Connectors = new();
+        public readonly List<RuntimeHoldPath> HoldPaths = new();
+        public readonly List<RuntimeConnector> FallbackConnectors = new();
         // SimLine is a visual-only synchronization link between notes. It is
         // neither a playable hold nor an engine decoration guide.
         public readonly List<RuntimeSimLine> SimLines = new();
@@ -204,6 +212,7 @@ namespace Gugarythm
                 note.Beat += beatDelta;
                 note.Time += timeDelta;
             }
+            foreach (var path in HoldPaths) path.RefreshTimingBounds();
             foreach (var guide in Guides)
             {
                 guide.Start.Beat += beatDelta;
@@ -250,6 +259,12 @@ namespace Gugarythm
             var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
             return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.TimeAtPosition(position) : position;
         }
+
+        public bool CanInvertVisualTime(string group)
+        {
+            var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
+            return key == null || !TimeScaleGroups.TryGetValue(key, out var map) || map.SupportsVisualTimeInversion;
+        }
     }
 
     /// <summary>
@@ -265,6 +280,32 @@ namespace Gugarythm
         {
             if (chart == null || timeAtBeat == null) return;
 
+            chart.Notes.RemoveAll(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto);
+
+            var pathBuild = HoldPathBuilder.Build(chart);
+            chart.HoldPaths.Clear();
+            chart.HoldPaths.AddRange(pathBuild.Paths);
+            chart.FallbackConnectors.Clear();
+            chart.FallbackConnectors.AddRange(pathBuild.FallbackConnectors);
+            foreach (var warning in pathBuild.Warnings)
+                if (!chart.Warnings.Contains(warning)) chart.Warnings.Add(warning);
+
+            var unsafeExplicitFallbackNodes = new HashSet<RuntimeNote>();
+            var semanticFallbackPaths = new Dictionary<RuntimeNote,
+                (List<RuntimeNote> Nodes, List<RuntimeConnector> Connectors, List<RuntimeNote> SemanticNodes)>();
+            foreach (var component in CollectConnectorComponents(pathBuild.FallbackConnectors))
+            {
+                var geometryNodes = component.SelectMany(connector => new[] { connector.Start, connector.End })
+                    .Where(note => note != null).Distinct().ToList();
+                var semanticNodes = CollectSemanticNodes(chart, geometryNodes);
+                if (semanticNodes.All(IsUnspecifiedSemanticNode)) continue;
+                ConfigureAuthoredSemantics(semanticNodes);
+                if (TryCollectLinearConnectorPath(component, out var orderedNodes, out var orderedConnectors))
+                    semanticFallbackPaths[orderedNodes[0]] = (orderedNodes, orderedConnectors, semanticNodes);
+                else
+                    foreach (var node in geometryNodes) unsafeExplicitFallbackNodes.Add(node);
+            }
+
             var outgoing = chart.Connectors
                 .Where(connector => connector?.Start != null && connector.End != null)
                 .GroupBy(connector => connector.Start)
@@ -272,53 +313,248 @@ namespace Gugarythm
             var incoming = new HashSet<RuntimeNote>(chart.Connectors
                 .Where(connector => connector?.Start != null && connector.End != null)
                 .Select(connector => connector.End));
+            var runtimePathsByHead = chart.HoldPaths
+                .Where(path => path.Nodes.Count > 0)
+                .ToDictionary(path => path.Nodes[0]);
             var nextIndex = chart.Notes.Count == 0 ? 0 : chart.Notes.Max(note => note.Index) + 1;
 
             foreach (var head in outgoing.Keys.Where(note => !incoming.Contains(note)).ToArray())
             {
-                var path = CollectPath(head, outgoing);
+                var hasRuntimePath = runtimePathsByHead.TryGetValue(head, out var runtimePath);
+                (List<RuntimeNote> Nodes, List<RuntimeConnector> Connectors,
+                    List<RuntimeNote> SemanticNodes) semanticFallback = default;
+                var hasSemanticFallback = !hasRuntimePath &&
+                    semanticFallbackPaths.TryGetValue(head, out semanticFallback);
+                if (!hasRuntimePath && !hasSemanticFallback && unsafeExplicitFallbackNodes.Contains(head)) continue;
+                var path = hasRuntimePath ? runtimePath.Nodes.ToList() :
+                    hasSemanticFallback ? semanticFallback.Nodes : CollectPath(head, outgoing);
                 if (path.Count < 2) continue;
-                var tail = path[^1];
-                if (tail.Beat <= head.Beat + 1e-9) continue;
 
-                foreach (var point in path) point.HoldRootIndex = head.Index;
-                tail.IsHoldTerminal = true;
-                foreach (var mid in path.Skip(1).Take(path.Count - 2).Where(IsAuthoredMid))
-                    mid.HoldCheckpointSource = HoldCheckpointSource.Mid;
-                if (tail.Judged)
+                var rootIndex = hasRuntimePath ? runtimePath.RootIndex : head.Index;
+                foreach (var point in path) point.HoldRootIndex = rootIndex;
+
+                double playableStartBeat;
+                double playableEndBeat;
+                if (hasRuntimePath)
                 {
-                    if (tail.Kind == RuntimeNoteKind.Release)
-                        tail.Kind = RuntimeNoteKind.Sustain;
-                    tail.HoldCheckpointSource = HoldCheckpointSource.Tail;
+                    if (runtimePath.PreservesLegacyCheckpointSemantics) ConfigureLegacySemantics(path);
+                    else
+                    {
+                        ConfigureAuthoredSemantics(runtimePath.SemanticNodes);
+                        foreach (var node in runtimePath.SemanticNodes)
+                        {
+                            if (!node.Judged || node.SlideNodeRole != SlideNodeRole.Attach) continue;
+                            var evaluatedAttach = runtimePath.Evaluator.Evaluate(node.Time);
+                            node.Lane = evaluatedAttach.Lane;
+                            node.Size = evaluatedAttach.Size;
+                        }
+                    }
+                    if (!runtimePath.HasPlayableRange) continue;
+                    playableStartBeat = runtimePath.PlayableStartBeat.Value;
+                    playableEndBeat = runtimePath.PlayableEndBeat.Value;
                 }
-
-                for (var beat = head.Beat + EighthNoteBeats; beat < tail.Beat - 1e-9; beat += EighthNoteBeats)
+                else if (hasSemanticFallback)
                 {
+                    if (!TryGetPlayableBeatBounds(semanticFallback.SemanticNodes,
+                        out playableStartBeat, out playableEndBeat)) continue;
+                }
+                else
+                {
+                    ConfigureLegacySemantics(path);
+                    playableStartBeat = head.Beat;
+                    playableEndBeat = path[^1].Beat;
+                }
+                if (playableEndBeat <= playableStartBeat + 1e-9) continue;
+
+                var authoredJudgedNodes = (hasRuntimePath ? runtimePath.SemanticNodes :
+                    hasSemanticFallback ? semanticFallback.SemanticNodes : path)
+                    .Where(note => note.Judged).ToArray();
+                for (var beat = playableStartBeat + EighthNoteBeats;
+                    beat < playableEndBeat - 1e-9;
+                    beat += EighthNoteBeats)
+                {
+                    if (authoredJudgedNodes.Any(note => Math.Abs(note.Beat - beat) < 1e-9)) continue;
                     var segment = SegmentAt(path, beat);
                     if (segment == null) continue;
                     var start = segment.Value.start;
                     var end = segment.Value.end;
                     var progress = (float)((beat - start.Beat) / (end.Beat - start.Beat));
+                    var checkpointTime = timeAtBeat(beat);
+                    var evaluated = runtimePath?.Evaluator.Evaluate(checkpointTime);
+                    var fallbackConnector = hasSemanticFallback
+                        ? semanticFallback.Connectors.FirstOrDefault(connector =>
+                            ReferenceEquals(connector.Start, start) && ReferenceEquals(connector.End, end))
+                        : null;
+                    var fallbackProgress = fallbackConnector == null
+                        ? progress
+                        : HoldPathMath.EaseProgress(progress, fallbackConnector.Ease);
                     chart.Notes.Add(new RuntimeNote
                     {
                         Index = nextIndex++,
                         SourceId = $"hold:auto:{head.SourceId}:{beat:R}",
                         Archetype = "RuntimeHoldAutoCheckpoint",
                         Beat = beat,
-                        Time = timeAtBeat(beat),
-                        Lane = start.Lane + (end.Lane - start.Lane) * progress,
-                        Size = start.Size + (end.Size - start.Size) * progress,
+                        Time = checkpointTime,
+                        Lane = evaluated?.Lane ?? start.Lane + (end.Lane - start.Lane) * fallbackProgress,
+                        Size = evaluated?.Size ?? Math.Max(.25f,
+                            start.Size + (end.Size - start.Size) * fallbackProgress),
                         Kind = RuntimeNoteKind.Sustain,
                         Critical = head.Critical,
                         TimeScaleGroup = head.TimeScaleGroup,
                         Visible = false,
                         Judged = true,
                         HoldCheckpointSource = HoldCheckpointSource.Auto,
-                        HoldRootIndex = head.Index,
+                        HoldRootIndex = rootIndex,
                     });
                 }
             }
         }
+
+        static void ConfigureAuthoredSemantics(IReadOnlyList<RuntimeNote> path)
+        {
+            foreach (var node in path)
+            {
+                var isTail = node.Judged && node.SlideNodeRole == SlideNodeRole.End;
+                node.IsHoldTerminal = isTail;
+                if (isTail)
+                {
+                    if (node.Kind == RuntimeNoteKind.Release) node.Kind = RuntimeNoteKind.Sustain;
+                    node.HoldCheckpointSource = HoldCheckpointSource.Tail;
+                }
+                else if (node.Judged && node.Kind == RuntimeNoteKind.Sustain &&
+                    node.SlideNodeRole is SlideNodeRole.Tick or SlideNodeRole.Attach)
+                    node.HoldCheckpointSource = HoldCheckpointSource.Mid;
+                else if (node.HoldCheckpointSource == HoldCheckpointSource.Tail)
+                    node.HoldCheckpointSource = HoldCheckpointSource.None;
+            }
+        }
+
+        static void ConfigureLegacySemantics(IReadOnlyList<RuntimeNote> path)
+        {
+            var tail = path[^1];
+            tail.IsHoldTerminal = true;
+            foreach (var mid in path.Skip(1).Take(path.Count - 2).Where(IsAuthoredMid))
+                mid.HoldCheckpointSource = HoldCheckpointSource.Mid;
+            if (!tail.Judged) return;
+            if (tail.Kind == RuntimeNoteKind.Release) tail.Kind = RuntimeNoteKind.Sustain;
+            tail.HoldCheckpointSource = HoldCheckpointSource.Tail;
+        }
+
+        static List<List<RuntimeConnector>> CollectConnectorComponents(IReadOnlyList<RuntimeConnector> connectors)
+        {
+            var usable = connectors.Where(connector => connector?.Start != null && connector.End != null).ToList();
+            var unseen = new HashSet<RuntimeConnector>(usable);
+            var components = new List<List<RuntimeConnector>>();
+            while (unseen.Count > 0)
+            {
+                RuntimeConnector seed = null;
+                foreach (var connector in unseen) { seed = connector; break; }
+                var component = new List<RuntimeConnector>();
+                var nodes = new HashSet<RuntimeNote> { seed.Start, seed.End };
+                var changed = true;
+                while (changed)
+                {
+                    changed = false;
+                    foreach (var connector in usable)
+                    {
+                        if (!unseen.Contains(connector) ||
+                            (!nodes.Contains(connector.Start) && !nodes.Contains(connector.End))) continue;
+                        unseen.Remove(connector);
+                        component.Add(connector);
+                        changed |= nodes.Add(connector.Start);
+                        changed |= nodes.Add(connector.End);
+                    }
+                }
+                components.Add(component);
+            }
+            return components;
+        }
+
+        static bool TryCollectLinearConnectorPath(IReadOnlyList<RuntimeConnector> component,
+            out List<RuntimeNote> orderedNodes, out List<RuntimeConnector> orderedConnectors)
+        {
+            orderedNodes = null;
+            orderedConnectors = null;
+            if (component.Count == 0 || component.Any(connector => connector?.Start == null || connector.End == null))
+                return false;
+
+            var outgoing = new Dictionary<RuntimeNote, RuntimeConnector>();
+            var incoming = new Dictionary<RuntimeNote, RuntimeConnector>();
+            var nodes = new HashSet<RuntimeNote>();
+            foreach (var connector in component)
+            {
+                if (outgoing.ContainsKey(connector.Start) || incoming.ContainsKey(connector.End)) return false;
+                outgoing[connector.Start] = connector;
+                incoming[connector.End] = connector;
+                nodes.Add(connector.Start);
+                nodes.Add(connector.End);
+            }
+
+            RuntimeNote head = null;
+            var headCount = 0;
+            foreach (var node in nodes)
+                if (!incoming.ContainsKey(node)) { head = node; headCount++; }
+            if (headCount != 1) return false;
+
+            orderedNodes = new List<RuntimeNote> { head };
+            orderedConnectors = new List<RuntimeConnector>();
+            var visited = new HashSet<RuntimeConnector>();
+            var current = head;
+            while (outgoing.TryGetValue(current, out var connector))
+            {
+                if (!visited.Add(connector) || connector.End.Time < connector.Start.Time - 1e-9)
+                {
+                    orderedNodes = null;
+                    orderedConnectors = null;
+                    return false;
+                }
+                orderedConnectors.Add(connector);
+                orderedNodes.Add(connector.End);
+                current = connector.End;
+            }
+            if (visited.Count == component.Count) return true;
+            orderedNodes = null;
+            orderedConnectors = null;
+            return false;
+        }
+
+        static bool TryGetPlayableBeatBounds(IReadOnlyList<RuntimeNote> semanticNodes,
+            out double playableStartBeat, out double playableEndBeat)
+        {
+            playableStartBeat = double.PositiveInfinity;
+            playableEndBeat = double.NegativeInfinity;
+            foreach (var node in semanticNodes)
+            {
+                if (!node.Judged) continue;
+                playableStartBeat = Math.Min(playableStartBeat, node.Beat);
+                playableEndBeat = Math.Max(playableEndBeat, node.Beat);
+            }
+            return double.IsFinite(playableStartBeat) && double.IsFinite(playableEndBeat);
+        }
+
+        static List<RuntimeNote> CollectSemanticNodes(RuntimeChart chart, IReadOnlyList<RuntimeNote> geometryNodes)
+        {
+            var nodes = new List<RuntimeNote>(geometryNodes);
+            var nodeSet = new HashSet<RuntimeNote>(geometryNodes);
+            var rootIndices = new HashSet<int>(geometryNodes.Select(node => node.Index));
+            foreach (var node in geometryNodes)
+                if (node.HoldRootIndex >= 0) rootIndices.Add(node.HoldRootIndex);
+            foreach (var note in chart.Notes)
+            {
+                if (note.HoldCheckpointSource == HoldCheckpointSource.Auto || nodeSet.Contains(note) ||
+                    note.HoldRootIndex < 0 || !rootIndices.Contains(note.HoldRootIndex) || !nodeSet.Add(note)) continue;
+                nodes.Add(note);
+            }
+            nodes.Sort((left, right) =>
+            {
+                var beat = left.Beat.CompareTo(right.Beat);
+                return beat != 0 ? beat : left.Index.CompareTo(right.Index);
+            });
+            return nodes;
+        }
+
+        static bool IsUnspecifiedSemanticNode(RuntimeNote node) =>
+            node.SlideNodeRole == SlideNodeRole.Unspecified && node.SlideJudgeMode == SlideJudgeMode.Unspecified;
 
         static List<RuntimeNote> CollectPath(RuntimeNote head, IReadOnlyDictionary<RuntimeNote, List<RuntimeNote>> outgoing)
         {
