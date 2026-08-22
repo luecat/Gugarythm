@@ -20,6 +20,7 @@ namespace Gugarhythm
 
         void Awake()
         {
+            LandscapeOrientation.Lock();
             var canvasObject = new GameObject("Startup Canvas", typeof(Canvas), typeof(CanvasScaler), typeof(GraphicRaycaster));
             canvasObject.transform.SetParent(transform, false);
             var canvas = canvasObject.GetComponent<Canvas>();
