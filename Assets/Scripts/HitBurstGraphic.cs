@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     // A 15-frame judgment pulse: fixed-size perspective plates establish the
     // impact while the upper fill follows note width and low shards move linearly.

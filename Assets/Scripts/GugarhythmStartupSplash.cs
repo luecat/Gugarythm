@@ -2,9 +2,9 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
-    public sealed class GugarythmStartupSplash : MonoBehaviour
+    public sealed class GugarhythmStartupSplash : MonoBehaviour
     {
         public const float DefaultDisplaySeconds = 1.5f;
 
@@ -32,7 +32,7 @@ namespace Gugarythm
             scaler.screenMatchMode = CanvasScaler.ScreenMatchMode.MatchWidthOrHeight;
             scaler.matchWidthOrHeight = .5f;
 
-            var imageObject = new GameObject("GUGARYTHM", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
+            var imageObject = new GameObject("GUGARHYTHM", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image));
             imageObject.transform.SetParent(canvasObject.transform, false);
             var rect = imageObject.GetComponent<RectTransform>();
             rect.anchorMin = Vector2.zero;
@@ -59,7 +59,7 @@ namespace Gugarythm
             if (remainingSeconds > 0f) yield return new WaitForSecondsRealtime(remainingSeconds);
             if (transitioning) yield break;
             transitioning = true;
-            GugarythmSceneRouter.OpenLibrary();
+            GugarhythmSceneRouter.OpenLibrary();
         }
 
         static float NormalizeDisplaySeconds(float seconds)

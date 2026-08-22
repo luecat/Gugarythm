@@ -3,7 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
-using Gugarythm;
+using Gugarhythm;
 using UnityEditor;
 using Unity.Profiling;
 using UnityEngine;
@@ -11,10 +11,10 @@ using UnityEngine.UI;
 
 public static class RuntimeValidation
 {
-    [MenuItem("Gugarythm/Start Loaded Chart _F8", true)]
+    [MenuItem("Gugarhythm/Start Loaded Chart _F8", true)]
     static bool CanStartLoadedChart() => EditorApplication.isPlaying;
 
-    [MenuItem("Gugarythm/Start Loaded Chart _F8")]
+    [MenuItem("Gugarhythm/Start Loaded Chart _F8")]
     public static void StartLoadedChart()
     {
         var controller = UnityEngine.Object.FindFirstObjectByType<SonolusLandscapePrototype>();
@@ -22,7 +22,7 @@ public static class RuntimeValidation
         controller.StartLoadedChartForEditor();
     }
 
-    [MenuItem("Gugarythm/Validate Runtime")]
+    [MenuItem("Gugarhythm/Validate Runtime")]
     public static void ValidateRuntime()
     {
         ValidateGgrPackageReader();
@@ -159,7 +159,7 @@ public static class RuntimeValidation
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         ValidateLatencyCalibrationMath();
-        Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} auto={chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} connectors={chart.Connectors.Count} holdPaths={chart.HoldPaths.Count} holdRuns={holdRenderRunCount} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
+        Debug.Log($"GUGARHYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} auto={chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} connectors={chart.Connectors.Count} holdPaths={chart.HoldPaths.Count} holdRuns={holdRenderRunCount} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
     }
@@ -460,7 +460,7 @@ public static class RuntimeValidation
         fallback.Connectors.Add(new RuntimeConnector { Start = fallbackHead, End = fallbackRight });
         HoldCheckpointBuilder.Apply(fallback, beat => beat);
 
-        Debug.Log($"GUGARYTHM_TASK2_CHECKPOINT_COUNTS " +
+        Debug.Log($"GUGARHYTHM_TASK2_CHECKPOINT_COUNTS " +
                   $"allNonePlayable={allNone.PlayableCount} allNoneAuto={allNoneAutos.Length} " +
                   $"noneLeadPlayable={noneLead.PlayableCount} noneLeadAuto={noneLeadAutos.Length} " +
                   $"repeatedPlayable={sameBeat.PlayableCount} repeatedAuto={repeatedAutos.Length} " +
@@ -590,7 +590,7 @@ public static class RuntimeValidation
         HoldCheckpointBuilder.Apply(invalidLegacy, beat => beat);
         var invalidLegacyAutos = AutoBeats(invalidLegacy);
 
-        Debug.Log($"GUGARYTHM_TASK2_REVIEW_COUNTS " +
+        Debug.Log($"GUGARHYTHM_TASK2_REVIEW_COUNTS " +
                   $"attachStart={attachPath.PlayableStartBeat} attachEnd={attachPath.PlayableEndBeat} attachAuto={attachAutos.Length} " +
                   $"shiftVisualBeat={shiftedPath.VisualStartBeat}:{shiftedPath.VisualEndBeat} " +
                   $"shiftVisualTime={shiftedPath.VisualStartTime}:{shiftedPath.VisualEndTime} " +
@@ -663,7 +663,7 @@ public static class RuntimeValidation
             new[] { new ActiveContact(1, evaluated.Lane, attach.Time - .1) });
         var autoCount = imported.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto);
 
-        Debug.Log($"GUGARYTHM_FINAL_ATTACH_EVALUATOR " +
+        Debug.Log($"GUGARHYTHM_FINAL_ATTACH_EVALUATOR " +
                   $"lane={attach.Lane:0.######} size={attach.Size:0.######} " +
                   $"evaluatorLane={evaluated.Lane:0.######} evaluatorSize={evaluated.Size:0.######} " +
                   $"judgment={attach.Grade} playable={imported.Chart.PlayableCount} auto={autoCount}");
@@ -680,7 +680,7 @@ public static class RuntimeValidation
     {
         var easeNames = new[] { "linear", "in", "out", "inout" };
         var sampleProgress = new[] { .25f, .75f };
-        var sharedMathType = typeof(RuntimeHoldPath).Assembly.GetType("Gugarythm.HoldPathMath");
+        var sharedMathType = typeof(RuntimeHoldPath).Assembly.GetType("Gugarhythm.HoldPathMath");
         var sharedEaseMethod = sharedMathType?.GetMethod("EaseProgress",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         var markerValues = new List<string>();
@@ -777,7 +777,7 @@ public static class RuntimeValidation
                 $"/fallback:{fallbackLanes[0]:0.######}:{fallbackLanes[1]:0.######}");
         }
 
-        Debug.Log("GUGARYTHM_TASK2_EASE_PARITY " + string.Join(" ", markerValues));
+        Debug.Log("GUGARHYTHM_TASK2_EASE_PARITY " + string.Join(" ", markerValues));
         Require(sharedEaseMethod != null,
             "Hold interpolation must expose one shared pure HoldPathMath.EaseProgress evaluator");
         for (var ease = 0; ease < easeNames.Length; ease++)
@@ -858,14 +858,14 @@ public static class RuntimeValidation
 
     static void ValidateStartupSplashConfiguration()
     {
-        var startupType = typeof(SonolusLandscapePrototype).Assembly.GetType("Gugarythm.GugarythmStartupSplash");
+        var startupType = typeof(SonolusLandscapePrototype).Assembly.GetType("Gugarhythm.GugarhythmStartupSplash");
         Require(startupType != null, "The startup splash controller must exist");
         var durationField = startupType.GetField("DefaultDisplaySeconds",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(durationField != null, "The startup splash duration must be exposed for validation");
         Require(Math.Abs((float)durationField.GetRawConstantValue() - 1.5f) < .0001f,
-            "The GUGARYTHM startup page must remain visible for 1.5 seconds");
-        Debug.Log("GUGARYTHM_STARTUP_SPLASH_VALIDATION_OK duration=1.5");
+            "The GUGARHYTHM startup page must remain visible for 1.5 seconds");
+        Debug.Log("GUGARHYTHM_STARTUP_SPLASH_VALIDATION_OK duration=1.5");
     }
 
     static void ValidateStartupBuildSceneOrder()
@@ -876,7 +876,7 @@ public static class RuntimeValidation
         var scenes = (string[])method.Invoke(null, null);
         Require(scenes.Length == 5 && scenes[0] == "Assets/Scenes/StartupScene.unity",
             "Android builds must start with StartupScene before the library scene");
-        Debug.Log("GUGARYTHM_STARTUP_BUILD_SCENE_VALIDATION_OK first=StartupScene");
+        Debug.Log("GUGARHYTHM_STARTUP_BUILD_SCENE_VALIDATION_OK first=StartupScene");
     }
 
     static void ValidateBundledChartManifest()
@@ -897,7 +897,7 @@ public static class RuntimeValidation
             Require(File.Exists(Path.Combine(Application.dataPath, "StreamingAssets/BundledCharts", name)),
                 "Bundled GGR file is missing: " + name);
         }
-        Debug.Log("GUGARYTHM_BUNDLED_CHARTS_VALIDATION_OK count=" + names.Length);
+        Debug.Log("GUGARHYTHM_BUNDLED_CHARTS_VALIDATION_OK count=" + names.Length);
     }
 
     static void ValidateLatencyCalibrationMath()
@@ -913,7 +913,7 @@ public static class RuntimeValidation
 
     static void ValidateLibraryDataRefreshContracts()
     {
-        var entryType = typeof(LocalChartEntry).Assembly.GetType("Gugarythm.LibrarySelectionReconciler");
+        var entryType = typeof(LocalChartEntry).Assembly.GetType("Gugarhythm.LibrarySelectionReconciler");
         var selectMethod = entryType?.GetMethod("Select", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(selectMethod != null, "Library refresh must expose a selection reconciliation rule");
 
@@ -1017,7 +1017,7 @@ public static class RuntimeValidation
 
         Require(Math.Abs(SonolusLandscapePrototype.DifficultyButtonWidthForText("未標示難度") - 170f) < .0001,
             "The unmarked difficulty button must reserve enough width for mobile text");
-        Debug.Log("GUGARYTHM_WATERFALL_VALIDATION_OK");
+        Debug.Log("GUGARHYTHM_WATERFALL_VALIDATION_OK");
     }
 
     static void ValidateScrollSpeedMath()
@@ -1030,7 +1030,7 @@ public static class RuntimeValidation
             "Doubling scroll speed must halve the approach duration");
         Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(2f) - 4f) < .0001f,
             "Halving scroll speed must double the approach duration");
-        Debug.Log("GUGARYTHM_SCROLL_SPEED_VALIDATION_OK");
+        Debug.Log("GUGARHYTHM_SCROLL_SPEED_VALIDATION_OK");
     }
 
     static void ValidateLibrarySelectionRestore()
@@ -1042,14 +1042,23 @@ public static class RuntimeValidation
             "A restored library selection must enable the start button");
         Require(!(bool)method.Invoke(null, new object[] { false }),
             "The start button must remain disabled without a restored selection");
-        Debug.Log("GUGARYTHM_LIBRARY_SELECTION_RESTORE_VALIDATION_OK");
+        Debug.Log("GUGARHYTHM_LIBRARY_SELECTION_RESTORE_VALIDATION_OK");
     }
 
     static void ValidateGgrPackageReader()
     {
+        var legacyPackageFormat = "guga" + "rythm-package";
+        var legacyPackage = new GgrChartImporter().Import("legacy-format.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes($"{{\"format\":\"{legacyPackageFormat}\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}}"),
+            ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
+            ["audio.wav"] = new byte[] { 0 },
+        }));
+        Require(legacyPackage.Success, "Existing GGR packages must remain importable after the brand spelling correction");
+
         var package = GgrPackageReader.Read(GgrZipFixture.Create(new Dictionary<string, byte[]>
         {
-            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.mp3\"}"),
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarhythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.mp3\"}"),
             ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
             ["audio.mp3"] = new byte[] { 1, 2, 3 },
         }));
@@ -1057,7 +1066,7 @@ public static class RuntimeValidation
             "A canonical stored GGR package must expose its chart and audio resources");
         var disguisedAudio = new GgrChartImporter().Import("disguised.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
         {
-            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.mp3\"}"),
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarhythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.mp3\"}"),
             ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
             ["audio.mp3"] = new byte[] { 0, 0, 0, 24, (byte)'f', (byte)'t', (byte)'y', (byte)'p', (byte)'d', (byte)'a', (byte)'s', (byte)'h' },
         }));
@@ -1065,7 +1074,7 @@ public static class RuntimeValidation
             "GGR MP4/AAC audio disguised as MP3 must use the AAC decoder");
         var unknownLengthWav = new GgrChartImporter().Import("unknown-length-wav.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
         {
-            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}"),
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarhythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}"),
             ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[]}}"),
             ["audio.wav"] = new byte[]
             {
@@ -1087,7 +1096,7 @@ public static class RuntimeValidation
     {
         var result = new GgrChartImporter().Import("hold.ggr", GgrZipFixture.Create(new Dictionary<string, byte[]>
         {
-            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}"),
+            ["manifest.json"] = System.Text.Encoding.UTF8.GetBytes("{\"format\":\"gugarhythm-package\",\"version\":1,\"chart\":\"chart.usc\",\"audio\":\"audio.wav\"}"),
             ["chart.usc"] = System.Text.Encoding.UTF8.GetBytes("{\"usc\":{\"objects\":[{\"beat\":0,\"bpm\":120,\"type\":\"bpm\"},{\"type\":\"slide\",\"connections\":[{\"beat\":0,\"judgeType\":\"normal\",\"lane\":0,\"size\":1,\"type\":\"start\"},{\"beat\":2,\"judgeType\":\"none\",\"lane\":0,\"size\":1,\"type\":\"end\"}]}]}}"),
             ["audio.wav"] = new byte[] { 0 },
         }));
@@ -1098,11 +1107,11 @@ public static class RuntimeValidation
 
     static void ValidateAttachedGgrPlayableCount()
     {
-        var path = Environment.GetEnvironmentVariable("GUGARYTHM_VALIDATION_GGR");
+        var path = Environment.GetEnvironmentVariable("GUGARHYTHM_VALIDATION_GGR");
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
         var result = new GgrChartImporter().Import(Path.GetFileName(path), File.ReadAllBytes(path));
         Require(result.Success, "Attached GGR must import successfully: " + result.Error);
-        Debug.Log($"GUGARYTHM_TASK2_ATTACHED_GGR_COUNTS playable={result.Chart.PlayableCount} " +
+        Debug.Log($"GUGARHYTHM_TASK2_ATTACHED_GGR_COUNTS playable={result.Chart.PlayableCount} " +
                   $"auto={result.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} " +
                   $"autoRoots={result.Chart.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).Select(note => note.HoldRootIndex).Distinct().Count()} " +
                   $"holdPaths={result.Chart.HoldPaths.Count} fallback={result.Chart.FallbackConnectors.Count} " +
@@ -1275,7 +1284,7 @@ public static class RuntimeValidation
 
         var straightPoints = new[] { new Vector2(0, 0), new Vector2(10, 0), new Vector2(20, 0) };
         Populate(straightPoints, new[] { 4f, 6f, 8f }, new[] { 1f, .5f, .25f });
-        Debug.Log($"GUGARYTHM_CONNECTOR_GEOMETRY_TOPOLOGY vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} expectedVertices=6 expectedTriangles=4");
+        Debug.Log($"GUGARHYTHM_CONNECTOR_GEOMETRY_TOPOLOGY vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} expectedVertices=6 expectedTriangles=4");
         Require(mesh.vertexCount == 6 && mesh.triangles.Length == 12,
             "A three-point Hold ribbon must reuse one pair of vertices at its interior cross-section");
         Require(EdgeUseCount(0, 1) == 1 && EdgeUseCount(2, 3) == 2 && EdgeUseCount(4, 5) == 1,
@@ -1313,7 +1322,7 @@ public static class RuntimeValidation
         var repeatedSemanticsOk = (repeatedCenter - repeatedPoint).sqrMagnitude < .000001f &&
                                   Math.Abs(repeatedWidth - 10f) < .0001f &&
                                   Math.Abs(repeatedAlpha - .065f) < .01f;
-        Debug.Log($"GUGARYTHM_CONNECTOR_COINCIDENT_FIXTURE vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} " +
+        Debug.Log($"GUGARHYTHM_CONNECTOR_COINCIDENT_FIXTURE vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} " +
                   $"interiorUses={EdgeUseCount(2, 3)} width={repeatedWidth:F3} alpha={repeatedAlpha:F3} " +
                   $"topology={repeatedTopologyOk} lastSampleSemantics={repeatedSemanticsOk}");
 
@@ -1353,7 +1362,7 @@ public static class RuntimeValidation
             bevelFixturesOk &= fixtureOk;
             bevelInnerRatio = Math.Max(bevelInnerRatio, innerRatio);
             bevelOuterMaxRatio = Math.Max(bevelOuterMaxRatio, outerMaxRatio);
-            Debug.Log($"GUGARYTHM_CONNECTOR_BEVEL_FIXTURE direction={direction:+0;-0} vertices={mesh.vertexCount} " +
+            Debug.Log($"GUGARHYTHM_CONNECTOR_BEVEL_FIXTURE direction={direction:+0;-0} vertices={mesh.vertexCount} " +
                       $"triangles={mesh.triangles.Length / 3} innerIntersection={hasSingleInnerIntersection} " +
                       $"innerRatio={innerRatio:F3} outerMaxRatio={outerMaxRatio:F3} winding={windingOk} overlap={overlap}");
         }
@@ -1368,7 +1377,7 @@ public static class RuntimeValidation
         Populate(straightPoints, new[] { 4f, 6f, 8f });
         Require(mesh.vertexCount == 24 && mesh.triangles.Length == 48,
             "Fill, glow, left-edge, and right-edge strips must each reuse their three cross-sections");
-        Debug.Log($"GUGARYTHM_CONNECTOR_GEOMETRY_VALIDATION_OK straightVertices=6 straightTriangles=4 cornerVertices=6 bevelVertices=8 bevelTriangles=5 fullVertices={mesh.vertexCount} fullTriangles={mesh.triangles.Length / 3} miterRatio={miterRatio:F3} bevelInnerRatio={bevelInnerRatio:F3} bevelOuterMaxRatio={bevelOuterMaxRatio:F3}");
+        Debug.Log($"GUGARHYTHM_CONNECTOR_GEOMETRY_VALIDATION_OK straightVertices=6 straightTriangles=4 cornerVertices=6 bevelVertices=8 bevelTriangles=5 fullVertices={mesh.vertexCount} fullTriangles={mesh.triangles.Length / 3} miterRatio={miterRatio:F3} bevelInnerRatio={bevelInnerRatio:F3} bevelOuterMaxRatio={bevelOuterMaxRatio:F3}");
 
         helper.Dispose();
         UnityEngine.Object.DestroyImmediate(mesh);
@@ -2200,8 +2209,8 @@ public static class RuntimeValidation
                 Math.Abs(secondPlayback - secondChartSchedule - firstDeviceOffset) < .0001,
             "A device offset must change playback phase exactly once and survive chart changes");
 
-        const string legacyOffsetKey = "gugarythm-audio-offset-seconds";
-        const string settingsOffsetKey = "gugarythm-settings-delay-offset-seconds";
+        const string legacyOffsetKey = "gugarhythm-audio-offset-seconds";
+        const string settingsOffsetKey = "gugarhythm-settings-delay-offset-seconds";
         var hadLegacyOffset = PlayerPrefs.HasKey(legacyOffsetKey);
         var hadSettingsOffset = PlayerPrefs.HasKey(settingsOffsetKey);
         var originalLegacyOffset = PlayerPrefs.GetFloat(legacyOffsetKey);
@@ -2314,17 +2323,17 @@ public static class RuntimeValidation
         Require(managedBytes == 0,
             $"Continuous Hold frames must allocate zero managed bytes after warm-up, got {managedBytes}");
 
-        Debug.Log($"GUGARYTHM_TASK4_TIMING_REUSE_OK chartTime={chartTime:0.###} inputTime={inputChartTime:0.###} " +
+        Debug.Log($"GUGARHYTHM_TASK4_TIMING_REUSE_OK chartTime={chartTime:0.###} inputTime={inputChartTime:0.###} " +
                   $"deviceOffset={replacedOffset:0.###} managedBytes={managedBytes} outputCapacity={steadyOutput.Capacity}");
     }
 
     public static void ValidateGameplayUpdateThreadAllocation()
     {
-        const string legacyOffsetKey = "gugarythm-audio-offset-seconds";
-        const string settingsOffsetKey = "gugarythm-settings-delay-offset-seconds";
-        const string scrollSpeedKey = "gugarythm-scroll-speed";
-        const string musicVolumeKey = "gugarythm-music-volume";
-        const string keyVolumeKey = "gugarythm-key-volume";
+        const string legacyOffsetKey = "gugarhythm-audio-offset-seconds";
+        const string settingsOffsetKey = "gugarhythm-settings-delay-offset-seconds";
+        const string scrollSpeedKey = "gugarhythm-scroll-speed";
+        const string musicVolumeKey = "gugarhythm-music-volume";
+        const string keyVolumeKey = "gugarhythm-key-volume";
         const System.Reflection.BindingFlags instanceFlags = System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.NonPublic;
         var controllerType = typeof(SonolusLandscapePrototype);
@@ -2419,7 +2428,7 @@ public static class RuntimeValidation
             updateAction();
             Require(managedBytes == 0,
                 $"The real warmed-up gameplay Update must allocate zero managed bytes, got {managedBytes}");
-            Debug.Log($"GUGARYTHM_TASK4_UPDATE_THREAD_ALLOC_OK warmup=32 frames=128 " +
+            Debug.Log($"GUGARHYTHM_TASK4_UPDATE_THREAD_ALLOC_OK warmup=32 frames=128 " +
                       $"threadBytes={managedBytes} idleUpdate=1");
         }
         finally
@@ -2468,9 +2477,9 @@ public static class RuntimeValidation
 
     public static void ValidateGameplayUpdateStateRestoration()
     {
-        const string scrollSpeedKey = "gugarythm-scroll-speed";
-        const string musicVolumeKey = "gugarythm-music-volume";
-        const string keyVolumeKey = "gugarythm-key-volume";
+        const string scrollSpeedKey = "gugarhythm-scroll-speed";
+        const string musicVolumeKey = "gugarhythm-music-volume";
+        const string keyVolumeKey = "gugarhythm-key-volume";
         var hadScrollSpeed = PlayerPrefs.HasKey(scrollSpeedKey);
         var hadMusicVolume = PlayerPrefs.HasKey(musicVolumeKey);
         var hadKeyVolume = PlayerPrefs.HasKey(keyVolumeKey);
@@ -2506,7 +2515,7 @@ public static class RuntimeValidation
                     UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled &&
                     (fixtureMouse == null || fixtureMouse.enabled == fixtureMouseWasEnabled),
                 "The real-Awake profiler fixture must restore TouchSimulation and Mouse enabled states");
-            Debug.Log("GUGARYTHM_TASK4_UPDATE_STATE_RESTORE_OK prefs=3 touchSimulation=True mouseRestored=True");
+            Debug.Log("GUGARHYTHM_TASK4_UPDATE_STATE_RESTORE_OK prefs=3 touchSimulation=True mouseRestored=True");
         }
         finally
         {
@@ -2605,12 +2614,12 @@ public static class RuntimeValidation
             }
 
             if (exception != null)
-                Debug.LogError($"GUGARYTHM_VALIDATION_FAILED: {exception.Message}\n{exception}");
+                Debug.LogError($"GUGARHYTHM_VALIDATION_FAILED: {exception.Message}\n{exception}");
             if (cleanupException != null)
-                Debug.LogError($"GUGARYTHM_VALIDATION_FAILED: Profiler cleanup failed: " +
+                Debug.LogError($"GUGARHYTHM_VALIDATION_FAILED: Profiler cleanup failed: " +
                                $"{cleanupException.Message}\n{cleanupException}");
             if (exitCode == 0)
-                Debug.Log("GUGARYTHM_TASK4_EDITOR_FRAME_STATE_RESTORE_OK prefs=5 " +
+                Debug.Log("GUGARHYTHM_TASK4_EDITOR_FRAME_STATE_RESTORE_OK prefs=5 " +
                           "touchSimulation=True mouse=True enhancedTouch=True globals=True");
             EditorApplication.Exit(exitCode);
         }
@@ -2671,11 +2680,11 @@ public static class RuntimeValidation
             readonly bool originalMouseWasEnabled;
             readonly PreferenceSnapshot[] preferences =
             {
-                new("gugarythm-audio-offset-seconds"),
-                new("gugarythm-settings-delay-offset-seconds"),
-                new("gugarythm-scroll-speed"),
-                new("gugarythm-music-volume"),
-                new("gugarythm-key-volume"),
+                new("gugarhythm-audio-offset-seconds"),
+                new("gugarhythm-settings-delay-offset-seconds"),
+                new("gugarhythm-scroll-speed"),
+                new("gugarhythm-music-volume"),
+                new("gugarhythm-key-volume"),
             };
 
             Action updateAction;
@@ -2789,7 +2798,7 @@ public static class RuntimeValidation
                                           ProfilerRecorderOptions.WrapAroundWhenCapacityReached |
                                           ProfilerRecorderOptions.CollectOnlyOnCurrentThread;
                             frameRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Scripts,
-                                "Gugarythm.GameplayFrame", MeasuredFrameCount + 16, options);
+                                "Gugarhythm.GameplayFrame", MeasuredFrameCount + 16, options);
                             var allocationOptions = ProfilerRecorderOptions.StartImmediately |
                                                     ProfilerRecorderOptions.WrapAroundWhenCapacityReached |
                                                     ProfilerRecorderOptions.CollectOnlyOnCurrentThread;
@@ -2797,7 +2806,7 @@ public static class RuntimeValidation
                                 "GC.Alloc", 16, allocationOptions);
                             recordersStarted = true;
                             Require(frameRecorder.Valid,
-                                "The multi-frame profiler must bind Gugarythm.GameplayFrame");
+                                "The multi-frame profiler must bind Gugarhythm.GameplayFrame");
                             Require(gcAllocRecorder.Valid,
                                 "The multi-frame profiler must bind Unity's current-thread GC.Alloc marker");
                             phase = Phase.PrimeRecorders;
@@ -2818,7 +2827,7 @@ public static class RuntimeValidation
                                               ProfilerRecorderOptions.WrapAroundWhenCapacityReached |
                                               ProfilerRecorderOptions.CollectOnlyOnCurrentThread;
                             idleFrameRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Scripts,
-                                "Gugarythm.GameplayFrame", 8, idleOptions);
+                                "Gugarhythm.GameplayFrame", 8, idleOptions);
                             idleRecorderStarted = true;
                             Require(idleFrameRecorder.Valid,
                                 "The multi-frame profiler must bind the early-return gameplay marker");
@@ -2868,7 +2877,7 @@ public static class RuntimeValidation
                 Require(idleMarkerSamples > 0,
                     "ProfilerRecorder must inspect a flushed gameplay marker sample on the early-return frame");
 
-                Debug.Log($"GUGARYTHM_TASK4_EDITOR_FRAME_PROFILER_OK warmup={warmupFrames} " +
+                Debug.Log($"GUGARHYTHM_TASK4_EDITOR_FRAME_PROFILER_OK warmup={warmupFrames} " +
                           $"measuredFrames={measuredFrames} markerSamples={markerSamples} " +
                           $"markerLastNanoseconds={markerLastNanoseconds} idleMarkerSamples={idleMarkerSamples} " +
                           $"gcAllocSamples={gcAllocSamples} scopedThreadBytes={scopedThreadBytes} " +
@@ -3174,7 +3183,7 @@ public static class RuntimeValidation
 
     static void Require(bool condition, string message)
     {
-        if (!condition) throw new InvalidOperationException("GUGARYTHM_VALIDATION_FAILED: " + message);
+        if (!condition) throw new InvalidOperationException("GUGARHYTHM_VALIDATION_FAILED: " + message);
     }
 }
 

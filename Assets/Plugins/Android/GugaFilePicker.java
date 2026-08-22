@@ -18,7 +18,7 @@ import java.util.List;
 public final class GugaFilePicker {
     static final int REQUEST_FILE = 6194;
     static final int REQUEST_FOLDER = 6195;
-    private static final String PREFS = "gugarythm_import";
+    private static final String PREFS = "gugarhythm_import";
     private static final String RESULT = "result_path";
 
     public static void openFile(Activity activity) {
@@ -46,7 +46,7 @@ public final class GugaFilePicker {
         if (requestCode != REQUEST_FILE && requestCode != REQUEST_FOLDER) return false;
         if (resultCode != Activity.RESULT_OK || data == null) return true;
         try {
-            File root = new File(activity.getCacheDir(), "GugarythmImports");
+            File root = new File(activity.getCacheDir(), "GugarhythmImports");
             if (!root.exists() && !root.mkdirs()) throw new IllegalStateException("Cannot create import cache");
             List<String> results = new ArrayList<>();
             if (requestCode == REQUEST_FOLDER) {

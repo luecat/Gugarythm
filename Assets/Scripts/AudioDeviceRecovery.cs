@@ -1,6 +1,6 @@
 using UnityEngine;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public static class AudioDeviceRecovery
     {

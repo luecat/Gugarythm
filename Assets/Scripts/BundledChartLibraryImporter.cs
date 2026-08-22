@@ -7,17 +7,18 @@ using System.Text;
 using UnityEngine;
 using UnityEngine.Networking;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public static class BundledChartLibraryImporter
     {
         public const string Version = "2026-08-22-bundled-ggr-1";
 
-        const string PreferenceKey = "gugarythm-bundled-charts-version";
+        const string PreferenceKey = "gugarhythm-bundled-charts-version";
         const string ManifestPath = "BundledCharts/bundled-ggr.txt";
 
         public static IEnumerator ImportAll(Action<string> report = null)
         {
+            GugarhythmPreferenceMigration.Migrate();
             if (PlayerPrefs.GetString(PreferenceKey, string.Empty) == Version) yield break;
 
             byte[] manifestBytes = null;
@@ -71,7 +72,7 @@ namespace Gugarythm
             if (!complete) yield break;
             PlayerPrefs.SetString(PreferenceKey, Version);
             PlayerPrefs.Save();
-            Debug.Log("GUGARYTHM_BUNDLED_CHARTS_IMPORTED count=" + importedCount);
+            Debug.Log("GUGARHYTHM_BUNDLED_CHARTS_IMPORTED count=" + importedCount);
         }
 
         static string[] ParseManifest(string text) => (text ?? string.Empty)

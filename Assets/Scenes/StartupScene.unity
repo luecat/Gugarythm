@@ -130,7 +130,7 @@ GameObject:
   - component: {fileID: 425002451}
   - component: {fileID: 425002450}
   m_Layer: 0
-  m_Name: Gugarythm Startup
+  m_Name: Gugarhythm Startup
   m_TagString: Untagged
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
@@ -147,7 +147,7 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 7fdd98d96bcaf460ba2727cc8c66f264, type: 3}
   m_Name: 
-  m_EditorClassIdentifier: Assembly-CSharp::Gugarythm.GugarythmStartupSplash
+  m_EditorClassIdentifier: Assembly-CSharp::Gugarhythm.GugarhythmStartupSplash
   splash: {fileID: 21300000, guid: b6f2adf5755be43688a4eb930a8446e0, type: 3}
   displaySeconds: 1.5
 --- !u!4 &425002451

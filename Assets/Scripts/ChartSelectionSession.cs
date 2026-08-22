@@ -1,7 +1,7 @@
 using System;
 using UnityEngine;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     /// <summary>
     /// Keeps the chart selected in the library alive while Unity changes scenes.

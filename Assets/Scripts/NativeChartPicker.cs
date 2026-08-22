@@ -2,7 +2,7 @@ using UnityEngine;
 using System;
 using System.Linq;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public static class NativeChartPicker
     {

@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     // A three-slice UI image: the source's left and right caps keep their shape,
     // while only the center section stretches horizontally.

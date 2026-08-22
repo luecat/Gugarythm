@@ -17,7 +17,7 @@ public static class DisableTouchSimulation
         EditorApplication.playModeStateChanged += _ => EditorApplication.delayCall += Apply;
     }
 
-    [MenuItem("Gugarythm/Disable Touch Simulation")]
+    [MenuItem("Gugarhythm/Disable Touch Simulation")]
     public static void Apply()
     {
         EnableInputSystemBackend();
@@ -38,7 +38,7 @@ public static class DisableTouchSimulation
         var mouse = Mouse.current;
         var flagsField = typeof(InputDevice).GetField("m_DeviceFlags", BindingFlags.NonPublic | BindingFlags.Instance);
         var flags = mouse == null ? "none" : flagsField?.GetValue(mouse)?.ToString() ?? "unknown";
-        Debug.Log($"GUGARYTHM_MOUSE_READY enabled={mouse?.enabled ?? false} added={mouse?.added ?? false} " +
+        Debug.Log($"GUGARHYTHM_MOUSE_READY enabled={mouse?.enabled ?? false} added={mouse?.added ?? false} " +
                   $"native={mouse?.native ?? false} flags={flags} touchSimulation={TouchSimulation.instance?.enabled ?? false} " +
                   $"position={mouse?.position.ReadValue() ?? Vector2.zero}");
     }

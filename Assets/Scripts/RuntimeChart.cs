@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public enum RuntimeNoteKind { Tap, Flick, Sustain, Release }
     public enum JudgmentGrade { Pending, Perfect, Great, Good, Miss }

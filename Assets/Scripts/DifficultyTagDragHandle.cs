@@ -3,7 +3,7 @@ using System.Collections;
 using UnityEngine;
 using UnityEngine.EventSystems;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class DifficultyTagDragHandle : MonoBehaviour, IBeginDragHandler, IDragHandler, IEndDragHandler
     {

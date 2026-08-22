@@ -1,6 +1,6 @@
 using System;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     /// <summary>
     /// Owns the conversion between the chart clock and audio playback phase.

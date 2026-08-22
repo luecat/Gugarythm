@@ -1,4 +1,4 @@
-Shader "Gugarythm/Black Transparent UI"
+Shader "Gugarhythm/Black Transparent UI"
 {
     Properties
     {

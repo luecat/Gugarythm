@@ -8,7 +8,7 @@ using System.Text;
 using System.Text.RegularExpressions;
 using Newtonsoft.Json.Linq;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class LevelDataImporter : IChartImporter
     {

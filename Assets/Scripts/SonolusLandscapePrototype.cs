@@ -17,15 +17,58 @@ using Unity.Profiling;
 #endif
 using Touch = UnityEngine.InputSystem.EnhancedTouch.Touch;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
+    public static class GugarhythmPreferenceMigration
+    {
+        const string CurrentPrefix = "gugarhythm-";
+        static readonly string LegacyPrefix = "guga" + "rythm-";
+        static bool migrated;
+
+        public static void Migrate()
+        {
+            if (migrated) return;
+            migrated = true;
+            var changed = false;
+            foreach (var suffix in new[]
+                     {
+                         "audio-offset-seconds", "settings-delay-offset-seconds", "scroll-speed",
+                         "music-volume", "key-volume",
+                     })
+                changed |= MigrateFloat(suffix);
+            changed |= MigrateString("bundled-charts-version");
+            if (changed) PlayerPrefs.Save();
+        }
+
+        static bool MigrateFloat(string suffix)
+        {
+            var currentKey = CurrentPrefix + suffix;
+            var legacyKey = LegacyPrefix + suffix;
+            if (!PlayerPrefs.HasKey(legacyKey)) return false;
+            if (!PlayerPrefs.HasKey(currentKey)) PlayerPrefs.SetFloat(currentKey, PlayerPrefs.GetFloat(legacyKey));
+            PlayerPrefs.DeleteKey(legacyKey);
+            return true;
+        }
+
+        static bool MigrateString(string suffix)
+        {
+            var currentKey = CurrentPrefix + suffix;
+            var legacyKey = LegacyPrefix + suffix;
+            if (!PlayerPrefs.HasKey(legacyKey)) return false;
+            if (!PlayerPrefs.HasKey(currentKey)) PlayerPrefs.SetString(currentKey, PlayerPrefs.GetString(legacyKey));
+            PlayerPrefs.DeleteKey(legacyKey);
+            return true;
+        }
+    }
+
     public static class GameplayTimingPreferences
     {
-        const string LegacyDeviceOffsetKey = "gugarythm-audio-offset-seconds";
-        const string SettingsDeviceOffsetKey = "gugarythm-settings-delay-offset-seconds";
+        const string LegacyDeviceOffsetKey = "gugarhythm-audio-offset-seconds";
+        const string SettingsDeviceOffsetKey = "gugarhythm-settings-delay-offset-seconds";
 
         public static double LoadDeviceOffset()
         {
+            GugarhythmPreferenceMigration.Migrate();
             var storedLegacyOffset = PlayerPrefs.GetFloat(LegacyDeviceOffsetKey, 0f);
             var legacyOffset = SonolusLandscapePrototype.SanitizeAudioOffset(storedLegacyOffset);
             var settingsOffset = SettingsDelayAdjustment.Clamp(PlayerPrefs.GetFloat(
@@ -97,13 +140,13 @@ namespace Gugarythm
     public sealed class SonolusLandscapePrototype : MonoBehaviour
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-        static readonly ProfilerMarker GameplayFrameProfiler = new("Gugarythm.GameplayFrame");
-        static readonly ProfilerMarker UpdateVisualsProfiler = new("Gugarythm.UpdateVisuals");
-        static readonly ProfilerMarker NotesProfiler = new("Gugarythm.UpdateVisuals.Notes");
-        static readonly ProfilerMarker HoldsProfiler = new("Gugarythm.UpdateVisuals.Holds");
-        static readonly ProfilerMarker GuidesProfiler = new("Gugarythm.UpdateVisuals.Guides");
-        static readonly ProfilerMarker SimLinesProfiler = new("Gugarythm.UpdateVisuals.SimLines");
-        static readonly ProfilerMarker HoldMeshSubmissionProfiler = new("Gugarythm.UpdateVisuals.HoldMeshSubmission");
+        static readonly ProfilerMarker GameplayFrameProfiler = new("Gugarhythm.GameplayFrame");
+        static readonly ProfilerMarker UpdateVisualsProfiler = new("Gugarhythm.UpdateVisuals");
+        static readonly ProfilerMarker NotesProfiler = new("Gugarhythm.UpdateVisuals.Notes");
+        static readonly ProfilerMarker HoldsProfiler = new("Gugarhythm.UpdateVisuals.Holds");
+        static readonly ProfilerMarker GuidesProfiler = new("Gugarhythm.UpdateVisuals.Guides");
+        static readonly ProfilerMarker SimLinesProfiler = new("Gugarhythm.UpdateVisuals.SimLines");
+        static readonly ProfilerMarker HoldMeshSubmissionProfiler = new("Gugarhythm.UpdateVisuals.HoldMeshSubmission");
 #endif
         public readonly struct NoteSurfaceQuad
         {
@@ -590,12 +633,13 @@ namespace Gugarythm
 
         void Awake()
         {
+            GugarhythmPreferenceMigration.Migrate();
             holdPointProjector = ProjectHoldPoint;
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.targetFrameRate = 120;
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
-            scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
+            scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarhythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
             audioOffsetSeconds = GameplayTimingPreferences.LoadDeviceOffset();
             settingsDelayOffsetSeconds = audioOffsetSeconds;
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -613,7 +657,7 @@ namespace Gugarythm
         {
             // Every scene owns a fresh presentation/controller.  Only the
             // selected package crosses the boundary through ChartSelectionSession.
-            if (GugarythmSceneRouter.IsLibrary)
+            if (GugarhythmSceneRouter.IsLibrary)
             {
                 SetGameplayStageVisible(false);
                 SetMenuHudVisible(false);
@@ -625,7 +669,7 @@ namespace Gugarythm
                 yield break;
             }
 
-            if (GugarythmSceneRouter.IsSettings)
+            if (GugarhythmSceneRouter.IsSettings)
             {
                 SetGameplayStageVisible(false);
                 SetMenuHudVisible(false);
@@ -634,7 +678,7 @@ namespace Gugarythm
                 yield break;
             }
 
-            if (GugarythmSceneRouter.IsChartEditor)
+            if (GugarhythmSceneRouter.IsChartEditor)
             {
                 SetGameplayStageVisible(false);
                 SetMenuHudVisible(false);
@@ -650,7 +694,7 @@ namespace Gugarythm
             chartEditorPanel.gameObject.SetActive(false);
             if (!ChartSelectionSession.Ensure().TryGetSelection(out var entry, out var bytes))
             {
-                GugarythmSceneRouter.OpenLibrary();
+                GugarhythmSceneRouter.OpenLibrary();
                 yield break;
             }
 
@@ -706,7 +750,7 @@ namespace Gugarythm
             if (!result.Success)
             {
                 Debug.LogError("無法載入跨場景選取的譜面：" + result.Error);
-                GugarythmSceneRouter.OpenLibrary();
+                GugarhythmSceneRouter.OpenLibrary();
                 yield break;
             }
 
@@ -720,7 +764,7 @@ namespace Gugarythm
             if (!musicLoadSucceeded)
             {
                 Debug.LogError("跨場景選取的 GGR 音樂無法解碼。");
-                GugarythmSceneRouter.OpenLibrary();
+                GugarhythmSceneRouter.OpenLibrary();
                 yield break;
             }
 
@@ -872,7 +916,7 @@ namespace Gugarythm
                 speedSlider.SetValueWithoutNotify(value);
             if (speedLabel != null)
                 speedLabel.text = $"{value:F1}";
-            PlayerPrefs.SetFloat("gugarythm-scroll-speed", value);
+            PlayerPrefs.SetFloat("gugarhythm-scroll-speed", value);
         }
 
         void SetSettingsMusicVolume(float value)
@@ -880,7 +924,7 @@ namespace Gugarythm
             value = Mathf.Clamp01(value);
             if (music != null) music.volume = value;
             if (settingsMusicVolumeLabel != null) settingsMusicVolumeLabel.text = $"{value * 100f:0}%";
-            PlayerPrefs.SetFloat("gugarythm-music-volume", value);
+            PlayerPrefs.SetFloat("gugarhythm-music-volume", value);
             PlayerPrefs.Save();
         }
 
@@ -890,7 +934,7 @@ namespace Gugarythm
             if (effects != null) effects.volume = value;
             if (holdEffects != null) holdEffects.volume = value;
             if (settingsKeyVolumeLabel != null) settingsKeyVolumeLabel.text = $"{value * 100f:0}%";
-            PlayerPrefs.SetFloat("gugarythm-key-volume", value);
+            PlayerPrefs.SetFloat("gugarhythm-key-volume", value);
             PlayerPrefs.Save();
         }
 
@@ -1166,7 +1210,7 @@ namespace Gugarythm
 
         void StartGame()
         {
-            if (GugarythmSceneRouter.IsLibrary)
+            if (GugarhythmSceneRouter.IsLibrary)
             {
                 if (loading || selectedLibraryEntry == null) return;
                 if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
@@ -1181,7 +1225,7 @@ namespace Gugarythm
                     return;
                 }
 
-                GugarythmSceneRouter.OpenGameplay();
+                GugarhythmSceneRouter.OpenGameplay();
                 return;
             }
 
@@ -1342,7 +1386,7 @@ namespace Gugarythm
             resultPanel.gameObject.SetActive(false);
             RefreshHud();
             ShowJudgment("", Color.white);
-            GugarythmSceneRouter.OpenLibrary();
+            GugarhythmSceneRouter.OpenLibrary();
         }
 
         void CancelResumeCountdown()
@@ -2529,13 +2573,13 @@ namespace Gugarythm
             var laneArtOffset = (LaneTextureWidth * .5f - LaneTextureCenterX) / LaneTextureWidth * ReferenceWidth;
             lane.offsetMin = new Vector2(laneArtOffset, 0);
             lane.offsetMax = new Vector2(laneArtOffset, 0);
-            var laneShader = Shader.Find("Gugarythm/Black Transparent UI");
+            var laneShader = Shader.Find("Gugarhythm/Black Transparent UI");
             if (laneShader != null)
             {
                 laneMaterial = new Material(laneShader);
                 lane.GetComponent<RawImage>().material = laneMaterial;
             }
-            var missedHoldShader = Shader.Find("Gugarythm/Desaturate UI");
+            var missedHoldShader = Shader.Find("Gugarhythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
             BuildInputLaneFeedback(stage);
             guideLayer = Layer("Decoration Guides", stage);
@@ -2720,7 +2764,7 @@ namespace Gugarythm
             var fullScreenRoot = root.parent as RectTransform;
             libraryBackdrop = Panel("Library Cutout Backdrop", fullScreenRoot, new Color(.16f, .16f, .16f, 1f), Vector2.zero, Vector2.zero, true);
             libraryBackdrop.SetSiblingIndex(root.GetSiblingIndex());
-            libraryBackdrop.gameObject.SetActive(GugarythmSceneRouter.IsLibrary);
+            libraryBackdrop.gameObject.SetActive(GugarhythmSceneRouter.IsLibrary);
             menuPanel = Panel("Chart Library", root, new Color(.11f, .11f, .11f, 1f), new Vector2(1500, 820), Vector2.zero);
             Fill(menuPanel);
             menuPanel.localScale = Vector3.one;
@@ -2731,7 +2775,7 @@ namespace Gugarythm
             var detail = Panel("Detail Pane", menuPanel, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
             detail.anchorMin = new Vector2(.244f, 0); detail.anchorMax = new Vector2(1, 1); detail.offsetMin = new Vector2(1, 0); detail.offsetMax = Vector2.zero;
 
-            var brand = Label("GUGARYTHM", library, 19); brand.color = new Color(.68f, .68f, .68f); brand.alignment = TextAnchor.MiddleLeft; brand.rectTransform.sizeDelta = new Vector2(260, 36); PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -34));
+            var brand = Label("GUGARHYTHM", library, 19); brand.color = new Color(.68f, .68f, .68f); brand.alignment = TextAnchor.MiddleLeft; brand.rectTransform.sizeDelta = new Vector2(260, 36); PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -34));
             var heading = Label("譜面保管庫", library, 30); heading.alignment = TextAnchor.MiddleLeft; heading.rectTransform.sizeDelta = new Vector2(270, 50); PinToAnchor(heading.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -74));
             var countBadge = Panel("Chart Count Badge", library, new Color(.24f, .24f, .24f), new Vector2(42, 42), Vector2.zero);
             PinToAnchor(countBadge, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-38, -42));
@@ -2777,7 +2821,7 @@ namespace Gugarythm
             var coverBlue = Panel("Cover Blue", detailCoverFallback, new Color(.23f, .35f, .77f), new Vector2(760, 245), new Vector2(145, -190));
             coverBlue.localRotation = Quaternion.Euler(0, 0, -45);
             var coverLetter = Label("G", detailCoverFallback, 142); coverLetter.color = new Color(1f, 1f, 1f, .16f); Fill(coverLetter.rectTransform);
-            var coverBrand = Label("GUGARYTHM\nCHART ARCHIVE", detailCoverFallback, 15); coverBrand.alignment = TextAnchor.UpperRight; coverBrand.rectTransform.sizeDelta = new Vector2(210, 70); coverBrand.rectTransform.anchoredPosition = new Vector2(112, 185);
+            var coverBrand = Label("GUGARHYTHM\nCHART ARCHIVE", detailCoverFallback, 15); coverBrand.alignment = TextAnchor.UpperRight; coverBrand.rectTransform.sizeDelta = new Vector2(210, 70); coverBrand.rectTransform.anchoredPosition = new Vector2(112, 185);
             detailCoverImage = RawPanel("Cover Artwork", cover, null, Color.white, Vector2.zero, Vector2.zero, true).GetComponent<RawImage>();
             var coverAspect = detailCoverImage.gameObject.AddComponent<AspectRatioFitter>();
             coverAspect.aspectMode = CoverPresentationAspectMode();
@@ -2820,7 +2864,7 @@ namespace Gugarythm
             musicVolumeTitle.alignment = TextAnchor.MiddleLeft;
             musicVolumeTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             musicVolumeTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
-            settingsMusicVolumeSlider = MakeSlider(card, new Vector2(0, 225), 0f, 1f, PlayerPrefs.GetFloat("gugarythm-music-volume", 1f), SetSettingsMusicVolume);
+            settingsMusicVolumeSlider = MakeSlider(card, new Vector2(0, 225), 0f, 1f, PlayerPrefs.GetFloat("gugarhythm-music-volume", 1f), SetSettingsMusicVolume);
             settingsMusicVolumeSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
             settingsMusicVolumeLabel = Label("100%", card, 20);
             settingsMusicVolumeLabel.rectTransform.sizeDelta = new Vector2(700, 36);
@@ -2830,7 +2874,7 @@ namespace Gugarythm
             keyVolumeTitle.alignment = TextAnchor.MiddleLeft;
             keyVolumeTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             keyVolumeTitle.rectTransform.anchoredPosition = new Vector2(0, 105);
-            settingsKeyVolumeSlider = MakeSlider(card, new Vector2(0, 50), 0f, 1f, PlayerPrefs.GetFloat("gugarythm-key-volume", 1f), SetSettingsKeyVolume);
+            settingsKeyVolumeSlider = MakeSlider(card, new Vector2(0, 50), 0f, 1f, PlayerPrefs.GetFloat("gugarhythm-key-volume", 1f), SetSettingsKeyVolume);
             settingsKeyVolumeSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
             settingsKeyVolumeLabel = Label("100%", card, 20);
             settingsKeyVolumeLabel.rectTransform.sizeDelta = new Vector2(700, 36);
@@ -3003,7 +3047,7 @@ namespace Gugarythm
                 SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。");
                 return;
             }
-            GugarythmSceneRouter.OpenChartEditor();
+            GugarhythmSceneRouter.OpenChartEditor();
         }
 
         void SaveChartEditor()
@@ -3021,7 +3065,7 @@ namespace Gugarythm
             selectedDifficultyName = updated.DifficultyName ?? string.Empty;
             if (LocalChartLibrary.TryReadSource(updated, out var bytes)) ChartSelectionSession.Ensure().SetSelection(updated, bytes);
             ChartSelectionSession.Ensure().ClearEditorDraft();
-            GugarythmSceneRouter.OpenLibrary();
+            GugarhythmSceneRouter.OpenLibrary();
         }
 
         void RefreshChartEditorTagOptions()
@@ -3049,7 +3093,7 @@ namespace Gugarythm
         void OpenSettingsForDifficultyTags()
         {
             ChartSelectionSession.Ensure().SetEditorDraft(chartEditorTitleInput.text, chartEditorAuthorInput.text, chartEditorDifficultyNameInput.text, chartEditorLevelInput.text);
-            GugarythmSceneRouter.OpenSettings();
+            GugarhythmSceneRouter.OpenSettings();
         }
 
         void CreateDifficultyTag()
@@ -3114,10 +3158,10 @@ namespace Gugarythm
                 return;
             }
             ChartSelectionSession.Ensure().Clear();
-            GugarythmSceneRouter.OpenLibrary();
+            GugarhythmSceneRouter.OpenLibrary();
         }
 
-        void ReturnFromChartEditor() => GugarythmSceneRouter.OpenLibrary();
+        void ReturnFromChartEditor() => GugarhythmSceneRouter.OpenLibrary();
 
         void CycleLibrarySort()
         {
@@ -3214,7 +3258,7 @@ namespace Gugarythm
             selectedLibraryEntry = entry;
             currentLibraryEntry = entry;
             selectedDifficultyName = entry.DifficultyName ?? string.Empty;
-            if (GugarythmSceneRouter.IsLibrary)
+            if (GugarhythmSceneRouter.IsLibrary)
             {
                 if (startButton != null) startButton.interactable = true;
                 RefreshLibraryUI();
@@ -3402,15 +3446,15 @@ namespace Gugarythm
         {
             if (selectedLibraryEntry != null && LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
                 ChartSelectionSession.Ensure().SetSelection(selectedLibraryEntry, bytes);
-            GugarythmSceneRouter.OpenSettings();
+            GugarhythmSceneRouter.OpenSettings();
         }
 
         void ReturnFromSettings()
         {
             calibrationActive = false;
             StopCalibrationTickAudio();
-            if (ChartSelectionSession.Ensure().TryGetEditorDraft(out _, out _, out _, out _)) GugarythmSceneRouter.OpenChartEditor();
-            else GugarythmSceneRouter.OpenLibrary();
+            if (ChartSelectionSession.Ensure().TryGetEditorDraft(out _, out _, out _, out _)) GugarhythmSceneRouter.OpenChartEditor();
+            else GugarhythmSceneRouter.OpenLibrary();
         }
 
         void BuildLatencyCalibration(RectTransform root)
@@ -3460,7 +3504,7 @@ namespace Gugarythm
             resultPanel = Panel("Result", root, new Color(.04f, .06f, .14f, .96f), new Vector2(620, 650), Vector2.zero); Outline(resultPanel.gameObject, new Color(.9f, .5f, 1f, .75f), 3);
             var title = Label("RESULT", resultPanel, 38); title.rectTransform.sizeDelta = new Vector2(580, 70); title.rectTransform.anchoredPosition = new Vector2(0, 260);
             resultText = Label("", resultPanel, 27); resultText.rectTransform.sizeDelta = new Vector2(540, 440); resultText.rectTransform.anchoredPosition = new Vector2(0, 25);
-            MakeButton("返回曲庫", resultPanel, new Vector2(0, -270), GugarythmSceneRouter.OpenLibrary);
+            MakeButton("返回曲庫", resultPanel, new Vector2(0, -270), GugarhythmSceneRouter.OpenLibrary);
             resultPanel.gameObject.SetActive(false);
         }
 

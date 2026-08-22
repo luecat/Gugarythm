@@ -3,7 +3,7 @@ using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class RhythmPrototype : MonoBehaviour
     {

@@ -1,6 +1,6 @@
 using System;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public sealed class HoldPathEvaluator
     {

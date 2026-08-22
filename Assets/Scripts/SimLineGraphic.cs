@@ -1,7 +1,7 @@
 using UnityEngine;
 using UnityEngine.UI;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     // Thin synchronization line joining notes that share a chart moment.
     // Unlike hold/guide ribbons, thickness is perpendicular to the line.

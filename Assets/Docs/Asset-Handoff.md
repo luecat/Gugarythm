@@ -1,4 +1,4 @@
-# Gugarythm asset handoff
+# Gugarhythm asset handoff
 
 目前原型用程式繪製，不會把參考截圖或影片直接打包進遊戲。正式素材可依下列位置交付。
 

@@ -2,7 +2,7 @@ using System;
 using System.Collections.Generic;
 using UnityEngine;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     public readonly struct HoldTessellationPoint
     {

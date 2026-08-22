@@ -1,12 +1,12 @@
 using UnityEngine.SceneManagement;
 
-namespace Gugarythm
+namespace Gugarhythm
 {
     /// <summary>
     /// Centralises the three player-facing scene routes so UI code does not
     /// scatter scene names or depend on build indices.
     /// </summary>
-    public static class GugarythmSceneRouter
+    public static class GugarhythmSceneRouter
     {
         public const string LibraryScene = "LibraryScene";
         public const string SettingsScene = "SettingsScene";
