@@ -50,14 +50,9 @@ namespace Gugarhythm
             Right,
         }
 
-        // A two-times half-width miter decision keeps ordinary corners smooth;
-        // sharper turns keep unit-length outer endpoints and use a bevel.
-        const float MiterRatioLimit = 2f;
         const float DirectionEpsilonSqr = .0001f;
         const float TriangleAreaEpsilon = .00001f;
         RibbonSection[] sections = new RibbonSection[4];
-        Vector2[] incomingTangents = new Vector2[2];
-        Vector2[] outgoingTangents = new Vector2[2];
         int[] coalescedPathIndices = new int[2];
         int sectionCount;
 
@@ -177,20 +172,6 @@ namespace Gugarhythm
             }
             if (coalescedCount < 2) return;
 
-            incomingTangents[0] = Vector2.zero;
-            for (var index = 1; index < coalescedCount; index++)
-            {
-                var delta = path[coalescedPathIndices[index]] - path[coalescedPathIndices[index - 1]];
-                incomingTangents[index] = delta.normalized;
-            }
-
-            outgoingTangents[coalescedCount - 1] = Vector2.zero;
-            for (var index = coalescedCount - 2; index >= 0; index--)
-            {
-                var delta = path[coalescedPathIndices[index + 1]] - path[coalescedPathIndices[index]];
-                outgoingTangents[index] = delta.normalized;
-            }
-
             var totalDistance = 0f;
             for (var index = 1; index < coalescedCount; index++)
                 totalDistance += Vector2.Distance(path[coalescedPathIndices[index - 1]], path[coalescedPathIndices[index]]);
@@ -202,75 +183,17 @@ namespace Gugarhythm
                     distance += Vector2.Distance(path[coalescedPathIndices[index - 1]], path[coalescedPathIndices[index]]);
                 var v = totalDistance > 0 ? distance / totalDistance : (float)index / (coalescedCount - 1);
                 var pathIndex = coalescedPathIndices[index];
-                var incoming = incomingTangents[index];
-                var outgoing = outgoingTangents[index];
-
-                if (incoming == Vector2.zero && outgoing == Vector2.zero) continue;
-                if (incoming == Vector2.zero)
-                {
-                    AddSection(pathIndex, Perpendicular(outgoing), v);
-                    continue;
-                }
-                if (outgoing == Vector2.zero)
-                {
-                    AddSection(pathIndex, Perpendicular(incoming), v);
-                    continue;
-                }
-
-                var incomingNormal = Perpendicular(incoming);
-                var outgoingNormal = Perpendicular(outgoing);
-                var miter = incomingNormal + outgoingNormal;
-                var miterLengthSqr = miter.sqrMagnitude;
-                if (miterLengthSqr > DirectionEpsilonSqr)
-                {
-                    miter /= Mathf.Sqrt(miterLengthSqr);
-                    var denominator = Vector2.Dot(miter, outgoingNormal);
-                    if (denominator > 0)
-                    {
-                        var ratio = 1f / denominator;
-                        if (ratio <= MiterRatioLimit)
-                        {
-                            AddSection(pathIndex, miter * ratio, v);
-                            continue;
-                        }
-
-                        // The inside edges still meet at their true offset-line
-                        // intersection. The outside endpoints stay at one
-                        // half-width and are joined by one bevel triangle.
-                        var innerOffset = miter * ratio;
-                        var turn = incoming.x * outgoing.y - incoming.y * outgoing.x;
-                        if (turn > 0)
-                        {
-                            AddSection(pathIndex, innerOffset, -incomingNormal, v);
-                            AddSection(pathIndex, innerOffset, -outgoingNormal, v);
-                            continue;
-                        }
-                        if (turn < 0)
-                        {
-                            AddSection(pathIndex, incomingNormal, -innerOffset, v);
-                            AddSection(pathIndex, outgoingNormal, -innerOffset, v);
-                            continue;
-                        }
-                    }
-                }
-
-                // Exact reversals have no finite inner intersection. Retain the
-                // bounded fallback sections and let the signed-area guard omit
-                // collapsed or reversed bridge triangles.
-                AddSection(pathIndex, incomingNormal, v);
-                AddSection(pathIndex, outgoingNormal, v);
+                // Width is authored in projected lane space, not in path-normal
+                // space. Keep every time slice horizontal so aspect ratio and
+                // sharp lane movement cannot rotate or enlarge the ribbon.
+                AddSection(pathIndex, Vector2.left, v);
             }
         }
 
         void EnsureGeometryCapacity(int count)
         {
-            if (incomingTangents.Length < count)
-            {
-                var capacity = Mathf.Max(count, incomingTangents.Length * 2);
-                incomingTangents = new Vector2[capacity];
-                outgoingTangents = new Vector2[capacity];
-                coalescedPathIndices = new int[capacity];
-            }
+            if (coalescedPathIndices.Length < count)
+                coalescedPathIndices = new int[Mathf.Max(count, coalescedPathIndices.Length * 2)];
             var requiredSections = count * 2;
             if (sections.Length < requiredSections)
                 sections = new RibbonSection[Mathf.Max(requiredSections, sections.Length * 2)];
@@ -293,8 +216,6 @@ namespace Gugarhythm
                 V = v,
             };
         }
-
-        static Vector2 Perpendicular(Vector2 direction) => new(-direction.y, direction.x);
 
         void AddStrip(VertexHelper helper, float widthScale, float widthPadding, float edgeInset, StripSide side, Color tint)
         {
@@ -359,6 +280,7 @@ namespace Gugarhythm
         {
             var twiceArea = (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
             if (twiceArea > TriangleAreaEpsilon) helper.AddTriangle(aIndex, bIndex, cIndex);
+            else if (twiceArea < -TriangleAreaEpsilon) helper.AddTriangle(aIndex, cIndex, bIndex);
         }
     }
 }
