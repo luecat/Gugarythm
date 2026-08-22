@@ -1282,7 +1282,7 @@ public static class RuntimeValidation
             return false;
         }
 
-        var straightPoints = new[] { new Vector2(0, 0), new Vector2(10, 0), new Vector2(20, 0) };
+        var straightPoints = new[] { new Vector2(0, 0), new Vector2(0, 10), new Vector2(0, 20) };
         Populate(straightPoints, new[] { 4f, 6f, 8f }, new[] { 1f, .5f, .25f });
         Debug.Log($"GUGARHYTHM_CONNECTOR_GEOMETRY_TOPOLOGY vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} expectedVertices=6 expectedTriangles=4");
         Require(mesh.vertexCount == 6 && mesh.triangles.Length == 12,
@@ -1299,6 +1299,7 @@ public static class RuntimeValidation
                 Math.Abs(Vector3.Distance(straightVertices[0], straightVertices[1]) - 4f) < .0001f &&
                 Math.Abs(Vector3.Distance(straightVertices[4], straightVertices[5]) - 8f) < .0001f,
             "Continuous Hold geometry must preserve submitted endpoints and widths");
+
         var straightUv = mesh.uv;
         Require(straightUv.All(value => Math.Abs(value.x - .1f) < .0001f || Math.Abs(value.x - .9f) < .0001f),
             "Continuous Hold geometry must preserve the configured horizontal texture inset");
@@ -1308,8 +1309,33 @@ public static class RuntimeValidation
                 Math.Abs(straightColors[4].a / 255f - .065f) < .01f,
             "Continuous Hold geometry must preserve fill alpha limits and per-point alpha multipliers");
 
-        var repeatedPoint = new Vector2(10, 0);
-        Populate(new[] { Vector2.zero, repeatedPoint, repeatedPoint, new Vector2(20, 0) },
+        var diagonalPoints = new[] { Vector2.zero, new Vector2(10, 10), new Vector2(20, 0) };
+        Populate(diagonalPoints, new[] { 4f, 6f, 8f });
+        var diagonalVertices = mesh.vertices;
+        var horizontalSections = mesh.vertexCount == 6;
+        for (var index = 0; horizontalSections && index < diagonalPoints.Length; index++)
+        {
+            var firstVertex = (Vector2)diagonalVertices[index * 2];
+            var secondVertex = (Vector2)diagonalVertices[index * 2 + 1];
+            var expectedHalfWidth = 2f + index;
+            horizontalSections &= Math.Abs(firstVertex.y - diagonalPoints[index].y) < .0001f &&
+                                  Math.Abs(secondVertex.y - diagonalPoints[index].y) < .0001f &&
+                                  Math.Abs(Mathf.Min(firstVertex.x, secondVertex.x) -
+                                           (diagonalPoints[index].x - expectedHalfWidth)) < .0001f &&
+                                  Math.Abs(Mathf.Max(firstVertex.x, secondVertex.x) -
+                                           (diagonalPoints[index].x + expectedHalfWidth)) < .0001f;
+        }
+        Require(horizontalSections,
+            "A Hold ribbon's submitted width must remain a horizontal lane cross-section on diagonal paths");
+
+        Populate(new[] { new Vector2(0, 20), new Vector2(0, 10), Vector2.zero },
+            new[] { 4f, 6f, 8f });
+        Require(mesh.vertexCount == 6 && mesh.triangles.Length == 12 &&
+                HasConsistentPositiveWinding() && !HasZeroAreaTriangle(),
+            "A reverse-projected Hold ribbon must preserve its strip with positive triangle winding");
+
+        var repeatedPoint = new Vector2(0, 10);
+        Populate(new[] { Vector2.zero, repeatedPoint, repeatedPoint, new Vector2(0, 20) },
             new[] { 4f, 6f, 10f, 8f }, new[] { 1f, .75f, .25f, .5f });
         var repeatedVertices = mesh.vertices;
         var repeatedColors = mesh.colors32;
@@ -1326,58 +1352,16 @@ public static class RuntimeValidation
                   $"interiorUses={EdgeUseCount(2, 3)} width={repeatedWidth:F3} alpha={repeatedAlpha:F3} " +
                   $"topology={repeatedTopologyOk} lastSampleSemantics={repeatedSemanticsOk}");
 
-        var cornerPoint = new Vector2(10, 0);
-        Populate(new[] { Vector2.zero, cornerPoint, new Vector2(10, 10) }, new[] { 4f, 4f, 4f });
-        var cornerVertices = mesh.vertices;
-        var miterRatio = Vector2.Distance((Vector2)cornerVertices[2], cornerPoint) / 2f;
-        Require(mesh.vertexCount == 6 && miterRatio > 1.4f && miterRatio < 1.42f && !HasZeroAreaTriangle(),
-            "A normal turn must share one averaged-tangent miter section without changing its authored half-width");
-
-        var sharpPoint = new Vector2(10, 0);
-        var bevelFixturesOk = true;
-        var bevelInnerRatio = 0f;
-        var bevelOuterMaxRatio = 0f;
-        foreach (var direction in new[] { 1f, -1f })
-        {
-            Populate(new[] { Vector2.zero, sharpPoint, new Vector2(5, direction * 5) }, new[] { 4f, 4f, 4f });
-            var sharpVertices = mesh.vertices;
-            var positiveInner = Vector2.Distance((Vector2)sharpVertices[2], (Vector2)sharpVertices[4]) < .0001f;
-            var negativeInner = Vector2.Distance((Vector2)sharpVertices[3], (Vector2)sharpVertices[5]) < .0001f;
-            var hasSingleInnerIntersection = positiveInner != negativeInner;
-            var innerFirst = positiveInner ? 2 : 3;
-            var innerSecond = positiveInner ? 4 : 5;
-            var outerFirst = positiveInner ? 3 : 2;
-            var outerSecond = positiveInner ? 5 : 4;
-            var innerRatio = hasSingleInnerIntersection
-                ? Math.Max(Vector2.Distance((Vector2)sharpVertices[innerFirst], sharpPoint),
-                    Vector2.Distance((Vector2)sharpVertices[innerSecond], sharpPoint)) / 2f
-                : 0;
-            var outerMaxRatio = Math.Max(Vector2.Distance((Vector2)sharpVertices[outerFirst], sharpPoint),
-                Vector2.Distance((Vector2)sharpVertices[outerSecond], sharpPoint)) / 2f;
-            var windingOk = HasConsistentPositiveWinding();
-            var overlap = HasOverlappingTriangleInteriors();
-            var fixtureOk = mesh.vertexCount == 8 && mesh.triangles.Length == 15 &&
-                            hasSingleInnerIntersection && innerRatio > 2f && innerRatio < 2.62f &&
-                            outerMaxRatio <= 1.0001f && !HasZeroAreaTriangle() && windingOk && !overlap;
-            bevelFixturesOk &= fixtureOk;
-            bevelInnerRatio = Math.Max(bevelInnerRatio, innerRatio);
-            bevelOuterMaxRatio = Math.Max(bevelOuterMaxRatio, outerMaxRatio);
-            Debug.Log($"GUGARHYTHM_CONNECTOR_BEVEL_FIXTURE direction={direction:+0;-0} vertices={mesh.vertexCount} " +
-                      $"triangles={mesh.triangles.Length / 3} innerIntersection={hasSingleInnerIntersection} " +
-                      $"innerRatio={innerRatio:F3} outerMaxRatio={outerMaxRatio:F3} winding={windingOk} overlap={overlap}");
-        }
-
         Require(repeatedTopologyOk && repeatedSemanticsOk,
             "Consecutive coincident Hold samples must coalesce to one section using the last sample's width and alpha");
-        Require(bevelFixturesOk,
-            "Both 135-degree turn directions must emit one outer bevel triangle around a shared inner intersection with consistent winding and no overlap");
 
         graphic.drawGlow = true;
         graphic.drawEdges = true;
         Populate(straightPoints, new[] { 4f, 6f, 8f });
         Require(mesh.vertexCount == 24 && mesh.triangles.Length == 48,
             "Fill, glow, left-edge, and right-edge strips must each reuse their three cross-sections");
-        Debug.Log($"GUGARHYTHM_CONNECTOR_GEOMETRY_VALIDATION_OK straightVertices=6 straightTriangles=4 cornerVertices=6 bevelVertices=8 bevelTriangles=5 fullVertices={mesh.vertexCount} fullTriangles={mesh.triangles.Length / 3} miterRatio={miterRatio:F3} bevelInnerRatio={bevelInnerRatio:F3} bevelOuterMaxRatio={bevelOuterMaxRatio:F3}");
+        Debug.Log($"GUGARHYTHM_CONNECTOR_GEOMETRY_VALIDATION_OK straightVertices=6 straightTriangles=4 " +
+                  $"diagonalHorizontalSections=True fullVertices={mesh.vertexCount} fullTriangles={mesh.triangles.Length / 3}");
 
         helper.Dispose();
         UnityEngine.Object.DestroyImmediate(mesh);
