@@ -246,7 +246,6 @@ namespace Gugarhythm
         // assuming 16:9; this keeps note edges on the gray texture guides.
         const float ReferenceWidth = 1920f;
         const float LibrarySelectedRowInset = 2f;
-        const float LibrarySelectionFrameWidth = 4f;
         const float LaneTextureWidth = 1280f;
         const float LaneTextureHeight = 732f;
         const float LaneTextureCenterX = 638.8049f;
@@ -3249,7 +3248,6 @@ namespace Gugarhythm
                 var level = Label(hasSelectedDifficulty.DifficultyLevel, row, 20); level.color = new Color(.78f, .78f, .78f); level.rectTransform.sizeDelta = new Vector2(62, 50); PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-18, 0));
             }
             MakeInvisibleButton(row, () => SelectLibraryEntry(hasSelectedDifficulty ?? group.Difficulties[0], true));
-            if (selected) AddSelectionFrame(row, new Color(.05f, .60f, 1f), LibrarySelectionFrameWidth);
         }
 
         void SelectLibraryEntry(LocalChartEntry entry, bool loadSource)
@@ -3975,39 +3973,6 @@ namespace Gugarhythm
             }
         }
 
-        sealed class SelectionFrameGraphic : MaskableGraphic
-        {
-            float frameWidth = 1f;
-
-            public void SetWidth(float value)
-            {
-                frameWidth = Mathf.Max(1f, value);
-                SetVerticesDirty();
-            }
-
-            protected override void OnPopulateMesh(VertexHelper vertices)
-            {
-                vertices.Clear();
-                var bounds = GetPixelAdjustedRect();
-                var width = Mathf.Min(frameWidth, Mathf.Min(bounds.width, bounds.height) * .5f);
-                AddQuad(vertices, new Rect(bounds.xMin, bounds.yMin, width, bounds.height));
-                AddQuad(vertices, new Rect(bounds.xMax - width, bounds.yMin, width, bounds.height));
-                AddQuad(vertices, new Rect(bounds.xMin, bounds.yMin, bounds.width, width));
-                AddQuad(vertices, new Rect(bounds.xMin, bounds.yMax - width, bounds.width, width));
-            }
-
-            void AddQuad(VertexHelper vertices, Rect rect)
-            {
-                var first = vertices.currentVertCount;
-                vertices.AddVert(new Vector3(rect.xMin, rect.yMin), color, Vector2.zero);
-                vertices.AddVert(new Vector3(rect.xMin, rect.yMax), color, Vector2.zero);
-                vertices.AddVert(new Vector3(rect.xMax, rect.yMax), color, Vector2.zero);
-                vertices.AddVert(new Vector3(rect.xMax, rect.yMin), color, Vector2.zero);
-                vertices.AddTriangle(first, first + 1, first + 2);
-                vertices.AddTriangle(first, first + 2, first + 3);
-            }
-        }
-
         static RectTransform MakeVerticalScroll(string name, RectTransform parent, Vector2 position, Vector2 size)
         {
             var root = Panel(name, parent, new Color(.12f, .12f, .12f), size, position);
@@ -4120,17 +4085,6 @@ namespace Gugarhythm
         }
 
         static void Fill(RectTransform rect) { rect.anchorMin = Vector2.zero; rect.anchorMax = Vector2.one; rect.offsetMin = Vector2.zero; rect.offsetMax = Vector2.zero; }
-        static void AddSelectionFrame(RectTransform target, Color color, float width)
-        {
-            var frameObject = new GameObject("Selection Frame", typeof(RectTransform), typeof(CanvasRenderer), typeof(SelectionFrameGraphic));
-            var frame = frameObject.GetComponent<SelectionFrameGraphic>();
-            frame.rectTransform.SetParent(target, false);
-            Fill(frame.rectTransform);
-            frame.color = color;
-            frame.raycastTarget = false;
-            frame.SetWidth(width);
-        }
-
         static void Outline(GameObject go, Color color, int width) { var outline = go.AddComponent<Outline>(); outline.effectColor = color; outline.effectDistance = new Vector2(width, -width); }
         struct TouchMemory { public float Lane; public int GridRow; public Vector2 ScreenPosition; public double EventTime; public double StartTime; public double LastInputRecordTime; }
     }
