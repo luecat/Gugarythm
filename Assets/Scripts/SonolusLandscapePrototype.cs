@@ -61,6 +61,40 @@ namespace Gugarhythm
         }
     }
 
+    public static class LandscapeOrientation
+    {
+        public static void Lock()
+        {
+            Screen.autorotateToPortrait = false;
+            Screen.autorotateToPortraitUpsideDown = false;
+            Screen.autorotateToLandscapeLeft = false;
+            Screen.autorotateToLandscapeRight = false;
+            Screen.orientation = ScreenOrientation.LandscapeLeft;
+        }
+    }
+
+    public static class LibrarySortPreferences
+    {
+        const string SortModeKey = "gugarhythm-library-sort-mode";
+        const string AscendingKey = "gugarhythm-library-sort-ascending";
+
+        public static void Load(out ChartLibrarySort sort, out bool ascending)
+        {
+            var storedMode = PlayerPrefs.GetInt(SortModeKey, (int)ChartLibrarySort.Accuracy);
+            sort = Enum.IsDefined(typeof(ChartLibrarySort), storedMode)
+                ? (ChartLibrarySort)storedMode
+                : ChartLibrarySort.Accuracy;
+            ascending = PlayerPrefs.GetInt(AscendingKey, 0) != 0;
+        }
+
+        public static void Save(ChartLibrarySort sort, bool ascending)
+        {
+            PlayerPrefs.SetInt(SortModeKey, (int)sort);
+            PlayerPrefs.SetInt(AscendingKey, ascending ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+    }
+
     public static class GameplayTimingPreferences
     {
         const string LegacyDeviceOffsetKey = "gugarhythm-audio-offset-seconds";
@@ -245,7 +279,8 @@ namespace Gugarhythm
         // than 1080 logical units. Derive Y from the live viewport instead of
         // assuming 16:9; this keeps note edges on the gray texture guides.
         const float ReferenceWidth = 1920f;
-        const float LibrarySelectedRowInset = 2f;
+        const float LibraryDividerHorizontalInset = 16f;
+        const float PersistentGrayDividerThickness = 2f;
         const float LaneTextureWidth = 1280f;
         const float LaneTextureHeight = 732f;
         const float LaneTextureCenterX = 638.8049f;
@@ -300,6 +335,9 @@ namespace Gugarhythm
         // Both Hold head atlases and both connector atlases use a 240px solid
         // center.  Match those cores rather than their soft outer glow.
         const float HoldHeadCoreTextureWidth = 240f;
+        // Hold heads keep their authored lane width, but their atlas is a little
+        // taller than the purple judgment strip when projected at the hit edge.
+        const float HoldHeadHeightScale = .96f;
         // Button sprites begin their visible antialiased edge at pixel 44.
         // Using the old 40px glow bound made every normal Tap visibly narrow.
         const float NormalButtonVisibleEdgePaddingPixels = 44f;
@@ -636,9 +674,10 @@ namespace Gugarhythm
             holdPointProjector = ProjectHoldPoint;
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.targetFrameRate = 120;
-            Screen.orientation = ScreenOrientation.LandscapeLeft;
+            LandscapeOrientation.Lock();
             QualitySettings.vSyncCount = 0;
             scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarhythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
+            LibrarySortPreferences.Load(out librarySort, out librarySortAscending);
             audioOffsetSeconds = GameplayTimingPreferences.LoadDeviceOffset();
             settingsDelayOffsetSeconds = audioOffsetSeconds;
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -662,9 +701,9 @@ namespace Gugarhythm
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(true);
                 settingsPanel.gameObject.SetActive(false);
-                var restoredSelection = RestoreLibrarySelection();
+                RestoreLibrarySelection();
                 RefreshLibraryUI();
-                startButton.interactable = ShouldEnableLibraryStartButton(restoredSelection);
+                startButton.interactable = ShouldEnableLibraryStartButton(selectedLibraryEntry != null);
                 yield break;
             }
 
@@ -733,7 +772,7 @@ namespace Gugarhythm
             return true;
         }
 
-        static bool ShouldEnableLibraryStartButton(bool hasRestoredSelection) => hasRestoredSelection;
+        static bool ShouldEnableLibraryStartButton(bool hasSelection) => hasSelection;
 
         IEnumerator LoadGameplaySelection(LocalChartEntry entry, byte[] bytes)
         {
@@ -1844,6 +1883,8 @@ namespace Gugarhythm
                     ApplyNoteTexture(view, note);
                 }
                 var height = NoteSurfaceHeight(screenProgress);
+                if (note.HoldRootIndex == note.Index)
+                    height = HoldHeadRenderHeight(height);
                 // The sprite has transparent side padding.  Expand only the
                 // quad required for its visible body to meet the authored left
                 // and right lane boundaries; centering the complete bitmap in
@@ -2001,7 +2042,8 @@ namespace Gugarhythm
                     ? segment.End.TimeScaleGroup : segment.Start.TimeScaleGroup;
                 var approach = ApproachProgress(point.Time, visualTime, segmentGroup);
                 var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
-                var width = HoldConnectorLaneWidth(LaneWidth(point.Sample.Lane, point.Sample.Size, screenProgress));
+                var bodyWidth = LaneWidth(point.Sample.Lane, point.Sample.Size, screenProgress);
+                var width = HoldConnectorLaneWidth(bodyWidth);
                 line.SetPathPoint(index, projected, width);
             }
             line.EndPath();
@@ -2056,7 +2098,7 @@ namespace Gugarhythm
             var lane = sample.Lane;
             var size = sample.Size;
             var screenProgress = PerspectiveProgress(1f);
-            var height = NoteSurfaceHeight(screenProgress);
+            var height = HoldHeadRenderHeight(NoteSurfaceHeight(screenProgress));
             // Match the descending head's visible body to the same pair of
             // lane boundaries at the judgment line.
             var bodyWidth = LaneWidth(lane, size, screenProgress);
@@ -2238,11 +2280,8 @@ namespace Gugarhythm
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
-            // A Hold belongs to exactly its authored lane span.  Expanding the
-            // connector for its texture's transparent shoulder made adjacent
-            // Hold ribbons overlap even when their chart lanes did not.
-            var laneWidth = HoldConnectorLaneWidth(LaneWidth(lane, size, screenProgress));
-            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), laneWidth);
+            var bodyWidth = LaneWidth(lane, size, screenProgress);
+            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), HoldConnectorLaneWidth(bodyWidth));
         }
 
         static float EaseConnector(float progress, int ease) => ease switch
@@ -2432,6 +2471,8 @@ namespace Gugarhythm
             return bodyWidth * HoldHeadTextureWidth / HoldHeadCoreTextureWidth;
         }
 
+        public static float HoldHeadRenderHeight(float height) => height * HoldHeadHeightScale;
+
         public static float HoldHeadVisibleCoreWidth(float renderWidth) =>
             renderWidth * HoldHeadCoreTextureWidth / HoldHeadTextureWidth;
 
@@ -2588,7 +2629,6 @@ namespace Gugarhythm
             noteLayer = Layer("Notes", stage);
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
-            BuildGameplayLoadingOverlay(safeAreaRoot);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
             BuildLatencyCalibration(safeAreaRoot);
@@ -2596,6 +2636,9 @@ namespace Gugarhythm
             BuildImportDecision(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
+            // The dim blue loading veil must cover the physical display,
+            // including Android cutout insets, and remain above menu UI.
+            BuildGameplayLoadingOverlay(root);
             UpdateSafeAreaLayout(true);
             SetGameplayStageVisible(false);
         }
@@ -2770,9 +2813,9 @@ namespace Gugarhythm
             var library = Panel("Library Pane", menuPanel, new Color(.16f, .16f, .16f, 1f), Vector2.zero, Vector2.zero, true);
             library.anchorMin = new Vector2(0, 0); library.anchorMax = new Vector2(.244f, 1); library.offsetMin = Vector2.zero; library.offsetMax = Vector2.zero;
             var divider = Panel("Library Divider", menuPanel, new Color(.27f, .27f, .27f, 1f), Vector2.zero, Vector2.zero, true);
-            divider.anchorMin = new Vector2(.244f, 0); divider.anchorMax = new Vector2(.244f, 1); divider.offsetMin = Vector2.zero; divider.offsetMax = new Vector2(1, 0); divider.GetComponent<Image>().raycastTarget = false;
+            divider.anchorMin = new Vector2(.244f, 0); divider.anchorMax = new Vector2(.244f, 1); divider.offsetMin = Vector2.zero; divider.offsetMax = new Vector2(PersistentGrayDividerThickness, 0); divider.GetComponent<Image>().raycastTarget = false;
             var detail = Panel("Detail Pane", menuPanel, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
-            detail.anchorMin = new Vector2(.244f, 0); detail.anchorMax = new Vector2(1, 1); detail.offsetMin = new Vector2(1, 0); detail.offsetMax = Vector2.zero;
+            detail.anchorMin = new Vector2(.244f, 0); detail.anchorMax = new Vector2(1, 1); detail.offsetMin = new Vector2(PersistentGrayDividerThickness, 0); detail.offsetMax = Vector2.zero;
 
             var brand = Label("GUGARHYTHM", library, 19); brand.color = new Color(.68f, .68f, .68f); brand.alignment = TextAnchor.MiddleLeft; brand.rectTransform.sizeDelta = new Vector2(260, 36); PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -34));
             var heading = Label("譜面保管庫", library, 30); heading.alignment = TextAnchor.MiddleLeft; heading.rectTransform.sizeDelta = new Vector2(270, 50); PinToAnchor(heading.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -74));
@@ -2791,7 +2834,12 @@ namespace Gugarhythm
             // Rotate around the icon centre so ascending and descending arrows share the same visual X position.
             PinToAnchor(libraryDirectionIcon, new Vector2(0, 1), new Vector2(.5f, .5f), new Vector2(248, librarySortCenterY));
             AddSortArrowIcon(libraryDirectionIcon);
-            MakeInvisibleButton(libraryDirectionIcon, () => { librarySortAscending = !librarySortAscending; RefreshLibraryUI(); });
+            MakeInvisibleButton(libraryDirectionIcon, () =>
+            {
+                librarySortAscending = !librarySortAscending;
+                LibrarySortPreferences.Save(librarySort, librarySortAscending);
+                RefreshLibraryUI();
+            });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
             var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -300);
 
@@ -2827,7 +2875,7 @@ namespace Gugarhythm
             var detailKicker = Label("CHART DETAIL", detail, 18); detailKicker.color = new Color(.64f, .64f, .64f); detailKicker.alignment = TextAnchor.MiddleLeft; detailKicker.rectTransform.sizeDelta = new Vector2(320, 34); PinToAnchor(detailKicker.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 305));
             detailTitleLabel = Label("選擇一份譜面", detail, 58); detailTitleLabel.alignment = TextAnchor.MiddleLeft; detailTitleLabel.rectTransform.sizeDelta = new Vector2(620, 92); PinToAnchor(detailTitleLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 183.5f));
             detailArtistLabel = Label("", detail, 25); detailArtistLabel.color = new Color(.68f, .68f, .68f); detailArtistLabel.alignment = TextAnchor.MiddleLeft; detailArtistLabel.rectTransform.sizeDelta = new Vector2(620, 48); PinToAnchor(detailArtistLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 113.5f));
-            var infoDivider = Panel("Detail Divider", detail, new Color(.28f, .28f, .28f), new Vector2(0, 1), Vector2.zero); infoDivider.anchorMin = new Vector2(.51f, .5f); infoDivider.anchorMax = new Vector2(.94f, .5f); infoDivider.offsetMin = new Vector2(0, 72); infoDivider.offsetMax = new Vector2(0, 73); infoDivider.GetComponent<Image>().raycastTarget = false;
+            var infoDivider = Panel("Detail Divider", detail, new Color(.28f, .28f, .28f), new Vector2(0, PersistentGrayDividerThickness), Vector2.zero); infoDivider.anchorMin = new Vector2(.51f, .5f); infoDivider.anchorMax = new Vector2(.94f, .5f); infoDivider.offsetMin = new Vector2(0, 72); infoDivider.offsetMax = new Vector2(0, 72 + PersistentGrayDividerThickness); infoDivider.GetComponent<Image>().raycastTarget = false;
             detailDifficultyLabel = Label("選擇難度", detail, 17); detailDifficultyLabel.color = new Color(.68f, .68f, .68f); detailDifficultyLabel.alignment = TextAnchor.MiddleLeft; detailDifficultyLabel.rectTransform.sizeDelta = new Vector2(440, 38); PinToAnchor(detailDifficultyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 36));
             difficultyButtonContent = new GameObject("Difficulty Buttons", typeof(RectTransform)).GetComponent<RectTransform>();
             difficultyButtonContent.SetParent(detail, false);
@@ -2997,7 +3045,7 @@ namespace Gugarhythm
             fieldLabel.color = new Color(.72f, .72f, .72f);
             fieldLabel.rectTransform.sizeDelta = new Vector2(620, 34);
             fieldLabel.rectTransform.anchoredPosition = position + new Vector2(0, 35);
-            input = MakeInputField(label, parent, position + new Vector2(0, -12), new Vector2(620, 56));
+            input = MakeInputField(label, parent, position + new Vector2(0, -12), new Vector2(620, 56), false);
         }
 
         void PopulateChartEditor()
@@ -3026,9 +3074,7 @@ namespace Gugarhythm
             {
                 chartEditorTitleInput.text = draftTitle; chartEditorAuthorInput.text = draftArtist; chartEditorDifficultyNameInput.text = draftTag; chartEditorLevelInput.text = draftLevel;
             }
-            chartEditorSubtitleLabel.text = string.IsNullOrWhiteSpace(chartEditorEntry.DifficultyName)
-                ? string.Empty
-                : chartEditorEntry.DifficultyName;
+            chartEditorSubtitleLabel.text = string.Empty;
             chartEditorStatusLabel.text = string.Empty;
             RefreshChartEditorTagOptions();
         }
@@ -3166,6 +3212,7 @@ namespace Gugarhythm
         {
             librarySort = librarySort == ChartLibrarySort.Accuracy ? ChartLibrarySort.Difficulty :
                 librarySort == ChartLibrarySort.Difficulty ? ChartLibrarySort.Title : ChartLibrarySort.Accuracy;
+            LibrarySortPreferences.Save(librarySort, librarySortAscending);
             RefreshLibraryUI();
         }
 
@@ -3206,7 +3253,9 @@ namespace Gugarhythm
             libraryDirectionIcon.localRotation = Quaternion.Euler(0, 0, librarySortAscending ? 180 : 0);
             ClearChildren(libraryListContent);
             const float rowHeight = 102f;
-            libraryListContent.sizeDelta = new Vector2(0, Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height, groups.Count * rowHeight + 8));
+            var contentSize = libraryListContent.sizeDelta;
+            contentSize.y = Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height, groups.Count * rowHeight + 8);
+            libraryListContent.sizeDelta = contentSize;
             for (var index = 0; index < groups.Count; index++) BuildLibraryRow(groups[index], index, rowHeight);
             RefreshDetailUI(groups);
 
@@ -3231,14 +3280,14 @@ namespace Gugarhythm
             row.anchorMin = new Vector2(0, 1);
             row.anchorMax = new Vector2(1, 1);
             row.pivot = new Vector2(.5f, 1);
-            const float rowTopInset = 2f;
-            var horizontalInset = selected ? LibrarySelectedRowInset : 0f;
-            row.offsetMin = new Vector2(horizontalInset, -rowHeight * (index + 1));
-            row.offsetMax = new Vector2(-horizontalInset, -rowHeight * index - rowTopInset);
+            var rowHorizontalInset = selected ? LibraryDividerHorizontalInset : 0f;
+            row.offsetMin = new Vector2(rowHorizontalInset, -rowHeight * (index + 1));
+            row.offsetMax = new Vector2(-rowHorizontalInset, -rowHeight * index);
             if (index > 0)
             {
-                var divider = Panel("Chart Divider", row, new Color(.27f, .27f, .27f, .72f), new Vector2(0, 1), Vector2.zero);
-                divider.anchorMin = new Vector2(0, 1); divider.anchorMax = new Vector2(1, 1); divider.offsetMin = new Vector2(16, -1); divider.offsetMax = new Vector2(-16, 0);
+                var divider = Panel("Chart Divider", row, new Color(.27f, .27f, .27f, .72f), new Vector2(0, PersistentGrayDividerThickness), Vector2.zero);
+                var dividerHorizontalInset = selected ? 0f : LibraryDividerHorizontalInset;
+                divider.anchorMin = new Vector2(0, 1); divider.anchorMax = new Vector2(1, 1); divider.offsetMin = new Vector2(dividerHorizontalInset, -PersistentGrayDividerThickness); divider.offsetMax = new Vector2(-dividerHorizontalInset, 0);
                 divider.GetComponent<Image>().raycastTarget = false;
             }
             var title = Label(group.Title, row, 21); title.alignment = TextAnchor.MiddleLeft; title.rectTransform.anchorMin = new Vector2(0, 1); title.rectTransform.anchorMax = new Vector2(1, 1); title.rectTransform.pivot = new Vector2(0, 1); title.rectTransform.offsetMin = new Vector2(24, -58); title.rectTransform.offsetMax = new Vector2(-78, -24);
@@ -3825,7 +3874,7 @@ namespace Gugarhythm
             var panel = Panel(text, parent, new Color(.16f, .16f, .16f), size, position);
             var image = panel.GetComponent<Image>();
             image.raycastTarget = true;
-            Outline(panel.gameObject, new Color(.42f, .42f, .42f), 1);
+            Outline(panel.gameObject, new Color(.42f, .42f, .42f), 2);
             var label = Label(text, panel, 18);
             label.color = new Color(.78f, .78f, .78f);
             Fill(label.rectTransform);
@@ -3859,10 +3908,10 @@ namespace Gugarhythm
             button.onClick.AddListener(() => action());
         }
 
-        static InputField MakeInputField(string placeholder, RectTransform parent, Vector2 position, Vector2 size)
+        static InputField MakeInputField(string placeholder, RectTransform parent, Vector2 position, Vector2 size, bool showOutline = true)
         {
             var panel = Panel("Search", parent, new Color(.12f, .12f, .12f), size, position);
-            Outline(panel.gameObject, new Color(.30f, .30f, .30f), 1);
+            if (showOutline) Outline(panel.gameObject, new Color(.30f, .30f, .30f), 1);
             var text = Label("", panel, 18); text.alignment = TextAnchor.MiddleLeft; text.rectTransform.anchorMin = Vector2.zero; text.rectTransform.anchorMax = Vector2.one; text.rectTransform.offsetMin = new Vector2(18, 0); text.rectTransform.offsetMax = new Vector2(-18, 0);
             var place = Label(placeholder, panel, 18); place.color = new Color(.58f, .58f, .58f); place.alignment = TextAnchor.MiddleLeft; place.rectTransform.anchorMin = Vector2.zero; place.rectTransform.anchorMax = Vector2.one; place.rectTransform.offsetMin = new Vector2(18, 0); place.rectTransform.offsetMax = new Vector2(-18, 0);
             var input = panel.gameObject.AddComponent<InputField>();

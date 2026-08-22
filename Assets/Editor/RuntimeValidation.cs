@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
 using System.Linq;
+using System.Security.Cryptography;
 using Gugarhythm;
 using UnityEditor;
 using Unity.Profiling;
@@ -35,6 +36,7 @@ public static class RuntimeValidation
         ValidateAttachedGgrPlayableCount();
         ValidateLibrarySelectionRestore();
         ValidateStartupSplashConfiguration();
+        ValidateBrandAndPresentationContracts();
         ValidateStartupBuildSceneOrder();
         ValidateBundledChartManifest();
         ValidateUscSlideRoleClassification();
@@ -226,7 +228,6 @@ public static class RuntimeValidation
         var sameTimeResult = HoldPathBuilder.Build(sameTimeChart);
         Require(sameTimeResult.Paths.Count == 1 && sameTimeResult.Paths[0].Segments[1].HardCorner,
             "A same-time horizontal Hold movement must remain a finite explicit hard corner");
-
         var branchChart = new RuntimeChart();
         var branchA = Point(20, 0, 0);
         var branchB = Point(21, 1, -1);
@@ -845,15 +846,13 @@ public static class RuntimeValidation
     {
         const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Static;
-        var insetField = typeof(SonolusLandscapePrototype).GetField("LibrarySelectedRowInset", flags);
+        var insetField = typeof(SonolusLandscapePrototype).GetField("LibraryDividerHorizontalInset", flags);
         var widthField = typeof(SonolusLandscapePrototype).GetField("LibrarySelectionFrameWidth", flags);
         var frameGraphicType = typeof(SonolusLandscapePrototype).GetNestedType("SelectionFrameGraphic", flags);
-        Require(insetField != null && Math.Abs((float)insetField.GetRawConstantValue() - 2f) < .0001f,
-            "Selected library rows must keep their original two-unit horizontal inset");
-        Require(widthField != null && Math.Abs((float)widthField.GetRawConstantValue() - 4f) < .0001f,
-            "The library selection frame must remain four units wide for mobile visibility");
-        Require(frameGraphicType != null && typeof(UnityEngine.UI.MaskableGraphic).IsAssignableFrom(frameGraphicType),
-            "The library selection frame must render all four sides as one mask-safe graphic");
+        Require(insetField != null && Math.Abs((float)insetField.GetRawConstantValue() - 16f) < .0001f,
+            "Selected library rows and persistent dividers must keep their sixteen-unit horizontal inset");
+        Require(widthField == null && frameGraphicType == null,
+            "The library selection outline must remain removed");
     }
 
     static void ValidateStartupSplashConfiguration()
@@ -866,6 +865,54 @@ public static class RuntimeValidation
         Require(Math.Abs((float)durationField.GetRawConstantValue() - 1.5f) < .0001f,
             "The GUGARHYTHM startup page must remain visible for 1.5 seconds");
         Debug.Log("GUGARHYTHM_STARTUP_SPLASH_VALIDATION_OK duration=1.5");
+    }
+
+    static void ValidateBrandAndPresentationContracts()
+    {
+        Require(PlayerSettings.productName == "GUGArhythm",
+            "The Android application label must use the GUGArhythm spelling");
+
+        var splashPath = Path.Combine(Application.dataPath, "Art/SplashScreen/gugarhythm-splash.png");
+        using var stream = File.OpenRead(splashPath);
+        using var sha256 = SHA256.Create();
+        var hash = BitConverter.ToString(sha256.ComputeHash(stream)).Replace("-", string.Empty).ToLowerInvariant();
+        Require(hash == "35e78408e8ea3396e0c26ce17147f8d6b3235edca7c50459d1bd6a0958493c00",
+            "The startup splash must use the correctly spelled GUGARHYTHM artwork");
+
+        var assembly = typeof(SonolusLandscapePrototype).Assembly;
+        var landscapeType = assembly.GetType("Gugarhythm.LandscapeOrientation");
+        var lockMethod = landscapeType?.GetMethod("Lock", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(lockMethod != null, "Runtime must expose the landscape-only orientation lock");
+        Screen.autorotateToPortrait = true;
+        Screen.autorotateToPortraitUpsideDown = true;
+        lockMethod.Invoke(null, null);
+        Require(!Screen.autorotateToPortrait && !Screen.autorotateToPortraitUpsideDown,
+            "Runtime must reject portrait rotation on Android gameplay and startup screens");
+
+        var preferencesType = assembly.GetType("Gugarhythm.LibrarySortPreferences");
+        var save = preferencesType?.GetMethod("Save", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        var load = preferencesType?.GetMethod("Load", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(save != null && load != null, "Library sort preferences must expose save and load operations");
+        var originalMode = PlayerPrefs.GetInt("gugarhythm-library-sort-mode", -1);
+        var originalAscending = PlayerPrefs.GetInt("gugarhythm-library-sort-ascending", -1);
+        var hadMode = PlayerPrefs.HasKey("gugarhythm-library-sort-mode");
+        var hadAscending = PlayerPrefs.HasKey("gugarhythm-library-sort-ascending");
+        try
+        {
+            save.Invoke(null, new object[] { ChartLibrarySort.Title, true });
+            var arguments = new object[] { ChartLibrarySort.Accuracy, false };
+            load.Invoke(null, arguments);
+            Require((ChartLibrarySort)arguments[0] == ChartLibrarySort.Title && (bool)arguments[1],
+                "Library sort mode and direction must survive recreating the library controller");
+        }
+        finally
+        {
+            if (hadMode) PlayerPrefs.SetInt("gugarhythm-library-sort-mode", originalMode);
+            else PlayerPrefs.DeleteKey("gugarhythm-library-sort-mode");
+            if (hadAscending) PlayerPrefs.SetInt("gugarhythm-library-sort-ascending", originalAscending);
+            else PlayerPrefs.DeleteKey("gugarhythm-library-sort-ascending");
+            PlayerPrefs.Save();
+        }
     }
 
     static void ValidateStartupBuildSceneOrder()
@@ -1131,9 +1178,10 @@ public static class RuntimeValidation
             "A normal Tap's visible body must span exactly one authored note track");
         var holdHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, 104.7f, false);
         var criticalHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, 104.7f, true);
-        Require(Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(holdHeadQuadWidth) - 147.5f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(criticalHoldHeadQuadWidth) - 147.5f) < .0001f,
-            "Mint and yellow Hold heads' solid cores must each span one authored note track");
+        var holdCapBodyWidth = 147.5f;
+        Require(Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(holdHeadQuadWidth) - holdCapBodyWidth) < .0001f &&
+                Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(criticalHoldHeadQuadWidth) - holdCapBodyWidth) < .0001f,
+            "Mint and yellow Hold heads' solid cores must retain the authored Hold width");
         var descendingHoldHead = new RuntimeNote { Index = 7, HoldRootIndex = 7, Kind = RuntimeNoteKind.Sustain };
         Require(Math.Abs(SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, descendingHoldHead) - holdHeadQuadWidth) < .0001f,
             "A descending Hold head must use the same quad width as its persistent judgment-line head");
