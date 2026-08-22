@@ -59,6 +59,9 @@ public static class RuntimeValidation
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
+        ValidateJudgmentSpritePaths();
+        ValidateJudgmentSpriteVisibility();
+        ValidateJudgmentSpriteSize();
         var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
         if (!File.Exists(path)) throw new FileNotFoundException("Default SCP is missing", path);
         var bytes = File.ReadAllBytes(path);
@@ -1743,6 +1746,42 @@ public static class RuntimeValidation
         Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick, Critical = true }),
                 new Color(1f, .82f, .12f, .9f)),
             "Critical hit effect must use the yellow button color regardless of note kind");
+    }
+
+    static void ValidateJudgmentSpritePaths()
+    {
+        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Perfect) == "JudgmentSprites/perfect",
+            "Perfect judgment must select its image asset");
+        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Great) == "JudgmentSprites/great",
+            "Great judgment must select its image asset");
+        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Good) == "JudgmentSprites/good",
+            "Good judgment must select its image asset");
+        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Miss) == "JudgmentSprites/miss",
+            "Miss judgment must select its image asset");
+    }
+
+    static void ValidateJudgmentSpriteVisibility()
+    {
+        var gameObject = new GameObject("Judgment Sprite Visibility Test", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage));
+        try
+        {
+            var image = gameObject.GetComponent<RawImage>();
+            SonolusLandscapePrototype.SetJudgmentSprite(image, null);
+            Require(!image.enabled, "Cleared judgment image must not render Unity's default white texture");
+            SonolusLandscapePrototype.SetJudgmentSprite(image, Texture2D.whiteTexture);
+            Require(image.enabled && image.texture == Texture2D.whiteTexture,
+                "A loaded judgment sprite must enable its image renderer");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+    }
+
+    static void ValidateJudgmentSpriteSize()
+    {
+        Require(SonolusLandscapePrototype.JudgmentSpriteSize == new Vector2(330, 110),
+            "Judgment sprite size must remain half of the original 660 by 220 display area");
     }
 
     static void ValidateHoldJudgmentAudioRouting()

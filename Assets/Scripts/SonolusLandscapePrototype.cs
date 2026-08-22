@@ -347,6 +347,7 @@ namespace Gugarhythm
         // sprite leaves the viewport. Successful hits return to the pool at once.
         const float NoteExitMargin = 140f;
         const float JudgmentDisplayDuration = .35f;
+        public static readonly Vector2 JudgmentSpriteSize = new(330, 110);
         public const float InputLaneFeedbackDuration = .12f;
         const int InputLaneFeedbackGridCellCount = VirtualSliderInput.CellCount / 2;
         const float HoldLoopVolume = .55f;
@@ -354,6 +355,7 @@ namespace Gugarhythm
 
         readonly Dictionary<string, Texture2D> buttonTextures = new(StringComparer.Ordinal);
         readonly Dictionary<string, Texture2D> traceTextures = new(StringComparer.Ordinal);
+        readonly Dictionary<JudgmentGrade, Texture2D> judgmentSprites = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> noteViews = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
         readonly HashSet<int> renderedPersistentHoldHeads = new();
@@ -457,7 +459,7 @@ namespace Gugarhythm
         RectTransform calibrationBackdrop;
         Text accuracyLabel;
         Text comboLabel;
-        Text judgmentLabel;
+        RawImage judgmentImage;
         Text loadStatus;
         Text gameplayLoadingLabel;
         Text libraryCountLabel;
@@ -745,7 +747,7 @@ namespace Gugarhythm
         {
             if (accuracyLabel != null) accuracyLabel.transform.parent.gameObject.SetActive(visible);
             if (comboLabel != null) comboLabel.gameObject.SetActive(false);
-            if (judgmentLabel != null) judgmentLabel.gameObject.SetActive(visible);
+            if (judgmentImage != null) judgmentImage.gameObject.SetActive(visible);
             if (pauseButton != null) pauseButton.gameObject.SetActive(false);
         }
 
@@ -849,7 +851,7 @@ namespace Gugarhythm
             UpdateDesktopSpeedControls();
             UpdateLatencyCalibration();
             if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
-                ShowJudgment("", Color.white);
+                ClearJudgment();
             if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0)
             {
                 if (ShouldPauseForAudioConfigurationChange(true, running, paused)) PauseForAudioDeviceChange();
@@ -1302,7 +1304,7 @@ namespace Gugarhythm
             SetGameplayLoadingVisible(false);
             music.PlayScheduled(GameplayTiming.PlaybackDspForSchedule(scheduledDsp, audioOffsetSeconds));
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
-            ShowJudgment("", Color.white);
+            ClearJudgment();
         }
 
         void PauseGame()
@@ -1423,7 +1425,7 @@ namespace Gugarhythm
             pauseButton.gameObject.SetActive(false);
             resultPanel.gameObject.SetActive(false);
             RefreshHud();
-            ShowJudgment("", Color.white);
+            ClearJudgment();
             GugarhythmSceneRouter.OpenLibrary();
         }
 
@@ -1686,14 +1688,7 @@ namespace Gugarhythm
 
         void OnJudgment(JudgmentEvent judgment)
         {
-            var color = judgment.Grade switch
-            {
-                JudgmentGrade.Perfect => new Color(.65f, 1f, 1f),
-                JudgmentGrade.Great => new Color(1f, .84f, .38f),
-                JudgmentGrade.Good => new Color(.52f, 1f, .66f),
-                _ => new Color(1f, .34f, .55f),
-            };
-            ShowJudgment(judgment.Grade.ToString().ToUpperInvariant(), color);
+            ShowJudgment(judgment.Grade);
             PlayJudgmentSound(judgment);
             if (judgment.Grade != JudgmentGrade.Miss)
             {
@@ -2736,8 +2731,15 @@ namespace Gugarhythm
             comboLabel.gameObject.SetActive(false);
             // Judgment feedback belongs to the full-screen canvas rather than
             // the safe-area container, whose midpoint can shift on cutout devices.
-            judgmentLabel = Label("", canvasRoot, 48); judgmentLabel.rectTransform.sizeDelta = new Vector2(620, 80);
-            PinToAnchor(judgmentLabel.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), Vector2.zero);
+            var judgmentObject = new GameObject("Judgment Graphic", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage));
+            judgmentImage = judgmentObject.GetComponent<RawImage>();
+            judgmentImage.rectTransform.SetParent(canvasRoot, false);
+            judgmentImage.rectTransform.sizeDelta = JudgmentSpriteSize;
+            judgmentImage.raycastTarget = false;
+            judgmentImage.enabled = false;
+            PinToAnchor(judgmentImage.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), Vector2.zero);
+            foreach (var grade in new[] { JudgmentGrade.Perfect, JudgmentGrade.Great, JudgmentGrade.Good, JudgmentGrade.Miss })
+                judgmentSprites[grade] = Resources.Load<Texture2D>(JudgmentSpriteResourcePath(grade));
             pauseButton = MakeButton("暫停", root, new Vector2(-24, -24), PauseGame, new Vector2(150, 64));
             PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
             pauseButton.gameObject.SetActive(false);
@@ -3823,6 +3825,15 @@ namespace Gugarhythm
                 : new Color(.28f, .82f, 1f, .84f);
         }
 
+        public static string JudgmentSpriteResourcePath(JudgmentGrade grade) => grade switch
+        {
+            JudgmentGrade.Perfect => "JudgmentSprites/perfect",
+            JudgmentGrade.Great => "JudgmentSprites/great",
+            JudgmentGrade.Good => "JudgmentSprites/good",
+            JudgmentGrade.Miss => "JudgmentSprites/miss",
+            _ => string.Empty,
+        };
+
         IEnumerator AnimateHitEffect(RectTransform particleRoot, HitBurstGraphic burst)
         {
             const float Duration = 15f / 60f;
@@ -3845,11 +3856,24 @@ namespace Gugarhythm
             comboLabel.gameObject.SetActive(comboVisible);
         }
         void SetStatus(string message) { if (loadStatus != null) loadStatus.text = message; }
-        void ShowJudgment(string value, Color color)
+        void ShowJudgment(JudgmentGrade grade)
         {
-            judgmentLabel.text = value;
-            judgmentLabel.color = color;
-            judgmentHideAt = string.IsNullOrEmpty(value) ? -1f : Time.unscaledTime + JudgmentDisplayDuration;
+            if (judgmentImage == null || !judgmentSprites.TryGetValue(grade, out var sprite) || sprite == null) return;
+            SetJudgmentSprite(judgmentImage, sprite);
+            judgmentHideAt = Time.unscaledTime + JudgmentDisplayDuration;
+        }
+
+        void ClearJudgment()
+        {
+            SetJudgmentSprite(judgmentImage, null);
+            judgmentHideAt = -1f;
+        }
+
+        public static void SetJudgmentSprite(RawImage image, Texture texture)
+        {
+            if (image == null) return;
+            image.texture = texture;
+            image.enabled = texture != null;
         }
 
         static Button MakeButton(string text, RectTransform parent, Vector2 position, Action action, Vector2? size = null)
