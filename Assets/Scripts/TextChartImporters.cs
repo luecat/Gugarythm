@@ -138,7 +138,6 @@ namespace Gugarythm
             RuntimeNote holdRoot = null;
             var previousEase = 0;
             var sourceConnections = connections.OfType<JObject>().ToArray();
-            var firstJudgedConnection = true;
             for (var connectionIndex = 0; connectionIndex < sourceConnections.Length; connectionIndex++)
             {
                 var connection = sourceConnections[connectionIndex];
@@ -147,8 +146,6 @@ namespace Gugarythm
                 var connectionType = (string)connection["type"] ?? "tick";
                 var flick = connection["direction"] != null;
                 var trace = judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase);
-                var judged = !judgeType.Equals("none", StringComparison.OrdinalIgnoreCase);
-                var terminal = connectionIndex == sourceConnections.Length - 1;
                 // USC middle connections encode independent path and particle
                 // roles: tick changes the path, attach is particle-only, and
                 // a tick carrying critical does both.
@@ -160,6 +157,7 @@ namespace Gugarythm
                 // can create the particle-only visual.
                 var hasParticle = isAttach ||
                     (connectionType.Equals("tick", StringComparison.OrdinalIgnoreCase) && connection["critical"] != null);
+                var semantics = MapSlideSemantics(connectionType, judgeType, flick, hasParticle);
                 var lane = (float?)connection["lane"] ?? 0;
                 var size = Math.Max(.25f, (float?)connection["size"] ?? 1);
                 if (isAttach && previousPoint != null && TryFindNextPathConnection(sourceConnections, connectionIndex + 1, out var nextPath))
@@ -167,14 +165,10 @@ namespace Gugarythm
                     var nextBeat = (double?)nextPath["beat"] ?? beat;
                     var span = nextBeat - previousPoint.Beat;
                     var progress = span <= 1e-7 ? 0f : (float)Math.Clamp((beat - previousPoint.Beat) / span, 0, 1);
-                    progress = EaseProgress(progress, previousEase);
+                    progress = HoldPathMath.EaseProgress(progress, previousEase);
                     lane = previousPoint.Lane + (((float?)nextPath["lane"] ?? previousPoint.Lane) - previousPoint.Lane) * progress;
                     size = previousPoint.Size + (Math.Max(.25f, (float?)nextPath["size"] ?? previousPoint.Size) - previousPoint.Size) * progress;
                 }
-                var kind = !judged ? RuntimeNoteKind.Sustain :
-                    firstJudgedConnection ? RuntimeNoteKind.Tap :
-                    terminal && flick ? RuntimeNoteKind.Flick : RuntimeNoteKind.Sustain;
-                if (judged) firstJudgedConnection = false;
                 var archetype = trace ? "USC Trace Slide " + connectionType :
                     (connectionType is "tick" or "attach") ? "USC SlideTickNote" : "USC Slide " + connectionType;
                 if (flick) archetype += " Flick";
@@ -184,11 +178,12 @@ namespace Gugarythm
                     Beat = beat, Time = tempo.SecondsAt(beat), Lane = lane,
                     Size = size, Critical = (bool?)connection["critical"] ?? (bool?)slide["critical"] ?? false,
                     Direction = FlickDirection(connection["direction"]),
-                    Kind = kind,
-                    Visible = judged || hasParticle,
-                    Judged = judged,
-                    HoldCheckpointSource = judged && !terminal && kind == RuntimeNoteKind.Sustain
-                        ? HoldCheckpointSource.Mid : HoldCheckpointSource.None,
+                    Kind = semantics.Kind,
+                    Visible = semantics.Visible,
+                    Judged = semantics.Judged,
+                    HoldCheckpointSource = semantics.CheckpointSource,
+                    SlideNodeRole = semantics.Role,
+                    SlideJudgeMode = semantics.JudgeMode,
                     TimeScaleGroup = TimeScaleGroupKey(chart, connection["timeScaleGroup"]),
                 };
                 if (isAttach && holdRoot != null) point.HoldRootIndex = holdRoot.Index;
@@ -207,6 +202,29 @@ namespace Gugarythm
                     previousEase = EaseType(connection["ease"]);
                 }
             }
+        }
+
+        static (SlideNodeRole Role, SlideJudgeMode JudgeMode, RuntimeNoteKind Kind, bool Judged, bool Visible,
+            HoldCheckpointSource CheckpointSource) MapSlideSemantics(
+                string connectionType, string judgeType, bool directional, bool hasParticle)
+        {
+            var role = connectionType.Equals("start", StringComparison.OrdinalIgnoreCase) ? SlideNodeRole.Start :
+                connectionType.Equals("attach", StringComparison.OrdinalIgnoreCase) ? SlideNodeRole.Attach :
+                connectionType.Equals("end", StringComparison.OrdinalIgnoreCase) ? SlideNodeRole.End : SlideNodeRole.Tick;
+            var judgeMode = judgeType.Equals("none", StringComparison.OrdinalIgnoreCase) ? SlideJudgeMode.None :
+                judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase) ? SlideJudgeMode.Trace : SlideJudgeMode.Normal;
+            if (judgeMode != SlideJudgeMode.None && role == SlideNodeRole.End && directional)
+                judgeMode = SlideJudgeMode.Flick;
+            var judged = judgeMode != SlideJudgeMode.None;
+            var kind = (role, judgeMode) switch
+            {
+                (SlideNodeRole.Start, SlideJudgeMode.Normal) => RuntimeNoteKind.Tap,
+                (_, SlideJudgeMode.Flick) => RuntimeNoteKind.Flick,
+                _ => RuntimeNoteKind.Sustain,
+            };
+            return (role, judgeMode, kind, judged, judged || hasParticle,
+                judged && role is SlideNodeRole.Tick or SlideNodeRole.Attach
+                    ? HoldCheckpointSource.Mid : HoldCheckpointSource.None);
         }
 
         static bool TryFindNextPathConnection(JObject[] connections, int startIndex, out JObject pathConnection)
@@ -314,14 +332,6 @@ namespace Gugarythm
             if (string.Equals(value, "inout", StringComparison.OrdinalIgnoreCase)) return 3;
             return 0;
         }
-
-        static float EaseProgress(float progress, int ease) => ease switch
-        {
-            1 => 1f - (float)Math.Cos(progress * Math.PI * .5),
-            2 => (float)Math.Sin(progress * Math.PI * .5),
-            3 => progress < .5f ? 2 * progress * progress : 1 - (float)Math.Pow(-2 * progress + 2, 2) * .5f,
-            _ => progress,
-        };
 
         static int GuideColor(string value) => value?.ToLowerInvariant() switch
         {

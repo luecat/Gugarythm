@@ -5,7 +5,9 @@ using System.IO.Compression;
 using System.Linq;
 using Gugarythm;
 using UnityEditor;
+using Unity.Profiling;
 using UnityEngine;
+using UnityEngine.UI;
 
 public static class RuntimeValidation
 {
@@ -27,6 +29,8 @@ public static class RuntimeValidation
         ValidateScrollSpeedMath();
         ValidateUscLeadingMeasurePadding();
         ValidateInitialWaterfallTiming();
+        ValidateTimingAndHotPathReuse();
+        ValidateGameplayUpdateStateRestoration();
         ValidateGgrUscHoldRoots();
         ValidateAttachedGgrPlayableCount();
         ValidateLibrarySelectionRestore();
@@ -36,7 +40,13 @@ public static class RuntimeValidation
         ValidateUscSlideRoleClassification();
         ValidateUscSlideMidpointRoles();
         ValidateHeadlessCriticalSlideStart();
+        ValidateRuntimeHoldPaths();
+        ValidateValidPathAttachEvaluatorAlignment();
+        ValidateHoldEaseParity();
+        ValidateHoldPlayableRangeCheckpoints();
+        ValidateChartRenderIndex();
         ValidateNoteRenderWidths();
+        ValidateTaperedConnectorGeometry();
         ValidateNoteRenderVisibilityWindow();
         ValidateLibrarySelectionFrameGeometry();
         ValidateLibraryDataRefreshContracts();
@@ -58,6 +68,11 @@ public static class RuntimeValidation
         Require(chart.Notes.Any(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto && !note.Visible),
             "Imported Holds must add invisible eighth-note checkpoints");
         Require(chart.Connectors.Count == 1175, $"Expected 1175 connectors, got {chart.Connectors.Count}");
+        var holdRenderRunCount = chart.HoldPaths.Sum(path => path.RenderRuns.Count);
+        Require(chart.HoldPaths.Count > 0 && chart.FallbackConnectors.Count == 0,
+            "The DOMiNUS regression chart must build complete Hold paths without legacy fallback");
+        Require(holdRenderRunCount < chart.Connectors.Count,
+            $"Hold render runs must reduce Graphic ownership below connector count ({holdRenderRunCount} vs {chart.Connectors.Count})");
         Require(chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "8"),
             "Hold connector geometry must stop at its first particle/control point");
         Require(!chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "7"),
@@ -144,9 +159,686 @@ public static class RuntimeValidation
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         ValidateLatencyCalibrationMath();
-        Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
+        Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} auto={chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} connectors={chart.Connectors.Count} holdPaths={chart.HoldPaths.Count} holdRuns={holdRenderRunCount} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateRuntimeHoldPaths()
+    {
+        RuntimeNote Point(int index, double time, float lane, float size = 1) => new()
+        {
+            Index = index,
+            SourceId = $"hold-path:{index}",
+            Time = time,
+            Beat = time,
+            Lane = lane,
+            Size = size,
+            Kind = RuntimeNoteKind.Sustain,
+            TimeScaleGroup = "main",
+        };
+
+        var chart = new RuntimeChart();
+        var a = Point(1, 0, 0);
+        var b = Point(2, 1, 0);
+        var c = Point(3, 2, 2);
+        var d = Point(4, 3, 1, .1f);
+        chart.Connectors.Add(new RuntimeConnector { Start = a, End = b, Ease = 0, Critical = false });
+        chart.Connectors.Add(new RuntimeConnector { Start = b, End = c, Ease = 0, Critical = false });
+        chart.Connectors.Add(new RuntimeConnector { Start = c, End = d, Ease = 0, Critical = true });
+
+        var result = HoldPathBuilder.Build(chart);
+        Require(result.Paths.Count == 1 && result.FallbackConnectors.Count == 0,
+            "A non-branching Hold connector chain must build one runtime path");
+        var path = result.Paths[0];
+        Require(path.RenderRuns.Count == 2 && !path.RenderRuns[0].Critical && path.RenderRuns[1].Critical,
+            "A Hold path must split render runs only when its Critical material class changes");
+
+        var atB = path.Evaluator.Evaluate(1);
+        var atC = path.Evaluator.Evaluate(2);
+        Require(Math.Abs(atB.Lane - b.Lane) < 1e-6 && Math.Abs(atC.Lane - c.Lane) < 1e-6,
+            "The Hold evaluator must pass through every authored path node");
+        var epsilon = 1e-3;
+        var leftDerivative = (path.Evaluator.Evaluate(1).Lane - path.Evaluator.Evaluate(1 - epsilon).Lane) / epsilon;
+        var rightDerivative = (path.Evaluator.Evaluate(1 + epsilon).Lane - path.Evaluator.Evaluate(1).Lane) / epsilon;
+        Require(Math.Abs(leftDerivative - rightDerivative) < .02,
+            "A vertical-to-diagonal Hold join must have matching left and right derivatives");
+
+        for (var time = 0d; time <= 3; time += .01)
+        {
+            var sample = path.Evaluator.Evaluate(time);
+            var segment = path.Segments[sample.SegmentIndex];
+            var minLane = Math.Min(segment.Start.Lane, segment.End.Lane) - 1e-5;
+            var maxLane = Math.Max(segment.Start.Lane, segment.End.Lane) + 1e-5;
+            Require(sample.Lane >= minLane && sample.Lane <= maxLane,
+                "Hold interpolation must not overshoot the current segment's lane bounds");
+            Require(sample.Size >= .25f, "Hold interpolation must clamp Size to at least 0.25");
+        }
+
+        var sameTimeChart = new RuntimeChart();
+        var sameA = Point(10, 0, -1);
+        var sameB = Point(11, 1, -1);
+        var sameC = Point(12, 1, 1);
+        var sameD = Point(13, 2, 0);
+        sameTimeChart.Connectors.Add(new RuntimeConnector { Start = sameA, End = sameB });
+        sameTimeChart.Connectors.Add(new RuntimeConnector { Start = sameB, End = sameC });
+        sameTimeChart.Connectors.Add(new RuntimeConnector { Start = sameC, End = sameD });
+        var sameTimeResult = HoldPathBuilder.Build(sameTimeChart);
+        Require(sameTimeResult.Paths.Count == 1 && sameTimeResult.Paths[0].Segments[1].HardCorner,
+            "A same-time horizontal Hold movement must remain a finite explicit hard corner");
+
+        var branchChart = new RuntimeChart();
+        var branchA = Point(20, 0, 0);
+        var branchB = Point(21, 1, -1);
+        var branchC = Point(22, 1, 1);
+        branchChart.Connectors.Add(new RuntimeConnector { Start = branchA, End = branchB });
+        branchChart.Connectors.Add(new RuntimeConnector { Start = branchA, End = branchC });
+        var branchResult = HoldPathBuilder.Build(branchChart);
+        Require(branchResult.Paths.Count == 0 && branchResult.FallbackConnectors.Count == 2 && branchResult.Warnings.Count > 0,
+            "A branched Hold must warn and preserve every source connector for fallback rendering");
+
+        var nullChart = new RuntimeChart();
+        var nullConnector = new RuntimeConnector { Start = Point(25, 0, 0), End = null };
+        nullChart.Connectors.Add(nullConnector);
+        var nullResult = HoldPathBuilder.Build(nullChart);
+        Require(nullResult.FallbackConnectors.Count == 1 && nullResult.Warnings.Count > 0 &&
+                !SonolusLandscapePrototype.CanRenderLegacyConnector(nullConnector),
+            "A null-endpoint connector must warn but never enter the dereferencing legacy renderer");
+
+        var cycleChart = new RuntimeChart();
+        var cycleA = Point(30, 0, 0);
+        var cycleB = Point(31, 1, 1);
+        cycleChart.Connectors.Add(new RuntimeConnector { Start = cycleA, End = cycleB });
+        cycleChart.Connectors.Add(new RuntimeConnector { Start = cycleB, End = cycleA });
+        var cycleResult = HoldPathBuilder.Build(cycleChart);
+        Require(cycleResult.Paths.Count == 0 && cycleResult.FallbackConnectors.Count == 2 && cycleResult.Warnings.Count > 0,
+            "A cyclic Hold must warn and preserve its connectors for fallback rendering");
+
+        var mixedGroupChart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        var mixedA = Point(35, 0, 0); mixedA.TimeScaleGroup = "main";
+        var mixedB = Point(36, 1, 1); mixedB.TimeScaleGroup = "fast";
+        mixedGroupChart.Connectors.Add(new RuntimeConnector { Start = mixedA, End = mixedB });
+        var mixedGroupResult = HoldPathBuilder.Build(mixedGroupChart);
+        Require(mixedGroupResult.Paths.Count == 0 && mixedGroupResult.FallbackConnectors.Count == 1,
+            "A Hold that changes TimeScaleGroup mid-path must retain legacy per-segment rendering");
+
+        var reverseGroupChart = new RuntimeChart { DefaultTimeScaleGroup = "reverse" };
+        reverseGroupChart.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+        var reverseA = Point(37, 0, 0); reverseA.TimeScaleGroup = "reverse";
+        var reverseB = Point(38, 1, 1); reverseB.TimeScaleGroup = "reverse";
+        reverseGroupChart.Connectors.Add(new RuntimeConnector { Start = reverseA, End = reverseB });
+        var reverseGroupResult = HoldPathBuilder.Build(reverseGroupChart);
+        Require(reverseGroupResult.Paths.Count == 0 && reverseGroupResult.FallbackConnectors.Count == 1,
+            "A Hold with a non-invertible reverse TimeScaleGroup must retain legacy clipping and rendering");
+
+        var checkpointChart = new RuntimeChart();
+        var checkpointA = Point(40, 0, 0);
+        var checkpointB = Point(41, 1, 2);
+        var checkpointC = Point(42, 2, 3);
+        checkpointChart.Notes.AddRange(new[] { checkpointA, checkpointB, checkpointC });
+        checkpointChart.Connectors.Add(new RuntimeConnector { Start = checkpointA, End = checkpointB });
+        checkpointChart.Connectors.Add(new RuntimeConnector { Start = checkpointB, End = checkpointC });
+        HoldCheckpointBuilder.Apply(checkpointChart, beat => beat);
+        Require(checkpointChart.HoldPaths.Count == 1,
+            "Hold checkpoint construction must retain the complete runtime path on the chart");
+        var curvedCheckpoint = checkpointChart.Notes.Single(note =>
+            note.HoldCheckpointSource == HoldCheckpointSource.Auto && Math.Abs(note.Beat - .5) < 1e-9);
+        var evaluatedCheckpoint = checkpointChart.HoldPaths[0].Evaluator.Evaluate(curvedCheckpoint.Time);
+        Require(Math.Abs(curvedCheckpoint.Lane - evaluatedCheckpoint.Lane) < 1e-6 &&
+                Math.Abs(curvedCheckpoint.Size - evaluatedCheckpoint.Size) < 1e-6,
+            "Automatic Hold checkpoints must use the same curved evaluator as rendering");
+        Require(Math.Abs(curvedCheckpoint.Lane - 1f) > .01f,
+            "The curved checkpoint regression fixture must differ from old linear interpolation");
+
+        var straightChart = new RuntimeChart();
+        var straightA = Point(50, 0, 0);
+        var straightB = Point(51, 1, 2);
+        straightChart.Connectors.Add(new RuntimeConnector { Start = straightA, End = straightB });
+        var straightPath = HoldPathBuilder.Build(straightChart).Paths[0];
+        var tessellator = new AdaptiveHoldTessellator();
+        var tessellation = new List<HoldTessellationPoint>(AdaptiveHoldTessellator.MaxPointsPerRun);
+        Vector2 Project(HoldTessellationPoint point) => new(point.Sample.Lane * 100, (float)point.Time * 100);
+        tessellator.BuildVisibleRun(straightPath.RenderRuns[0], 0, 1, Project, tessellation);
+        Require(tessellation.Count == 2,
+            "A straight Hold run must tessellate to only its two endpoints");
+
+        tessellator.BuildVisibleRun(path.RenderRuns[0], .25, 1.75, Project, tessellation);
+        Require(tessellation.Count > 2 && tessellation.Count <= AdaptiveHoldTessellator.MaxPointsPerRun,
+            "A curved Hold run must subdivide by screen error without exceeding the run cap");
+        Require(Math.Abs(tessellation[0].Time - .25) < 1e-9 && Math.Abs(tessellation[^1].Time - 1.75) < 1e-9,
+            "Adaptive Hold tessellation must preserve exact visible clip times");
+        var pointsInFirstSegment = tessellation.Count(point => point.Sample.SegmentIndex == 0);
+        Require(pointsInFirstSegment <= AdaptiveHoldTessellator.MaxPointsPerSegment,
+            "Adaptive Hold tessellation must respect its per-source-segment point cap");
+
+        tessellator.BuildVisibleRun(path.RenderRuns[0], 1.75, .25, Project, tessellation);
+        Require(Math.Abs(tessellation[0].Time - .25) < 1e-9 && Math.Abs(tessellation[^1].Time - 1.75) < 1e-9,
+            "Adaptive Hold tessellation must normalize a reversed visible-time interval");
+
+        var stressChart = new RuntimeChart();
+        RuntimeNote stressPrevious = null;
+        for (var stressIndex = 0; stressIndex <= 300; stressIndex++)
+        {
+            var stressPoint = Point(100 + stressIndex, stressIndex * .05, stressIndex % 2 == 0 ? -4 : 4);
+            if (stressPrevious != null)
+                stressChart.Connectors.Add(new RuntimeConnector { Start = stressPrevious, End = stressPoint });
+            stressPrevious = stressPoint;
+        }
+        var stressRun = HoldPathBuilder.Build(stressChart).Paths[0].RenderRuns[0];
+        Vector2 StressProject(HoldTessellationPoint point) => new(point.Sample.Lane * 1000, (float)point.Time * 1000);
+        tessellator.BuildVisibleRun(stressRun, stressRun.Start.Time, stressRun.End.Time, StressProject, tessellation);
+        Require(tessellation.Count <= AdaptiveHoldTessellator.MaxPointsPerRun &&
+                Math.Abs(tessellation[0].Time - stressRun.Start.Time) < 1e-9 &&
+                Math.Abs(tessellation[^1].Time - stressRun.End.Time) < 1e-9,
+            "A high-curvature Hold must preserve both endpoints while respecting the per-run safety cap");
+
+        var graphicObject = new GameObject("Hold geometry dirtiness validation", typeof(RectTransform),
+            typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
+        var graphic = graphicObject.GetComponent<TaperedConnectorGraphic>();
+        graphic.SetGeometry(Vector2.zero, Vector2.one, 10, 20);
+        var firstRevision = graphic.GeometryRevision;
+        graphic.SetGeometry(Vector2.zero, Vector2.one, 10, 20);
+        Require(graphic.GeometryRevision == firstRevision,
+            "Submitting identical Hold geometry must not dirty the uGUI mesh again");
+        graphic.SetGeometry(Vector2.zero, Vector2.one * 2, 10, 20);
+        Require(graphic.GeometryRevision == firstRevision + 1,
+            "Changing Hold geometry must dirty the uGUI mesh exactly once");
+        UnityEngine.Object.DestroyImmediate(graphicObject);
+    }
+
+    static void ValidateHoldPlayableRangeCheckpoints()
+    {
+        RuntimeNote Node(int index, double beat, SlideNodeRole role, SlideJudgeMode judgeMode, bool judged, float lane = 0) => new()
+        {
+            Index = index,
+            SourceId = $"playable-range:{index}",
+            Archetype = role == SlideNodeRole.Unspecified ? "LegacySlideNote" : $"USC Slide {role}",
+            Time = beat,
+            Beat = beat,
+            Lane = lane,
+            Size = 1,
+            Kind = role == SlideNodeRole.Start && judgeMode == SlideJudgeMode.Normal
+                ? RuntimeNoteKind.Tap : RuntimeNoteKind.Sustain,
+            Visible = true,
+            Judged = judged,
+            SlideNodeRole = role,
+            SlideJudgeMode = judgeMode,
+        };
+
+        RuntimeChart Chain(params RuntimeNote[] nodes)
+        {
+            var chart = new RuntimeChart();
+            chart.Notes.AddRange(nodes);
+            for (var index = 0; index < nodes.Length - 1; index++)
+                chart.Connectors.Add(new RuntimeConnector { Start = nodes[index], End = nodes[index + 1] });
+            return chart;
+        }
+
+        double[] AutoBeats(RuntimeChart chart) => chart.Notes
+            .Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)
+            .Select(note => note.Beat)
+            .OrderBy(beat => beat)
+            .ToArray();
+
+        bool TryReadBool(RuntimeHoldPath path, string propertyName, out bool value)
+        {
+            var property = typeof(RuntimeHoldPath).GetProperty(propertyName);
+            if (property?.GetValue(path) is bool propertyValue)
+            {
+                value = propertyValue;
+                return true;
+            }
+            value = false;
+            return false;
+        }
+
+        bool TryReadDouble(RuntimeHoldPath path, string propertyName, out double value)
+        {
+            var property = typeof(RuntimeHoldPath).GetProperty(propertyName);
+            if (property?.GetValue(path) is double propertyValue)
+            {
+                value = propertyValue;
+                return true;
+            }
+            value = 0;
+            return false;
+        }
+
+        bool HasNullDouble(RuntimeHoldPath path, string propertyName)
+        {
+            var property = typeof(RuntimeHoldPath).GetProperty(propertyName);
+            return property != null && property.GetValue(path) == null;
+        }
+
+        var allNone = Chain(
+            Node(2000, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
+            Node(2001, 8, SlideNodeRole.End, SlideJudgeMode.None, false, 2));
+        HoldCheckpointBuilder.Apply(allNone, beat => beat);
+        var allNoneAutos = AutoBeats(allNone);
+
+        var noneLead = Chain(
+            Node(2010, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
+            Node(2011, 2, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 0),
+            Node(2012, 4, SlideNodeRole.End, SlideJudgeMode.Trace, true, 2));
+        HoldCheckpointBuilder.Apply(noneLead, beat => beat);
+        var noneLeadAutos = AutoBeats(noneLead);
+
+        var sameBeat = Chain(
+            Node(2020, 0, SlideNodeRole.Start, SlideJudgeMode.Normal, true, -1),
+            Node(2021, 1, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 0),
+            Node(2022, 2, SlideNodeRole.End, SlideJudgeMode.Trace, true, 1));
+        HoldCheckpointBuilder.Apply(sameBeat, beat => beat);
+        HoldCheckpointBuilder.Apply(sameBeat, beat => beat);
+        var repeatedAutos = AutoBeats(sameBeat);
+        var repeatedAutoDuplicates = repeatedAutos.GroupBy(beat => beat).Count(group => group.Count() > 1);
+        var authoredCollisionCount = repeatedAutos.Count(beat => sameBeat.Connectors
+            .SelectMany(connector => new[] { connector.Start, connector.End })
+            .Distinct()
+            .Any(note => note.Judged && Math.Abs(note.Beat - beat) < 1e-9));
+
+        var legacy = Chain(
+            Node(2030, 0, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true, -1),
+            Node(2031, 1, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, false, 0),
+            Node(2032, 2, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true, 1));
+        legacy.Notes[^1].Kind = RuntimeNoteKind.Release;
+        HoldCheckpointBuilder.Apply(legacy, beat => beat);
+        var legacyAutos = AutoBeats(legacy);
+
+        var singleJudged = Chain(
+            Node(2040, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
+            Node(2041, 2, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 0),
+            Node(2042, 4, SlideNodeRole.End, SlideJudgeMode.None, false, 2));
+        HoldCheckpointBuilder.Apply(singleJudged, beat => beat);
+        var singleJudgedAutos = AutoBeats(singleJudged);
+
+        var fallback = new RuntimeChart();
+        var fallbackHead = Node(2050, 0, SlideNodeRole.Start, SlideJudgeMode.Normal, true);
+        var fallbackLeft = Node(2051, 1, SlideNodeRole.End, SlideJudgeMode.Trace, true, -1);
+        var fallbackRight = Node(2052, 1, SlideNodeRole.End, SlideJudgeMode.Trace, true, 1);
+        fallback.Notes.AddRange(new[] { fallbackHead, fallbackLeft, fallbackRight });
+        fallback.Connectors.Add(new RuntimeConnector { Start = fallbackHead, End = fallbackLeft });
+        fallback.Connectors.Add(new RuntimeConnector { Start = fallbackHead, End = fallbackRight });
+        HoldCheckpointBuilder.Apply(fallback, beat => beat);
+
+        Debug.Log($"GUGARYTHM_TASK2_CHECKPOINT_COUNTS " +
+                  $"allNonePlayable={allNone.PlayableCount} allNoneAuto={allNoneAutos.Length} " +
+                  $"noneLeadPlayable={noneLead.PlayableCount} noneLeadAuto={noneLeadAutos.Length} " +
+                  $"repeatedPlayable={sameBeat.PlayableCount} repeatedAuto={repeatedAutos.Length} " +
+                  $"duplicateAutoBeats={repeatedAutoDuplicates} authoredCollisions={authoredCollisionCount} " +
+                  $"legacyPlayable={legacy.PlayableCount} legacyAuto={legacyAutos.Length} " +
+                  $"singleJudgedPlayable={singleJudged.PlayableCount} singleJudgedAuto={singleJudgedAutos.Length}");
+
+        Require(allNoneAutos.Length == 0 && allNone.PlayableCount == 0,
+            $"An explicit all-none Hold must have no playable range or Auto checkpoints, got Auto={allNoneAutos.Length}");
+        Require(noneLeadAutos.SequenceEqual(new[] { 2.5d, 3d, 3.5d }) && noneLead.PlayableCount == 5,
+            $"A none lead-in must create Auto checkpoints only inside its first/last judged bounds, got {string.Join(",", noneLeadAutos)}");
+        Require(repeatedAutos.SequenceEqual(new[] { .5d, 1.5d }) && repeatedAutoDuplicates == 0 && authoredCollisionCount == 0,
+            $"Repeated Apply must rebuild exactly one Auto per eligible beat and skip authored judged beats, got {string.Join(",", repeatedAutos)}");
+        var legacyTail = legacy.Connectors[^1].End;
+        Require(legacyAutos.SequenceEqual(new[] { .5d, 1d, 1.5d }) && legacyTail.IsHoldTerminal &&
+                legacyTail.HoldCheckpointSource == HoldCheckpointSource.Tail,
+            "An all-Unspecified legacy/SCP path must retain geometry-head-to-tail checkpoints and legacy Tail metadata");
+        Require(singleJudgedAutos.Length == 0 && singleJudged.PlayableCount == 1 &&
+                !singleJudged.Notes[1].IsHoldTerminal && singleJudged.Notes[1].HoldCheckpointSource != HoldCheckpointSource.Tail &&
+                !singleJudged.Notes[2].IsHoldTerminal && singleJudged.Notes[2].HoldCheckpointSource != HoldCheckpointSource.Tail,
+            "A one-judged-node path has no interior Auto and only an explicit judged structural End may become Tail");
+        var noneLeadTail = noneLead.Connectors[^1].End;
+        Require(noneLeadTail.IsHoldTerminal && noneLeadTail.HoldCheckpointSource == HoldCheckpointSource.Tail,
+            "An explicit judged structural End must retain Tail metadata");
+        Require(fallback.FallbackConnectors.Count == 2 && fallbackHead.Judged && fallbackLeft.Judged && fallbackRight.Judged,
+            "A failed Hold topology must preserve legacy connectors and authored judgments");
+
+        var allNonePath = allNone.HoldPaths.Single();
+        var noneLeadPath = noneLead.HoldPaths.Single();
+        var legacyPath = legacy.HoldPaths.Single();
+        Require(TryReadBool(allNonePath, "HasPlayableRange", out var allNoneHasRange) && !allNoneHasRange &&
+                HasNullDouble(allNonePath, "PlayableStartBeat") && HasNullDouble(allNonePath, "PlayableEndBeat") &&
+                HasNullDouble(allNonePath, "PlayableStartTime") && HasNullDouble(allNonePath, "PlayableEndTime") &&
+                TryReadBool(noneLeadPath, "HasPlayableRange", out var noneLeadHasRange) && noneLeadHasRange &&
+                TryReadDouble(noneLeadPath, "VisualStartBeat", out var visualStartBeat) && Math.Abs(visualStartBeat) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "VisualEndBeat", out var visualEndBeat) && Math.Abs(visualEndBeat - 4) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "VisualStartTime", out var visualStartTime) && Math.Abs(visualStartTime) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "VisualEndTime", out var visualEndTime) && Math.Abs(visualEndTime - 4) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "PlayableStartBeat", out var playableStartBeat) && Math.Abs(playableStartBeat - 2) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "PlayableEndBeat", out var playableEndBeat) && Math.Abs(playableEndBeat - 4) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "PlayableStartTime", out var playableStartTime) && Math.Abs(playableStartTime - 2) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "PlayableEndTime", out var playableEndTime) && Math.Abs(playableEndTime - 4) < 1e-9 &&
+                TryReadBool(legacyPath, "HasPlayableRange", out var legacyHasRange) && legacyHasRange &&
+                TryReadDouble(legacyPath, "PlayableStartBeat", out var legacyStartBeat) && Math.Abs(legacyStartBeat) < 1e-9 &&
+                TryReadDouble(legacyPath, "PlayableEndBeat", out var legacyEndBeat) && Math.Abs(legacyEndBeat - 2) < 1e-9,
+            "RuntimeHoldPath must expose visual/playable beat/time bounds and legacy-compatible HasPlayableRange");
+
+        var attachBounds = Chain(
+            Node(2060, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
+            Node(2061, 2, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 0),
+            Node(2062, 4, SlideNodeRole.End, SlideJudgeMode.None, false, 2));
+        var earlyAttach = Node(2063, 1, SlideNodeRole.Attach, SlideJudgeMode.Trace, true, -1);
+        var lateAttach = Node(2064, 3, SlideNodeRole.Attach, SlideJudgeMode.Trace, true, 1);
+        earlyAttach.HoldRootIndex = attachBounds.Notes[0].Index;
+        lateAttach.HoldRootIndex = attachBounds.Notes[0].Index;
+        attachBounds.Notes.AddRange(new[] { earlyAttach, lateAttach });
+        HoldCheckpointBuilder.Apply(attachBounds, beat => beat);
+        var attachPath = attachBounds.HoldPaths.Single();
+        var attachAutos = AutoBeats(attachBounds);
+
+        var shifted = Chain(
+            Node(2070, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
+            Node(2071, 1, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, -1),
+            Node(2072, 3, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 1),
+            Node(2073, 4, SlideNodeRole.End, SlideJudgeMode.None, false, 2));
+        HoldCheckpointBuilder.Apply(shifted, beat => beat);
+        var shiftedPath = shifted.HoldPaths.Single();
+        var shiftedAuthored = shifted.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
+            .Distinct().ToArray();
+        var beatsBeforeShift = shiftedAuthored.Select(note => note.Beat).ToArray();
+        var timesBeforeShift = shiftedAuthored.Select(note => note.Time).ToArray();
+        shifted.ShiftTiming(4, 2);
+        var shiftedNodesOnce = shiftedAuthored.Select((note, index) =>
+            Math.Abs(note.Beat - beatsBeforeShift[index] - 4) < 1e-9 &&
+            Math.Abs(note.Time - timesBeforeShift[index] - 2) < 1e-9).All(value => value);
+
+        var invalidAllNone = new RuntimeChart();
+        var invalidNoneHead = Node(2080, 0, SlideNodeRole.Start, SlideJudgeMode.None, false);
+        var invalidNoneLeft = Node(2081, 2, SlideNodeRole.End, SlideJudgeMode.None, false, -1);
+        var invalidNoneRight = Node(2082, 4, SlideNodeRole.End, SlideJudgeMode.None, false, 1);
+        invalidAllNone.Notes.AddRange(new[] { invalidNoneHead, invalidNoneLeft, invalidNoneRight });
+        invalidAllNone.Connectors.Add(new RuntimeConnector { Start = invalidNoneHead, End = invalidNoneLeft });
+        invalidAllNone.Connectors.Add(new RuntimeConnector { Start = invalidNoneHead, End = invalidNoneRight });
+        HoldCheckpointBuilder.Apply(invalidAllNone, beat => beat);
+        var invalidAllNoneAutos = AutoBeats(invalidAllNone);
+
+        var invalidNoneLead = new RuntimeChart();
+        var invalidLeadHead = Node(2090, 0, SlideNodeRole.Start, SlideJudgeMode.None, false);
+        var invalidLeadTick = Node(2091, 2, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, -1);
+        var invalidLeadEnd = Node(2092, 4, SlideNodeRole.End, SlideJudgeMode.Trace, true, 1);
+        invalidNoneLead.Notes.AddRange(new[] { invalidLeadHead, invalidLeadTick, invalidLeadEnd });
+        invalidNoneLead.Connectors.Add(new RuntimeConnector { Start = invalidLeadHead, End = invalidLeadTick });
+        invalidNoneLead.Connectors.Add(new RuntimeConnector { Start = invalidLeadHead, End = invalidLeadEnd });
+        HoldCheckpointBuilder.Apply(invalidNoneLead, beat => beat);
+        var invalidNoneLeadAutos = AutoBeats(invalidNoneLead);
+
+        var invalidNonEnd = new RuntimeChart();
+        var invalidNonEndHead = Node(2100, 0, SlideNodeRole.Start, SlideJudgeMode.Normal, true);
+        var invalidNonEndLeft = Node(2101, 2, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, -1);
+        var invalidNonEndRight = Node(2102, 4, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 1);
+        invalidNonEnd.Notes.AddRange(new[] { invalidNonEndHead, invalidNonEndLeft, invalidNonEndRight });
+        invalidNonEnd.Connectors.Add(new RuntimeConnector { Start = invalidNonEndHead, End = invalidNonEndLeft });
+        invalidNonEnd.Connectors.Add(new RuntimeConnector { Start = invalidNonEndHead, End = invalidNonEndRight });
+        HoldCheckpointBuilder.Apply(invalidNonEnd, beat => beat);
+        var invalidNonEndAutos = AutoBeats(invalidNonEnd);
+
+        var nonInvertibleLinear = Chain(
+            Node(2120, 0, SlideNodeRole.Start, SlideJudgeMode.Normal, true, 0),
+            Node(2121, 1, SlideNodeRole.Tick, SlideJudgeMode.Trace, true, 2),
+            Node(2122, 2, SlideNodeRole.End, SlideJudgeMode.Trace, true, 4));
+        nonInvertibleLinear.DefaultTimeScaleGroup = "reverse";
+        nonInvertibleLinear.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+        foreach (var note in nonInvertibleLinear.Notes) note.TimeScaleGroup = "reverse";
+        nonInvertibleLinear.Connectors[0].Ease = 1;
+        HoldCheckpointBuilder.Apply(nonInvertibleLinear, beat => beat);
+        var nonInvertibleAutos = nonInvertibleLinear.Notes
+            .Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)
+            .OrderBy(note => note.Beat).ToArray();
+
+        var invalidLegacy = new RuntimeChart();
+        var invalidLegacyHead = Node(2110, 0, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true);
+        var invalidLegacyLeft = Node(2111, 2, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true, -1);
+        var invalidLegacyRight = Node(2112, 4, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true, 1);
+        invalidLegacy.Notes.AddRange(new[] { invalidLegacyHead, invalidLegacyLeft, invalidLegacyRight });
+        invalidLegacy.Connectors.Add(new RuntimeConnector { Start = invalidLegacyHead, End = invalidLegacyLeft });
+        invalidLegacy.Connectors.Add(new RuntimeConnector { Start = invalidLegacyHead, End = invalidLegacyRight });
+        HoldCheckpointBuilder.Apply(invalidLegacy, beat => beat);
+        var invalidLegacyAutos = AutoBeats(invalidLegacy);
+
+        Debug.Log($"GUGARYTHM_TASK2_REVIEW_COUNTS " +
+                  $"attachStart={attachPath.PlayableStartBeat} attachEnd={attachPath.PlayableEndBeat} attachAuto={attachAutos.Length} " +
+                  $"shiftVisualBeat={shiftedPath.VisualStartBeat}:{shiftedPath.VisualEndBeat} " +
+                  $"shiftVisualTime={shiftedPath.VisualStartTime}:{shiftedPath.VisualEndTime} " +
+                  $"shiftPlayableBeat={shiftedPath.PlayableStartBeat}:{shiftedPath.PlayableEndBeat} " +
+                  $"shiftPlayableTime={shiftedPath.PlayableStartTime}:{shiftedPath.PlayableEndTime} " +
+                  $"invalidAllNoneAuto={invalidAllNoneAutos.Length} invalidNoneLeadAuto={invalidNoneLeadAutos.Length} " +
+                  $"invalidNonEndAuto={invalidNonEndAutos.Length} nonInvertibleAuto={nonInvertibleAutos.Length} " +
+                  $"invalidLegacyAuto={invalidLegacyAutos.Length} " +
+                  $"invalidLeadTickTail={invalidLeadTick.IsHoldTerminal} invalidLeadEndTail={invalidLeadEnd.IsHoldTerminal} " +
+                  $"invalidNonEndTail={invalidNonEndLeft.IsHoldTerminal || invalidNonEndRight.IsHoldTerminal}");
+
+        Require(Math.Abs(attachPath.PlayableStartBeat.Value - 1) < 1e-9 &&
+                Math.Abs(attachPath.PlayableEndBeat.Value - 3) < 1e-9 &&
+                Math.Abs(attachPath.PlayableStartTime.Value - 1) < 1e-9 &&
+                Math.Abs(attachPath.PlayableEndTime.Value - 3) < 1e-9 &&
+                attachAutos.SequenceEqual(new[] { 1.5d, 2.5d }) &&
+                earlyAttach.HoldCheckpointSource == HoldCheckpointSource.Mid &&
+                lateAttach.HoldCheckpointSource == HoldCheckpointSource.Mid,
+            "Judged Attach nodes outside connector geometry membership must define the earliest/latest playable bounds");
+        Require(shiftedNodesOnce &&
+                Math.Abs(shiftedPath.VisualStartBeat - 4) < 1e-9 && Math.Abs(shiftedPath.VisualEndBeat - 8) < 1e-9 &&
+                Math.Abs(shiftedPath.VisualStartTime - 2) < 1e-9 && Math.Abs(shiftedPath.VisualEndTime - 6) < 1e-9 &&
+                Math.Abs(shiftedPath.PlayableStartBeat.Value - 5) < 1e-9 && Math.Abs(shiftedPath.PlayableEndBeat.Value - 7) < 1e-9 &&
+                Math.Abs(shiftedPath.PlayableStartTime.Value - 3) < 1e-9 && Math.Abs(shiftedPath.PlayableEndTime.Value - 5) < 1e-9,
+            "RuntimeChart.ShiftTiming must refresh all visual/playable path bounds without shifting authored nodes twice");
+        Require(invalidAllNoneAutos.Length == 0 && invalidAllNone.PlayableCount == 0,
+            "An invalid explicit all-none topology must not fall back to legacy Auto judgments");
+        Require(invalidNoneLeadAutos.Length == 0 && !invalidLeadTick.IsHoldTerminal &&
+                invalidLeadTick.HoldCheckpointSource == HoldCheckpointSource.Mid &&
+                invalidLeadEnd.IsHoldTerminal && invalidLeadEnd.HoldCheckpointSource == HoldCheckpointSource.Tail,
+            "An invalid explicit none lead-in must retain authored structural semantics without synthesizing unsafe Auto judgments");
+        Require(invalidNonEndAutos.Length == 0 && !invalidNonEndLeft.IsHoldTerminal && !invalidNonEndRight.IsHoldTerminal &&
+                invalidNonEndLeft.HoldCheckpointSource == HoldCheckpointSource.Mid &&
+                invalidNonEndRight.HoldCheckpointSource == HoldCheckpointSource.Mid,
+            "An invalid explicit path ending at a non-End node must not infer Tail or synthesize Auto judgments");
+        var expectedEaseInLane = 2 * (1 - Math.Cos(Math.PI * .25));
+        Require(nonInvertibleAutos.Select(note => note.Beat).SequenceEqual(new[] { .5d, 1.5d }) &&
+                Math.Abs(nonInvertibleAutos[0].Lane - expectedEaseInLane) < 1e-6 &&
+                nonInvertibleLinear.Notes[1].HoldCheckpointSource == HoldCheckpointSource.Mid &&
+                nonInvertibleLinear.Notes[2].IsHoldTerminal &&
+                nonInvertibleLinear.Notes[2].HoldCheckpointSource == HoldCheckpointSource.Tail,
+            "A unique time-monotonic explicit chain must retain authored-bound Auto checkpoints and per-segment ease even when visual time is non-invertible");
+        Require(invalidLegacyAutos.SequenceEqual(new[] { .5d, 1d, 1.5d }),
+            "An invalid all-Unspecified topology must retain legacy checkpoint fallback behavior");
+    }
+
+    public static void ValidateValidPathAttachEvaluatorAlignment()
+    {
+        const string usc = @"{
+            ""usc"": {
+                ""objects"": [
+                    { ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 4, ""judgeType"": ""normal"", ""lane"": 0, ""size"": 0.25, ""type"": ""start"", ""ease"": ""in"" },
+                        { ""beat"": 4.5, ""judgeType"": ""trace"", ""lane"": 99, ""size"": 1, ""type"": ""attach"" },
+                        { ""beat"": 6, ""judgeType"": ""trace"", ""lane"": 80, ""size"": 2, ""type"": ""end"" }
+                    ] }
+                ]
+            }
+        }";
+        var imported = new UscChartImporter().Import("valid-eased-judged-attach.usc",
+            System.Text.Encoding.UTF8.GetBytes(usc));
+        Require(imported.Success, "Valid eased judged-Attach fixture must import: " + imported.Error);
+        var path = imported.Chart.HoldPaths.Single();
+        var attach = imported.Chart.Notes.Single(note => note.SlideNodeRole == SlideNodeRole.Attach);
+        var evaluated = path.Evaluator.Evaluate(attach.Time);
+        var score = new ScoreState();
+        var engine = new JudgmentEngine(new[] { attach }, score);
+        engine.Process(attach.Time, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, evaluated.Lane, attach.Time - .1) });
+        var autoCount = imported.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto);
+
+        Debug.Log($"GUGARYTHM_FINAL_ATTACH_EVALUATOR " +
+                  $"lane={attach.Lane:0.######} size={attach.Size:0.######} " +
+                  $"evaluatorLane={evaluated.Lane:0.######} evaluatorSize={evaluated.Size:0.######} " +
+                  $"judgment={attach.Grade} playable={imported.Chart.PlayableCount} auto={autoCount}");
+        Require(Math.Abs(attach.Lane - evaluated.Lane) < 1e-6 &&
+                Math.Abs(attach.Size - evaluated.Size) < 1e-6,
+            "A judged Attach on a valid Hold path must use the shared evaluator Lane and Size");
+        Require(attach.Grade == JudgmentGrade.Perfect && score.Perfect == 1,
+            "A judged Attach must resolve from sustained contact at the visible evaluator lane");
+        Require(imported.Chart.PlayableCount == 5 && autoCount == 2,
+            "Aligning valid-path Attach geometry must not change authored or Auto checkpoint counts");
+    }
+
+    static void ValidateHoldEaseParity()
+    {
+        var easeNames = new[] { "linear", "in", "out", "inout" };
+        var sampleProgress = new[] { .25f, .75f };
+        var sharedMathType = typeof(RuntimeHoldPath).Assembly.GetType("Gugarythm.HoldPathMath");
+        var sharedEaseMethod = sharedMathType?.GetMethod("EaseProgress",
+            System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        var markerValues = new List<string>();
+
+        float ExpectedProgress(float progress, int ease) => ease switch
+        {
+            1 => 1f - (float)Math.Cos(progress * Math.PI * .5),
+            2 => (float)Math.Sin(progress * Math.PI * .5),
+            3 => progress < .5f ? 2 * progress * progress :
+                1 - (float)Math.Pow(-2 * progress + 2, 2) * .5f,
+            _ => progress,
+        };
+
+        for (var ease = 0; ease < easeNames.Length; ease++)
+        {
+            var usc = $@"{{
+                ""usc"": {{
+                    ""objects"": [
+                        {{ ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 }},
+                        {{ ""type"": ""slide"", ""connections"": [
+                            {{ ""beat"": 4, ""judgeType"": ""normal"", ""lane"": 0, ""size"": 1, ""type"": ""start"", ""ease"": ""{easeNames[ease]}"" }},
+                            {{ ""beat"": 4.5, ""judgeType"": ""trace"", ""lane"": 99, ""size"": 1, ""type"": ""attach"" }},
+                            {{ ""beat"": 5.5, ""judgeType"": ""trace"", ""lane"": 99, ""size"": 1, ""type"": ""attach"" }},
+                            {{ ""beat"": 6, ""judgeType"": ""trace"", ""lane"": 4, ""size"": 1, ""type"": ""end"" }}
+                        ] }}
+                    ]
+                }}
+            }}";
+            var imported = new UscChartImporter().Import($"ease-{ease}.usc",
+                System.Text.Encoding.UTF8.GetBytes(usc));
+            Require(imported.Success, $"Ease {ease} USC fixture must import: {imported.Error}");
+            var attachNotes = imported.Chart.Notes
+                .Where(note => note.SlideNodeRole == SlideNodeRole.Attach)
+                .OrderBy(note => note.Beat)
+                .ToArray();
+            var validPath = imported.Chart.HoldPaths.Single();
+
+            var fallback = new RuntimeChart { DefaultTimeScaleGroup = "reverse" };
+            fallback.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+            var start = new RuntimeNote
+            {
+                Index = 2200 + ease * 2,
+                SourceId = $"ease-fallback:{ease}:start",
+                Archetype = "USC Slide start",
+                Beat = 4,
+                Time = 4,
+                Lane = 0,
+                Size = 1,
+                Kind = RuntimeNoteKind.Tap,
+                Visible = true,
+                Judged = true,
+                SlideNodeRole = SlideNodeRole.Start,
+                SlideJudgeMode = SlideJudgeMode.Normal,
+                TimeScaleGroup = "reverse",
+            };
+            var end = new RuntimeNote
+            {
+                Index = start.Index + 1,
+                SourceId = $"ease-fallback:{ease}:end",
+                Archetype = "USC Trace Slide end",
+                Beat = 6,
+                Time = 6,
+                Lane = 4,
+                Size = 1,
+                Kind = RuntimeNoteKind.Sustain,
+                Visible = true,
+                Judged = true,
+                SlideNodeRole = SlideNodeRole.End,
+                SlideJudgeMode = SlideJudgeMode.Trace,
+                TimeScaleGroup = "reverse",
+            };
+            fallback.Notes.AddRange(new[] { start, end });
+            fallback.Connectors.Add(new RuntimeConnector { Start = start, End = end, Ease = ease });
+            HoldCheckpointBuilder.Apply(fallback, beat => beat);
+            var fallbackLanes = fallback.Notes
+                .Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto &&
+                    (Math.Abs(note.Beat - 4.5) < 1e-9 || Math.Abs(note.Beat - 5.5) < 1e-9))
+                .OrderBy(note => note.Beat)
+                .Select(note => note.Lane)
+                .ToArray();
+
+            Require(attachNotes.Length == sampleProgress.Length && fallbackLanes.Length == sampleProgress.Length,
+                $"Ease {ease} parity fixture must produce two Attach and two sampled fallback Auto nodes");
+            for (var sample = 0; sample < sampleProgress.Length; sample++)
+            {
+                var expectedLane = 4 * ExpectedProgress(sampleProgress[sample], ease);
+                var validPathLane = validPath.Evaluator.Evaluate(attachNotes[sample].Time).Lane;
+                Require(Math.Abs(attachNotes[sample].Lane - validPathLane) < 1e-6,
+                    $"Valid-path USC Attach Ease {ease} drifted from its shared evaluator at progress {sampleProgress[sample]}");
+                Require(Math.Abs(fallbackLanes[sample] - expectedLane) < 1e-6,
+                    $"Safe fallback Ease {ease} drifted at progress {sampleProgress[sample]}");
+            }
+            markerValues.Add($"ease{ease}=valid:{attachNotes[0].Lane:0.######}:{attachNotes[1].Lane:0.######}" +
+                $"/fallback:{fallbackLanes[0]:0.######}:{fallbackLanes[1]:0.######}");
+        }
+
+        Debug.Log("GUGARYTHM_TASK2_EASE_PARITY " + string.Join(" ", markerValues));
+        Require(sharedEaseMethod != null,
+            "Hold interpolation must expose one shared pure HoldPathMath.EaseProgress evaluator");
+        for (var ease = 0; ease < easeNames.Length; ease++)
+        foreach (var progress in sampleProgress)
+        {
+            var actual = (float)sharedEaseMethod.Invoke(null, new object[] { progress, ease });
+            Require(Math.Abs(actual - ExpectedProgress(progress, ease)) < 1e-6,
+                $"Shared Hold Ease {ease} drifted at progress {progress}");
+        }
+    }
+
+    static void ValidateChartRenderIndex()
+    {
+        var chart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        chart.TimeScaleGroups["main"] = new RuntimeTimeScaleGroup("main", new[] { (0d, 1d) });
+        chart.TimeScaleGroups["fast"] = new RuntimeTimeScaleGroup("fast", new[] { (0d, 2d) });
+        chart.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+        RuntimeNote NoteAt(int index, double time, string group) => new()
+        {
+            Index = index,
+            Time = time,
+            Beat = time,
+            Lane = index,
+            Size = 1,
+            Visible = true,
+            TimeScaleGroup = group,
+        };
+        var late = NoteAt(2, 1.5, "main");
+        var early = NoteAt(1, .5, "main");
+        var fastOutside = NoteAt(3, 1.5, "fast");
+        var reverse = NoteAt(4, 1.5, "reverse");
+        chart.Notes.AddRange(new[] { late, fastOutside, reverse, early });
+
+        var holdA = NoteAt(10, .25, "main");
+        var holdB = NoteAt(11, 2, "main");
+        chart.Connectors.Add(new RuntimeConnector { Start = holdA, End = holdB });
+        HoldCheckpointBuilder.Apply(chart, beat => beat);
+        var index = new ChartRenderIndex(chart);
+        var notes = new List<RuntimeNote>();
+        index.QueryNotes(0, 0, 2, notes);
+        Require(notes.SequenceEqual(new[] { early, late }),
+            "ChartRenderIndex must query each TimeScaleGroup in visual-position order with stable note ordering");
+        index.QueryNotes(0, .5, .5, notes);
+        Require(notes.Count == 1 && ReferenceEquals(notes[0], early),
+            "ChartRenderIndex note queries must include exact visual-window boundaries");
+        index.QueryNotes(1, .5, .5, notes);
+        Require(notes.Contains(reverse),
+            "ChartRenderIndex must query reverse TimeScaleGroups in visual-position space");
+
+        var runs = new List<HoldRenderRun>();
+        index.QueryHoldRuns(1, 0, .25, runs);
+        Require(runs.Count == 1 && ReferenceEquals(runs[0], chart.HoldPaths[0].RenderRuns[0]),
+            "ChartRenderIndex must return a Hold run whose visual interval overlaps the query window");
+        index.QueryHoldRuns(4, 0, .25, runs);
+        Require(runs.Count == 0, "ChartRenderIndex must exclude Hold runs outside the visual window");
+
+        var emptyIndex = new ChartRenderIndex(new RuntimeChart());
+        emptyIndex.QueryNotes(0, 1, 1, notes);
+        emptyIndex.QueryHoldRuns(0, 1, 1, runs);
+        Require(notes.Count == 0 && runs.Count == 0,
+            "ChartRenderIndex must return empty reusable buffers for an empty chart");
     }
 
     static void ValidateLibrarySelectionFrameGeometry()
@@ -410,8 +1102,16 @@ public static class RuntimeValidation
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
         var result = new GgrChartImporter().Import(Path.GetFileName(path), File.ReadAllBytes(path));
         Require(result.Success, "Attached GGR must import successfully: " + result.Error);
-        Require(result.Chart.PlayableCount == 5579,
-            $"Attached GGR must contain 5579 playable notes after judged Slide tails are restored, got {result.Chart.PlayableCount}");
+        Debug.Log($"GUGARYTHM_TASK2_ATTACHED_GGR_COUNTS playable={result.Chart.PlayableCount} " +
+                  $"auto={result.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} " +
+                  $"autoRoots={result.Chart.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).Select(note => note.HoldRootIndex).Distinct().Count()} " +
+                  $"holdPaths={result.Chart.HoldPaths.Count} fallback={result.Chart.FallbackConnectors.Count} " +
+                  $"playableRanges={result.Chart.HoldPaths.Count(holdPath => holdPath.HasPlayableRange)} " +
+                  $"semanticJudged={result.Chart.HoldPaths.Sum(holdPath => holdPath.SemanticNodes.Count(note => note.Judged))} " +
+                  $"warnings={string.Join(" | ", result.Chart.Warnings)}");
+        Require(result.Chart.PlayableCount == 3710 &&
+                result.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto) == 554,
+            $"Attached GGR must retain 3156 authored judgments plus 554 semantic-safe fallback Auto checkpoints, got {result.Chart.PlayableCount}");
     }
 
     static void ValidateNoteRenderWidths()
@@ -459,6 +1159,220 @@ public static class RuntimeValidation
         var alreadyExited = (bool)method.Invoke(null, new object[] { -150f, 100f, -100f });
         Require(inside && !tooFar && !alreadyExited,
             "Only notes between the upper render boundary and exit boundary may stay in the active UI pool");
+    }
+
+    public static void ValidateTaperedConnectorGeometry()
+    {
+        var populateMesh = typeof(TaperedConnectorGraphic).GetMethod(
+            "OnPopulateMesh", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+            null, new[] { typeof(VertexHelper) }, null);
+        Require(populateMesh != null, "Hold ribbon geometry must expose its uGUI mesh population path");
+
+        var graphicObject = new GameObject("Hold ribbon geometry validation", typeof(RectTransform),
+            typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
+        var graphic = graphicObject.GetComponent<TaperedConnectorGraphic>();
+        graphic.drawGlow = false;
+        graphic.drawEdges = false;
+        graphic.color = new Color(.2f, .8f, .4f, .8f);
+        graphic.sourceUvInset = .1f;
+        var helper = new VertexHelper();
+        var mesh = new Mesh { name = "Hold ribbon validation mesh" };
+
+        void Populate(Vector2[] points, float[] pointWidths, float[] pointAlphas = null)
+        {
+            graphic.BeginPath(points.Length);
+            for (var index = 0; index < points.Length; index++)
+                graphic.SetPathPoint(index, points[index], pointWidths[index], pointAlphas?[index] ?? 1);
+            graphic.EndPath();
+            helper.Clear();
+            populateMesh.Invoke(graphic, new object[] { helper });
+            mesh.Clear();
+            helper.FillMesh(mesh);
+        }
+
+        int EdgeUseCount(int a, int b)
+        {
+            var triangles = mesh.triangles;
+            var count = 0;
+            for (var index = 0; index < triangles.Length; index += 3)
+            {
+                for (var edge = 0; edge < 3; edge++)
+                {
+                    var first = triangles[index + edge];
+                    var second = triangles[index + (edge + 1) % 3];
+                    if ((first == a && second == b) || (first == b && second == a)) count++;
+                }
+            }
+            return count;
+        }
+
+        bool HasZeroAreaTriangle()
+        {
+            var vertices = mesh.vertices;
+            var triangles = mesh.triangles;
+            for (var index = 0; index < triangles.Length; index += 3)
+            {
+                var a = vertices[triangles[index]];
+                var b = vertices[triangles[index + 1]];
+                var c = vertices[triangles[index + 2]];
+                if (Vector3.Cross(b - a, c - a).sqrMagnitude <= .00000001f) return true;
+            }
+            return false;
+        }
+
+        bool HasConsistentPositiveWinding()
+        {
+            var vertices = mesh.vertices;
+            var triangles = mesh.triangles;
+            for (var index = 0; index < triangles.Length; index += 3)
+            {
+                var a = vertices[triangles[index]];
+                var b = vertices[triangles[index + 1]];
+                var c = vertices[triangles[index + 2]];
+                if (Vector3.Cross(b - a, c - a).z <= .00001f) return false;
+            }
+            return true;
+        }
+
+        bool HasPositiveAreaOverlap(
+            Vector2 a0, Vector2 a1, Vector2 a2,
+            Vector2 b0, Vector2 b1, Vector2 b2)
+        {
+            bool Separates(Vector2 first, Vector2 second)
+            {
+                var edge = second - first;
+                var axis = new Vector2(-edge.y, edge.x);
+                var aMin = Mathf.Min(Vector2.Dot(a0, axis), Vector2.Dot(a1, axis), Vector2.Dot(a2, axis));
+                var aMax = Mathf.Max(Vector2.Dot(a0, axis), Vector2.Dot(a1, axis), Vector2.Dot(a2, axis));
+                var bMin = Mathf.Min(Vector2.Dot(b0, axis), Vector2.Dot(b1, axis), Vector2.Dot(b2, axis));
+                var bMax = Mathf.Max(Vector2.Dot(b0, axis), Vector2.Dot(b1, axis), Vector2.Dot(b2, axis));
+                return Mathf.Min(aMax, bMax) - Mathf.Max(aMin, bMin) <= .00001f;
+            }
+
+            return !Separates(a0, a1) && !Separates(a1, a2) && !Separates(a2, a0) &&
+                   !Separates(b0, b1) && !Separates(b1, b2) && !Separates(b2, b0);
+        }
+
+        bool HasOverlappingTriangleInteriors()
+        {
+            var vertices = mesh.vertices;
+            var triangles = mesh.triangles;
+            for (var first = 0; first < triangles.Length; first += 3)
+            {
+                var a0 = (Vector2)vertices[triangles[first]];
+                var a1 = (Vector2)vertices[triangles[first + 1]];
+                var a2 = (Vector2)vertices[triangles[first + 2]];
+                for (var second = first + 3; second < triangles.Length; second += 3)
+                {
+                    var b0 = (Vector2)vertices[triangles[second]];
+                    var b1 = (Vector2)vertices[triangles[second + 1]];
+                    var b2 = (Vector2)vertices[triangles[second + 2]];
+                    if (HasPositiveAreaOverlap(a0, a1, a2, b0, b1, b2)) return true;
+                }
+            }
+            return false;
+        }
+
+        var straightPoints = new[] { new Vector2(0, 0), new Vector2(10, 0), new Vector2(20, 0) };
+        Populate(straightPoints, new[] { 4f, 6f, 8f }, new[] { 1f, .5f, .25f });
+        Debug.Log($"GUGARYTHM_CONNECTOR_GEOMETRY_TOPOLOGY vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} expectedVertices=6 expectedTriangles=4");
+        Require(mesh.vertexCount == 6 && mesh.triangles.Length == 12,
+            "A three-point Hold ribbon must reuse one pair of vertices at its interior cross-section");
+        Require(EdgeUseCount(0, 1) == 1 && EdgeUseCount(2, 3) == 2 && EdgeUseCount(4, 5) == 1,
+            "Only the true start and end of a Hold ribbon may remain capped");
+        Require(!HasZeroAreaTriangle(), "A straight Hold ribbon must not emit zero-area triangles");
+
+        var straightVertices = mesh.vertices;
+        var startCenter = (straightVertices[0] + straightVertices[1]) * .5f;
+        var endCenter = (straightVertices[4] + straightVertices[5]) * .5f;
+        Require(((Vector2)startCenter - straightPoints[0]).sqrMagnitude < .000001f &&
+                ((Vector2)endCenter - straightPoints[2]).sqrMagnitude < .000001f &&
+                Math.Abs(Vector3.Distance(straightVertices[0], straightVertices[1]) - 4f) < .0001f &&
+                Math.Abs(Vector3.Distance(straightVertices[4], straightVertices[5]) - 8f) < .0001f,
+            "Continuous Hold geometry must preserve submitted endpoints and widths");
+        var straightUv = mesh.uv;
+        Require(straightUv.All(value => Math.Abs(value.x - .1f) < .0001f || Math.Abs(value.x - .9f) < .0001f),
+            "Continuous Hold geometry must preserve the configured horizontal texture inset");
+        var straightColors = mesh.colors32;
+        Require(Math.Abs(straightColors[0].a / 255f - .26f) < .01f &&
+                Math.Abs(straightColors[2].a / 255f - .13f) < .01f &&
+                Math.Abs(straightColors[4].a / 255f - .065f) < .01f,
+            "Continuous Hold geometry must preserve fill alpha limits and per-point alpha multipliers");
+
+        var repeatedPoint = new Vector2(10, 0);
+        Populate(new[] { Vector2.zero, repeatedPoint, repeatedPoint, new Vector2(20, 0) },
+            new[] { 4f, 6f, 10f, 8f }, new[] { 1f, .75f, .25f, .5f });
+        var repeatedVertices = mesh.vertices;
+        var repeatedColors = mesh.colors32;
+        var repeatedCenter = (Vector2)(repeatedVertices[2] + repeatedVertices[3]) * .5f;
+        var repeatedWidth = Vector3.Distance(repeatedVertices[2], repeatedVertices[3]);
+        var repeatedAlpha = repeatedColors[2].a / 255f;
+        var repeatedTopologyOk = mesh.vertexCount == 6 && mesh.triangles.Length == 12 &&
+                                 EdgeUseCount(2, 3) == 2 && !HasZeroAreaTriangle() &&
+                                 HasConsistentPositiveWinding() && !HasOverlappingTriangleInteriors();
+        var repeatedSemanticsOk = (repeatedCenter - repeatedPoint).sqrMagnitude < .000001f &&
+                                  Math.Abs(repeatedWidth - 10f) < .0001f &&
+                                  Math.Abs(repeatedAlpha - .065f) < .01f;
+        Debug.Log($"GUGARYTHM_CONNECTOR_COINCIDENT_FIXTURE vertices={mesh.vertexCount} triangles={mesh.triangles.Length / 3} " +
+                  $"interiorUses={EdgeUseCount(2, 3)} width={repeatedWidth:F3} alpha={repeatedAlpha:F3} " +
+                  $"topology={repeatedTopologyOk} lastSampleSemantics={repeatedSemanticsOk}");
+
+        var cornerPoint = new Vector2(10, 0);
+        Populate(new[] { Vector2.zero, cornerPoint, new Vector2(10, 10) }, new[] { 4f, 4f, 4f });
+        var cornerVertices = mesh.vertices;
+        var miterRatio = Vector2.Distance((Vector2)cornerVertices[2], cornerPoint) / 2f;
+        Require(mesh.vertexCount == 6 && miterRatio > 1.4f && miterRatio < 1.42f && !HasZeroAreaTriangle(),
+            "A normal turn must share one averaged-tangent miter section without changing its authored half-width");
+
+        var sharpPoint = new Vector2(10, 0);
+        var bevelFixturesOk = true;
+        var bevelInnerRatio = 0f;
+        var bevelOuterMaxRatio = 0f;
+        foreach (var direction in new[] { 1f, -1f })
+        {
+            Populate(new[] { Vector2.zero, sharpPoint, new Vector2(5, direction * 5) }, new[] { 4f, 4f, 4f });
+            var sharpVertices = mesh.vertices;
+            var positiveInner = Vector2.Distance((Vector2)sharpVertices[2], (Vector2)sharpVertices[4]) < .0001f;
+            var negativeInner = Vector2.Distance((Vector2)sharpVertices[3], (Vector2)sharpVertices[5]) < .0001f;
+            var hasSingleInnerIntersection = positiveInner != negativeInner;
+            var innerFirst = positiveInner ? 2 : 3;
+            var innerSecond = positiveInner ? 4 : 5;
+            var outerFirst = positiveInner ? 3 : 2;
+            var outerSecond = positiveInner ? 5 : 4;
+            var innerRatio = hasSingleInnerIntersection
+                ? Math.Max(Vector2.Distance((Vector2)sharpVertices[innerFirst], sharpPoint),
+                    Vector2.Distance((Vector2)sharpVertices[innerSecond], sharpPoint)) / 2f
+                : 0;
+            var outerMaxRatio = Math.Max(Vector2.Distance((Vector2)sharpVertices[outerFirst], sharpPoint),
+                Vector2.Distance((Vector2)sharpVertices[outerSecond], sharpPoint)) / 2f;
+            var windingOk = HasConsistentPositiveWinding();
+            var overlap = HasOverlappingTriangleInteriors();
+            var fixtureOk = mesh.vertexCount == 8 && mesh.triangles.Length == 15 &&
+                            hasSingleInnerIntersection && innerRatio > 2f && innerRatio < 2.62f &&
+                            outerMaxRatio <= 1.0001f && !HasZeroAreaTriangle() && windingOk && !overlap;
+            bevelFixturesOk &= fixtureOk;
+            bevelInnerRatio = Math.Max(bevelInnerRatio, innerRatio);
+            bevelOuterMaxRatio = Math.Max(bevelOuterMaxRatio, outerMaxRatio);
+            Debug.Log($"GUGARYTHM_CONNECTOR_BEVEL_FIXTURE direction={direction:+0;-0} vertices={mesh.vertexCount} " +
+                      $"triangles={mesh.triangles.Length / 3} innerIntersection={hasSingleInnerIntersection} " +
+                      $"innerRatio={innerRatio:F3} outerMaxRatio={outerMaxRatio:F3} winding={windingOk} overlap={overlap}");
+        }
+
+        Require(repeatedTopologyOk && repeatedSemanticsOk,
+            "Consecutive coincident Hold samples must coalesce to one section using the last sample's width and alpha");
+        Require(bevelFixturesOk,
+            "Both 135-degree turn directions must emit one outer bevel triangle around a shared inner intersection with consistent winding and no overlap");
+
+        graphic.drawGlow = true;
+        graphic.drawEdges = true;
+        Populate(straightPoints, new[] { 4f, 6f, 8f });
+        Require(mesh.vertexCount == 24 && mesh.triangles.Length == 48,
+            "Fill, glow, left-edge, and right-edge strips must each reuse their three cross-sections");
+        Debug.Log($"GUGARYTHM_CONNECTOR_GEOMETRY_VALIDATION_OK straightVertices=6 straightTriangles=4 cornerVertices=6 bevelVertices=8 bevelTriangles=5 fullVertices={mesh.vertexCount} fullTriangles={mesh.triangles.Length / 3} miterRatio={miterRatio:F3} bevelInnerRatio={bevelInnerRatio:F3} bevelOuterMaxRatio={bevelOuterMaxRatio:F3}");
+
+        helper.Dispose();
+        UnityEngine.Object.DestroyImmediate(mesh);
+        UnityEngine.Object.DestroyImmediate(graphicObject);
     }
 
     static void ValidateNoteSurfaceProjection()
@@ -570,12 +1484,21 @@ public static class RuntimeValidation
         var noneHeadTail = At(18);
         var terminalFirstJudgedAfterNoneHead = At(20);
 
+        Require(firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain,
+            "firstJudgedConnection must not promote a structural Slide Tick to Tap");
+        Require(terminalFirstJudgedAfterNoneHead.Judged && terminalFirstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain,
+            "firstJudgedConnection must not promote a structural Slide End to Tap");
+
         Require(Enum.TryParse("Tail", out HoldCheckpointSource tailSource),
             "HoldCheckpointSource must define Tail for judged Slide terminals");
-        Require(normalHead.Judged && normalHead.Kind == RuntimeNoteKind.Tap && traceHead.Judged && traceHead.Kind == RuntimeNoteKind.Tap,
-            "Normal and trace Slide heads must be discrete Tap judgments");
-        Require(normalMid.Judged && normalMid.Kind == RuntimeNoteKind.Sustain && traceMid.Judged && traceMid.Kind == RuntimeNoteKind.Sustain,
-            "Judged authored Slide mids must be Sustain checkpoints regardless of normal or trace judgeType");
+        Require(normalHead.Judged && normalHead.Kind == RuntimeNoteKind.Tap,
+            "Only a normal structural Slide Start must use discrete Tap judgment");
+        Require(traceHead.Judged && traceHead.Kind == RuntimeNoteKind.Sustain &&
+                traceMid.Judged && traceMid.Kind == RuntimeNoteKind.Sustain &&
+                traceTail.Judged && traceTail.Kind == RuntimeNoteKind.Sustain,
+            "Every non-directional Trace Slide node must use sustained-contact judgment");
+        Require(normalMid.Judged && normalMid.Kind == RuntimeNoteKind.Sustain,
+            "A judged normal structural Slide Tick must use sustained-contact judgment");
         Require(normalTail.Judged && normalTail.Kind == RuntimeNoteKind.Sustain && normalTail.IsHoldTerminal && normalTail.HoldCheckpointSource == tailSource &&
                 traceTail.Judged && traceTail.Kind == RuntimeNoteKind.Sustain && traceTail.IsHoldTerminal && traceTail.HoldCheckpointSource == tailSource,
             "Normal and trace Slide terminals must be judged Sustain Tail checkpoints");
@@ -583,11 +1506,19 @@ public static class RuntimeValidation
             "Directional Slide terminals must remain judged Flick Tail checkpoints");
         Require(noneNodes.All(note => !note.Judged) && !noneDirectionTail.Judged && !noneHeadTail.Judged && chart.PlayableCount == 13,
             "Slide judgeType:none nodes must stay out of judgment and PlayableCount");
-        Require(!noneHead.Judged && firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Tap,
-            "The first judged Slide connection after a none head must become the discrete Tap head");
-        Require(terminalFirstJudgedAfterNoneHead.Judged && terminalFirstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Tap &&
+        Require(!noneHead.Judged && firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain,
+            "A judged structural Slide Tick after a none head must remain contact-judged");
+        Require(terminalFirstJudgedAfterNoneHead.Judged && terminalFirstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain &&
                 terminalFirstJudgedAfterNoneHead.IsHoldTerminal && terminalFirstJudgedAfterNoneHead.HoldCheckpointSource == tailSource,
-            "A first judged Slide terminal after a none head must remain a Tap with Tail metadata");
+            "A normal structural Slide End after a none head must remain a contact-judged Tail");
+
+        Require(normalHead.SlideNodeRole == SlideNodeRole.Start && normalHead.SlideJudgeMode == SlideJudgeMode.Normal &&
+                traceHead.SlideNodeRole == SlideNodeRole.Start && traceHead.SlideJudgeMode == SlideJudgeMode.Trace &&
+                traceMid.SlideNodeRole == SlideNodeRole.Tick && traceMid.SlideJudgeMode == SlideJudgeMode.Trace &&
+                traceTail.SlideNodeRole == SlideNodeRole.End && traceTail.SlideJudgeMode == SlideJudgeMode.Trace &&
+                flickTail.SlideNodeRole == SlideNodeRole.End && flickTail.SlideJudgeMode == SlideJudgeMode.Flick &&
+                noneDirectionTail.SlideNodeRole == SlideNodeRole.End && noneDirectionTail.SlideJudgeMode == SlideJudgeMode.None,
+            "USC Slide metadata must preserve authored Normal, Trace, Flick, and None judgment semantics");
 
         var headEngine = new JudgmentEngine(new[] { normalHead }, new ScoreState());
         headEngine.Process(normalHead.Time, Array.Empty<InputToken>(), new[] { new ActiveContact(1, normalHead.Lane, normalHead.Time - .1) });
@@ -597,11 +1528,11 @@ public static class RuntimeValidation
         Require(normalHead.Grade == JudgmentGrade.Perfect,
             "A Slide Tap head must resolve from a discrete Tap token");
 
-        var terminalHeadEngine = new JudgmentEngine(new[] { terminalFirstJudgedAfterNoneHead }, new ScoreState());
-        terminalHeadEngine.Process(terminalFirstJudgedAfterNoneHead.Time, Array.Empty<InputToken>(),
+        var structuralEndEngine = new JudgmentEngine(new[] { terminalFirstJudgedAfterNoneHead }, new ScoreState());
+        structuralEndEngine.Process(terminalFirstJudgedAfterNoneHead.Time, Array.Empty<InputToken>(),
             new[] { new ActiveContact(1, terminalFirstJudgedAfterNoneHead.Lane, terminalFirstJudgedAfterNoneHead.Time - .1) });
-        Require(terminalFirstJudgedAfterNoneHead.Grade == JudgmentGrade.Pending,
-            "A pre-held contact must not hit a first judged Slide terminal Tap");
+        Require(terminalFirstJudgedAfterNoneHead.Grade == JudgmentGrade.Perfect,
+            "A normal structural Slide End must resolve from sustained contact even when it is the first judged node");
 
         var midEngine = new JudgmentEngine(new[] { normalMid }, new ScoreState());
         midEngine.Process(normalMid.Time, Array.Empty<InputToken>(), new[] { new ActiveContact(1, normalMid.Lane, normalMid.Time - .1) });
@@ -659,6 +1590,8 @@ public static class RuntimeValidation
             "A tick without critical must bend the Hold path without creating a particle or judgment");
         Require(particleOnly.Visible && !particleOnly.Judged && chart.Notes.Contains(particleOnly),
             "An attach must create a visible particle without becoming a judgment");
+        Require(particleOnly.SlideNodeRole == SlideNodeRole.Attach && particleOnly.SlideJudgeMode == SlideJudgeMode.None,
+            "An authored attach must retain Attach role and None judgment metadata");
         Require(Math.Abs(particleOnly.Lane - 1.5f) < .0001f,
             "An attach particle must use the interpolated Hold trajectory instead of its own raw lane coordinate");
         Require(particleOnly.HoldRootIndex == At(10).Index &&
@@ -997,8 +1930,8 @@ public static class RuntimeValidation
         holdChart.Connectors.Add(new RuntimeConnector { Start = holdMid, End = holdTail });
         HoldCheckpointBuilder.Apply(holdChart, beat => beat);
         var autoCheckpoints = holdChart.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).OrderBy(note => note.Beat).ToArray();
-        Require(autoCheckpoints.Length == 3 && autoCheckpoints.Select(note => note.Beat).SequenceEqual(new[] { .5, 1d, 1.5 }),
-            "Every Hold must create one invisible Auto checkpoint per eighth note before its tail");
+        Require(autoCheckpoints.Length == 2 && autoCheckpoints.Select(note => note.Beat).SequenceEqual(new[] { .5, 1.5 }),
+            "Hold Auto checkpoints must skip an eighth-note beat occupied by an authored judged mid");
         Require(holdMid.HoldCheckpointSource == HoldCheckpointSource.Mid && holdMid.Judged,
             "Each authored Hold mid must remain an independent judged checkpoint");
         Require(holdTail.Judged && holdTail.Kind == RuntimeNoteKind.Sustain && holdTail.IsHoldTerminal &&
@@ -1034,6 +1967,7 @@ public static class RuntimeValidation
         engine = new JudgmentEngine(holdChart.Notes, new ScoreState());
         engine.Process(.5, Array.Empty<InputToken>(), new[] { new ActiveContact(1, -.5f, .5) });
         engine.Process(1, Array.Empty<InputToken>(), new[] { new ActiveContact(1, 0, .8) });
+        engine.Process(1.5, Array.Empty<InputToken>(), new[] { new ActiveContact(1, .5f, .8) });
         Require(autoCheckpoints[0].Grade == JudgmentGrade.Perfect && autoCheckpoints[1].Grade == JudgmentGrade.Perfect &&
                 holdMid.Grade == JudgmentGrade.Perfect && holdHead.Grade == JudgmentGrade.Miss,
             "A middle press must independently hit auto and authored-mid Hold checkpoints after a missed head");
@@ -1244,6 +2178,774 @@ public static class RuntimeValidation
             "Pre-roll recovery must keep the chart clock silent until clip playback begins");
         Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForRecovery(400, 100, 0) - 300) < .0001,
             "Audio recovery must preserve chart time even after clip playback reaches its end");
+    }
+
+    public static void ValidateTimingAndHotPathReuse()
+    {
+        const double dspTime = 200.75;
+        const double scheduledDsp = 198;
+        const double accumulatedPause = .25;
+        const double chartBgmOffset = .5;
+        var chartTime = GameplayTiming.ChartTimeAtDsp(dspTime, scheduledDsp, accumulatedPause, chartBgmOffset);
+        var inputChartTime = GameplayTiming.ChartTimeAtDsp(200.625, scheduledDsp, accumulatedPause, chartBgmOffset);
+        Require(Math.Abs(chartTime - 2) < .0001 && Math.Abs(inputChartTime - 1.875) < .0001,
+            "Frame and input-event DSP clocks must share the same chart-time mapping");
+
+        const double firstDeviceOffset = .08;
+        var firstChartSchedule = GameplayTiming.ScheduledDspForChartTime(400, 10, .3);
+        var secondChartSchedule = GameplayTiming.ScheduledDspForChartTime(400, 10, -.2);
+        var firstPlayback = GameplayTiming.PlaybackDspForSchedule(firstChartSchedule, firstDeviceOffset);
+        var secondPlayback = GameplayTiming.PlaybackDspForSchedule(secondChartSchedule, firstDeviceOffset);
+        Require(Math.Abs(firstPlayback - firstChartSchedule - firstDeviceOffset) < .0001 &&
+                Math.Abs(secondPlayback - secondChartSchedule - firstDeviceOffset) < .0001,
+            "A device offset must change playback phase exactly once and survive chart changes");
+
+        const string legacyOffsetKey = "gugarythm-audio-offset-seconds";
+        const string settingsOffsetKey = "gugarythm-settings-delay-offset-seconds";
+        var hadLegacyOffset = PlayerPrefs.HasKey(legacyOffsetKey);
+        var hadSettingsOffset = PlayerPrefs.HasKey(settingsOffsetKey);
+        var originalLegacyOffset = PlayerPrefs.GetFloat(legacyOffsetKey);
+        var originalSettingsOffset = PlayerPrefs.GetFloat(settingsOffsetKey);
+        double replacedOffset;
+        try
+        {
+            PlayerPrefs.SetFloat(legacyOffsetKey, .11f);
+            PlayerPrefs.SetFloat(settingsOffsetKey, -.04f);
+            PlayerPrefs.Save();
+            var migratedOffset = GameplayTimingPreferences.LoadDeviceOffset();
+            Require(Math.Abs(migratedOffset + .04) < .0001 &&
+                    Math.Abs(PlayerPrefs.GetFloat(legacyOffsetKey) + .04) < .0001,
+                "The settings delay key must override and migrate the legacy audio-offset key");
+
+            _ = GameplayTimingPreferences.PersistDeviceOffset(.08);
+            replacedOffset = GameplayTimingPreferences.PersistDeviceOffset(.025);
+            var reloadedOffset = GameplayTimingPreferences.LoadDeviceOffset();
+            var persistedChartSchedule = GameplayTiming.ScheduledDspForChartTime(500, 12, .3);
+            var persistedChartPlayback = GameplayTiming.PlaybackDspForSchedule(persistedChartSchedule, reloadedOffset);
+            var afterChartChange = GameplayTimingPreferences.LoadDeviceOffset();
+            var replaySchedule = GameplayTiming.ScheduledDspForChartTime(600, 0, -.2);
+            var replayPlayback = GameplayTiming.PlaybackDspForSchedule(replaySchedule, afterChartChange);
+            var afterReplay = GameplayTimingPreferences.LoadDeviceOffset();
+            Require(Math.Abs(replacedOffset - .025) < .0001 && Math.Abs(reloadedOffset - .025) < .0001 &&
+                    Math.Abs(afterChartChange - .025) < .0001 && Math.Abs(afterReplay - .025) < .0001 &&
+                    Math.Abs(persistedChartPlayback - persistedChartSchedule - .025) < .0001 &&
+                    Math.Abs(replayPlayback - replaySchedule - .025) < .0001 &&
+                    Math.Abs(PlayerPrefs.GetFloat(legacyOffsetKey) - .025) < .0001 &&
+                    Math.Abs(PlayerPrefs.GetFloat(settingsOffsetKey) - .025) < .0001,
+                "Persisted calibration must replace rather than accumulate and survive chart changes and replay");
+        }
+        finally
+        {
+            if (hadLegacyOffset) PlayerPrefs.SetFloat(legacyOffsetKey, originalLegacyOffset);
+            else PlayerPrefs.DeleteKey(legacyOffsetKey);
+            if (hadSettingsOffset) PlayerPrefs.SetFloat(settingsOffsetKey, originalSettingsOffset);
+            else PlayerPrefs.DeleteKey(settingsOffsetKey);
+            PlayerPrefs.Save();
+        }
+        var chartTimeAfterCalibration = GameplayTiming.ChartTimeAtDsp(dspTime, scheduledDsp, accumulatedPause, chartBgmOffset);
+        Require(Math.Abs(replacedOffset - .025) < .0001 && Math.Abs(chartTimeAfterCalibration - chartTime) < .0001,
+            "Repeated calibration must replace the device offset without changing or accumulating into chart time");
+        Require(Math.Abs(GameplayTiming.ClipTimeForChartTime(12.5, .3, .1, 60) - 12.7) < .0001 &&
+                Math.Abs(GameplayTiming.PlaybackDspForChartTime(400, -.4, .3, .1) - 400.2) < .0001 &&
+                Math.Abs(GameplayTiming.ScheduledDspForRecovery(400, 100, 0) - 300) < .0001,
+            "Playback recovery must preserve the established device-offset sign and chart anchor");
+
+        var tap = Note(540, 1, 0);
+        var engine = new JudgmentEngine(new[] { tap }, new ScoreState());
+        var reusableOutput = new List<JudgmentEvent>(2);
+        var outputIdentity = reusableOutput;
+        engine.ProcessInto(1, new[] { new InputToken(1, RuntimeNoteKind.Tap, 1, 0) },
+            Array.Empty<ActiveContact>(), Array.Empty<ContactPathSegment>(), false, reusableOutput);
+        Require(ReferenceEquals(outputIdentity, reusableOutput) && reusableOutput.Count == 1 &&
+                reusableOutput[0].Grade == JudgmentGrade.Perfect,
+            "JudgmentEngine.ProcessInto must fill the caller-owned output list");
+        engine.ProcessInto(1.01, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(),
+            Array.Empty<ContactPathSegment>(), false, reusableOutput);
+        Require(ReferenceEquals(outputIdentity, reusableOutput) && reusableOutput.Count == 0,
+            "JudgmentEngine.ProcessInto must clear and reuse its output across frames");
+
+        var cleanupBuffers = new GameplayContactCleanupBuffers();
+        var activeIdentity = cleanupBuffers.ActiveContactIds;
+        var removalIdentity = cleanupBuffers.RemovalIds;
+        activeIdentity.Add(7);
+        removalIdentity.Add(9);
+        cleanupBuffers.BeginFrame();
+        Require(ReferenceEquals(activeIdentity, cleanupBuffers.ActiveContactIds) &&
+                ReferenceEquals(removalIdentity, cleanupBuffers.RemovalIds) &&
+                activeIdentity.Count == 0 && removalIdentity.Count == 0,
+            "Contact cleanup must retain and clear its caller-owned ID/removal buffers across frames");
+
+        var hudState = new GameplayHudState();
+        Require(hudState.ShouldUpdateAccuracy(0, 100) && !hudState.ShouldUpdateAccuracy(0, 100) &&
+                hudState.ShouldUpdateAccuracy(1.01, 100),
+            "HUD accuracy text must rebuild only when its displayed value changes");
+        Require(hudState.ShouldUpdateCombo(0, false) && !hudState.ShouldUpdateCombo(0, false) &&
+                hudState.ShouldUpdateCombo(1, true),
+            "HUD combo text and visibility must rebuild only when displayed state changes");
+
+        var sustain = Note(541, 1, 0);
+        sustain.Kind = RuntimeNoteKind.Sustain;
+        var steadyEngine = new JudgmentEngine(new[] { sustain }, new ScoreState());
+        var offLaneContact = new[] { new ActiveContact(2, 99, 0) };
+        var noInputs = Array.Empty<InputToken>();
+        var noPaths = Array.Empty<ContactPathSegment>();
+        var steadyOutput = new List<JudgmentEvent>(1);
+        for (var index = 0; index < 16; index++)
+        {
+            activeIdentity.Add(7);
+            removalIdentity.Add(9);
+            cleanupBuffers.BeginFrame();
+            _ = hudState.ShouldUpdateAccuracy(1.01, 100);
+            _ = hudState.ShouldUpdateCombo(1, true);
+            steadyEngine.ProcessInto(1, noInputs, offLaneContact, noPaths, false, steadyOutput);
+        }
+        _ = GC.GetAllocatedBytesForCurrentThread();
+        var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+        for (var index = 0; index < 128; index++)
+        {
+            activeIdentity.Add(7);
+            removalIdentity.Add(9);
+            cleanupBuffers.BeginFrame();
+            _ = hudState.ShouldUpdateAccuracy(1.01, 100);
+            _ = hudState.ShouldUpdateCombo(1, true);
+            steadyEngine.ProcessInto(1, noInputs, offLaneContact, noPaths, false, steadyOutput);
+        }
+        var managedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+        Require(managedBytes == 0,
+            $"Continuous Hold frames must allocate zero managed bytes after warm-up, got {managedBytes}");
+
+        Debug.Log($"GUGARYTHM_TASK4_TIMING_REUSE_OK chartTime={chartTime:0.###} inputTime={inputChartTime:0.###} " +
+                  $"deviceOffset={replacedOffset:0.###} managedBytes={managedBytes} outputCapacity={steadyOutput.Capacity}");
+    }
+
+    public static void ValidateGameplayUpdateThreadAllocation()
+    {
+        const string legacyOffsetKey = "gugarythm-audio-offset-seconds";
+        const string settingsOffsetKey = "gugarythm-settings-delay-offset-seconds";
+        const string scrollSpeedKey = "gugarythm-scroll-speed";
+        const string musicVolumeKey = "gugarythm-music-volume";
+        const string keyVolumeKey = "gugarythm-key-volume";
+        const System.Reflection.BindingFlags instanceFlags = System.Reflection.BindingFlags.Instance |
+            System.Reflection.BindingFlags.NonPublic;
+        var controllerType = typeof(SonolusLandscapePrototype);
+        var awakeMethod = controllerType.GetMethod("Awake", instanceFlags);
+        var resetMethod = controllerType.GetMethod("ResetRuntime", instanceFlags);
+        var updateMethod = controllerType.GetMethod("Update", instanceFlags);
+        var chartField = controllerType.GetField("chart", instanceFlags);
+        var runningField = controllerType.GetField("running", instanceFlags);
+        var pausedField = controllerType.GetField("paused", instanceFlags);
+        var scheduledDspField = controllerType.GetField("scheduledDsp", instanceFlags);
+        Require(awakeMethod != null && resetMethod != null && updateMethod != null && chartField != null &&
+                runningField != null && pausedField != null && scheduledDspField != null,
+            "The allocation fixture must bind the real SonolusLandscapePrototype lifecycle and Update path");
+
+        var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+        var originalRoots = new HashSet<int>(activeScene.GetRootGameObjects().Select(root => root.GetInstanceID()));
+        var originalTargetFrameRate = Application.targetFrameRate;
+        var originalVsync = QualitySettings.vSyncCount;
+        var originalOrientation = Screen.orientation;
+        var profilerWasEnabled = UnityEngine.Profiling.Profiler.enabled;
+        var enhancedTouchWasEnabled = UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled;
+        var touchSimulationExisted = UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null;
+        var touchSimulationWasEnabled =
+            UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null &&
+            UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled;
+        var originalMouse = UnityEngine.InputSystem.Mouse.current;
+        var originalMouseWasEnabled = originalMouse != null && originalMouse.enabled;
+        var hadLegacyOffset = PlayerPrefs.HasKey(legacyOffsetKey);
+        var hadSettingsOffset = PlayerPrefs.HasKey(settingsOffsetKey);
+        var hadScrollSpeed = PlayerPrefs.HasKey(scrollSpeedKey);
+        var hadMusicVolume = PlayerPrefs.HasKey(musicVolumeKey);
+        var hadKeyVolume = PlayerPrefs.HasKey(keyVolumeKey);
+        var originalLegacyOffset = PlayerPrefs.GetFloat(legacyOffsetKey);
+        var originalSettingsOffset = PlayerPrefs.GetFloat(settingsOffsetKey);
+        var originalScrollSpeed = PlayerPrefs.GetFloat(scrollSpeedKey);
+        var originalMusicVolume = PlayerPrefs.GetFloat(musicVolumeKey);
+        var originalKeyVolume = PlayerPrefs.GetFloat(keyVolumeKey);
+        try
+        {
+            UnityEngine.Profiling.Profiler.enabled = true;
+            var controllerObject = new GameObject("Task 4 actual Update allocation fixture");
+            var controller = controllerObject.AddComponent<SonolusLandscapePrototype>();
+            awakeMethod.Invoke(controller, null);
+
+            var chart = new RuntimeChart();
+            var start = new RuntimeNote
+            {
+                Index = 8800,
+                SourceId = "task4-profiler:start",
+                Beat = -1,
+                Time = -1,
+                Lane = -1,
+                Size = 1,
+                Kind = RuntimeNoteKind.Sustain,
+                Visible = false,
+                Judged = false,
+                HoldRootIndex = 8800,
+            };
+            var end = new RuntimeNote
+            {
+                Index = 8801,
+                SourceId = "task4-profiler:end",
+                Beat = 10,
+                Time = 10,
+                Lane = 1,
+                Size = 1,
+                Kind = RuntimeNoteKind.Sustain,
+                Visible = false,
+                Judged = false,
+                HoldRootIndex = 8800,
+            };
+            chart.Connectors.Add(new RuntimeConnector { Start = start, End = end });
+            var pathBuild = HoldPathBuilder.Build(chart);
+            Require(pathBuild.Paths.Count == 1 && pathBuild.FallbackConnectors.Count == 0,
+                "The actual Update fixture must exercise one continuous indexed Hold run");
+            chart.HoldPaths.AddRange(pathBuild.Paths);
+            chartField.SetValue(controller, chart);
+            resetMethod.Invoke(controller, null);
+            runningField.SetValue(controller, true);
+            pausedField.SetValue(controller, false);
+            scheduledDspField.SetValue(controller, AudioSettings.dspTime);
+            var updateAction = (Action)Delegate.CreateDelegate(typeof(Action), controller, updateMethod, true);
+            Require(updateAction != null, "The allocation fixture must invoke the actual Update without reflection allocations");
+
+            for (var index = 0; index < 32; index++) updateAction();
+            _ = GC.GetAllocatedBytesForCurrentThread();
+            var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+            for (var index = 0; index < 128; index++) updateAction();
+            var managedBytes = GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+
+            runningField.SetValue(controller, false);
+            updateAction();
+            Require(managedBytes == 0,
+                $"The real warmed-up gameplay Update must allocate zero managed bytes, got {managedBytes}");
+            Debug.Log($"GUGARYTHM_TASK4_UPDATE_THREAD_ALLOC_OK warmup=32 frames=128 " +
+                      $"threadBytes={managedBytes} idleUpdate=1");
+        }
+        finally
+        {
+            foreach (var root in activeScene.GetRootGameObjects())
+                if (!originalRoots.Contains(root.GetInstanceID())) UnityEngine.Object.DestroyImmediate(root);
+            Application.targetFrameRate = originalTargetFrameRate;
+            QualitySettings.vSyncCount = originalVsync;
+            Screen.orientation = originalOrientation;
+            UnityEngine.Profiling.Profiler.enabled = profilerWasEnabled;
+            if (hadLegacyOffset) PlayerPrefs.SetFloat(legacyOffsetKey, originalLegacyOffset);
+            else PlayerPrefs.DeleteKey(legacyOffsetKey);
+            if (hadSettingsOffset) PlayerPrefs.SetFloat(settingsOffsetKey, originalSettingsOffset);
+            else PlayerPrefs.DeleteKey(settingsOffsetKey);
+            if (hadScrollSpeed) PlayerPrefs.SetFloat(scrollSpeedKey, originalScrollSpeed);
+            else PlayerPrefs.DeleteKey(scrollSpeedKey);
+            if (hadMusicVolume) PlayerPrefs.SetFloat(musicVolumeKey, originalMusicVolume);
+            else PlayerPrefs.DeleteKey(musicVolumeKey);
+            if (hadKeyVolume) PlayerPrefs.SetFloat(keyVolumeKey, originalKeyVolume);
+            else PlayerPrefs.DeleteKey(keyVolumeKey);
+            PlayerPrefs.Save();
+
+            if (enhancedTouchWasEnabled)
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Enable();
+            else
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
+            if (touchSimulationExisted)
+            {
+                if (touchSimulationWasEnabled)
+                    UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Enable();
+                else
+                    UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Disable();
+            }
+            else if (UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null)
+            {
+                UnityEngine.Object.DestroyImmediate(
+                    UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.gameObject);
+            }
+            if (originalMouse != null && originalMouse.added)
+            {
+                if (originalMouseWasEnabled) UnityEngine.InputSystem.InputSystem.EnableDevice(originalMouse);
+                else UnityEngine.InputSystem.InputSystem.DisableDevice(originalMouse);
+            }
+        }
+    }
+
+    public static void ValidateGameplayUpdateStateRestoration()
+    {
+        const string scrollSpeedKey = "gugarythm-scroll-speed";
+        const string musicVolumeKey = "gugarythm-music-volume";
+        const string keyVolumeKey = "gugarythm-key-volume";
+        var hadScrollSpeed = PlayerPrefs.HasKey(scrollSpeedKey);
+        var hadMusicVolume = PlayerPrefs.HasKey(musicVolumeKey);
+        var hadKeyVolume = PlayerPrefs.HasKey(keyVolumeKey);
+        var originalScrollSpeed = PlayerPrefs.GetFloat(scrollSpeedKey);
+        var originalMusicVolume = PlayerPrefs.GetFloat(musicVolumeKey);
+        var originalKeyVolume = PlayerPrefs.GetFloat(keyVolumeKey);
+        var touchSimulationExisted = UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null;
+        var touchSimulationWasEnabled =
+            UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null &&
+            UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled;
+        var originalMouse = UnityEngine.InputSystem.Mouse.current;
+        var originalMouseWasEnabled = originalMouse != null && originalMouse.enabled;
+        var enhancedTouchWasEnabled =
+            UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled;
+        try
+        {
+            PlayerPrefs.DeleteKey(scrollSpeedKey);
+            PlayerPrefs.SetFloat(musicVolumeKey, .37f);
+            PlayerPrefs.DeleteKey(keyVolumeKey);
+            PlayerPrefs.Save();
+            UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Enable();
+            var fixtureMouse = UnityEngine.InputSystem.Mouse.current;
+            var fixtureMouseWasEnabled = fixtureMouse != null && fixtureMouse.enabled;
+
+            ValidateGameplayUpdateThreadAllocation();
+
+            Require(!PlayerPrefs.HasKey(scrollSpeedKey) &&
+                    PlayerPrefs.HasKey(musicVolumeKey) &&
+                    Math.Abs(PlayerPrefs.GetFloat(musicVolumeKey) - .37f) < .0001f &&
+                    !PlayerPrefs.HasKey(keyVolumeKey),
+                "The real-Awake profiler fixture must restore existence and values for all UI-created settings keys");
+            Require(UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null &&
+                    UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled &&
+                    (fixtureMouse == null || fixtureMouse.enabled == fixtureMouseWasEnabled),
+                "The real-Awake profiler fixture must restore TouchSimulation and Mouse enabled states");
+            Debug.Log("GUGARYTHM_TASK4_UPDATE_STATE_RESTORE_OK prefs=3 touchSimulation=True mouseRestored=True");
+        }
+        finally
+        {
+            if (hadScrollSpeed) PlayerPrefs.SetFloat(scrollSpeedKey, originalScrollSpeed);
+            else PlayerPrefs.DeleteKey(scrollSpeedKey);
+            if (hadMusicVolume) PlayerPrefs.SetFloat(musicVolumeKey, originalMusicVolume);
+            else PlayerPrefs.DeleteKey(musicVolumeKey);
+            if (hadKeyVolume) PlayerPrefs.SetFloat(keyVolumeKey, originalKeyVolume);
+            else PlayerPrefs.DeleteKey(keyVolumeKey);
+            PlayerPrefs.Save();
+
+            if (touchSimulationExisted)
+            {
+                if (touchSimulationWasEnabled)
+                    UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Enable();
+                else
+                    UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Disable();
+            }
+            else
+            {
+                var currentSimulation = UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance;
+                if (currentSimulation != null)
+                    UnityEngine.Object.DestroyImmediate(currentSimulation.gameObject);
+            }
+            if (originalMouse != null && originalMouse.added)
+            {
+                if (originalMouseWasEnabled) UnityEngine.InputSystem.InputSystem.EnableDevice(originalMouse);
+                else UnityEngine.InputSystem.InputSystem.DisableDevice(originalMouse);
+            }
+            if (enhancedTouchWasEnabled)
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Enable();
+            else
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
+        }
+    }
+
+    public static void ValidateGameplayUpdateProfilerAcrossEditorFrames()
+    {
+        GameplayUpdateProfilerSession.Start();
+    }
+
+    static class GameplayUpdateProfilerSession
+    {
+        const int WarmupFrameCount = 32;
+        const int MeasuredFrameCount = 128;
+        const int MaximumCallbackCount = 512;
+        const double WatchdogSeconds = 30;
+        static Session current;
+
+        public static void Start()
+        {
+            if (current != null)
+                throw new InvalidOperationException("A gameplay Update profiler session is already active.");
+            current = new Session();
+            try
+            {
+                current.Initialize();
+                EditorApplication.update -= Advance;
+                EditorApplication.update += Advance;
+            }
+            catch (Exception exception)
+            {
+                Exit(1, exception);
+            }
+        }
+
+        static void Advance()
+        {
+            var session = current;
+            if (session == null) return;
+            try
+            {
+                session.Advance();
+            }
+            catch (Exception exception)
+            {
+                Exit(1, exception);
+            }
+        }
+
+        static void Exit(int exitCode, Exception exception = null)
+        {
+            EditorApplication.update -= Advance;
+            var session = current;
+            current = null;
+            Exception cleanupException = null;
+            try
+            {
+                session?.Cleanup();
+                session?.RequireRestoredGlobals();
+            }
+            catch (Exception caught)
+            {
+                cleanupException = caught;
+                exitCode = 1;
+            }
+
+            if (exception != null)
+                Debug.LogError($"GUGARYTHM_VALIDATION_FAILED: {exception.Message}\n{exception}");
+            if (cleanupException != null)
+                Debug.LogError($"GUGARYTHM_VALIDATION_FAILED: Profiler cleanup failed: " +
+                               $"{cleanupException.Message}\n{cleanupException}");
+            if (exitCode == 0)
+                Debug.Log("GUGARYTHM_TASK4_EDITOR_FRAME_STATE_RESTORE_OK prefs=5 " +
+                          "touchSimulation=True mouse=True enhancedTouch=True globals=True");
+            EditorApplication.Exit(exitCode);
+        }
+
+        readonly struct PreferenceSnapshot
+        {
+            public readonly string Key;
+            readonly bool existed;
+            readonly float value;
+
+            public PreferenceSnapshot(string key)
+            {
+                Key = key;
+                existed = PlayerPrefs.HasKey(key);
+                value = PlayerPrefs.GetFloat(key);
+            }
+
+            public void Restore()
+            {
+                if (existed) PlayerPrefs.SetFloat(Key, value);
+                else PlayerPrefs.DeleteKey(Key);
+            }
+
+            public bool IsRestored()
+            {
+                if (PlayerPrefs.HasKey(Key) != existed) return false;
+                return !existed || Math.Abs(PlayerPrefs.GetFloat(Key) - value) < .000001f;
+            }
+        }
+
+        sealed class Session
+        {
+            enum Phase
+            {
+                Warmup,
+                PrimeRecorders,
+                Measure,
+                Idle,
+                Flush,
+                Finished,
+            }
+
+            readonly UnityEngine.SceneManagement.Scene activeScene =
+                UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            readonly HashSet<int> originalRoots;
+            readonly int originalTargetFrameRate = Application.targetFrameRate;
+            readonly int originalVsync = QualitySettings.vSyncCount;
+            readonly ScreenOrientation originalOrientation = Screen.orientation;
+            readonly bool profilerWasEnabled = UnityEngine.Profiling.Profiler.enabled;
+            readonly bool enhancedTouchWasEnabled =
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled;
+            readonly bool touchSimulationExisted =
+                UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null;
+            readonly bool touchSimulationWasEnabled =
+                UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null &&
+                UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled;
+            readonly UnityEngine.InputSystem.Mouse originalMouse = UnityEngine.InputSystem.Mouse.current;
+            readonly bool originalMouseWasEnabled;
+            readonly PreferenceSnapshot[] preferences =
+            {
+                new("gugarythm-audio-offset-seconds"),
+                new("gugarythm-settings-delay-offset-seconds"),
+                new("gugarythm-scroll-speed"),
+                new("gugarythm-music-volume"),
+                new("gugarythm-key-volume"),
+            };
+
+            Action updateAction;
+            System.Reflection.FieldInfo runningField;
+            SonolusLandscapePrototype controller;
+            ProfilerRecorder frameRecorder;
+            ProfilerRecorder gcAllocRecorder;
+            ProfilerRecorder idleFrameRecorder;
+            Phase phase;
+            double startedAt;
+            int callbackCount;
+            int warmupFrames;
+            int measuredFrames;
+            int flushFrames;
+            long scopedThreadBytes;
+            bool recordersStarted;
+            bool idleRecorderStarted;
+            bool cleanedUp;
+
+            public Session()
+            {
+                originalRoots = new HashSet<int>(
+                    activeScene.GetRootGameObjects().Select(root => root.GetInstanceID()));
+                originalMouseWasEnabled = originalMouse != null && originalMouse.enabled;
+            }
+
+            public void Initialize()
+            {
+                const System.Reflection.BindingFlags instanceFlags =
+                    System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
+                var controllerType = typeof(SonolusLandscapePrototype);
+                var awakeMethod = controllerType.GetMethod("Awake", instanceFlags);
+                var resetMethod = controllerType.GetMethod("ResetRuntime", instanceFlags);
+                var updateMethod = controllerType.GetMethod("Update", instanceFlags);
+                var chartField = controllerType.GetField("chart", instanceFlags);
+                runningField = controllerType.GetField("running", instanceFlags);
+                var pausedField = controllerType.GetField("paused", instanceFlags);
+                var scheduledDspField = controllerType.GetField("scheduledDsp", instanceFlags);
+                Require(awakeMethod != null && resetMethod != null && updateMethod != null && chartField != null &&
+                        runningField != null && pausedField != null && scheduledDspField != null,
+                    "The multi-frame profiler must bind the real controller lifecycle and Update path");
+
+                UnityEngine.Profiling.Profiler.enabled = true;
+                var controllerObject = new GameObject("Task 4 multi-frame Update profiler fixture");
+                controller = controllerObject.AddComponent<SonolusLandscapePrototype>();
+                awakeMethod.Invoke(controller, null);
+
+                var chart = new RuntimeChart();
+                var start = new RuntimeNote
+                {
+                    Index = 8810,
+                    SourceId = "task4-multiframe-profiler:start",
+                    Beat = -1,
+                    Time = -1,
+                    Lane = -1,
+                    Size = 1,
+                    Kind = RuntimeNoteKind.Sustain,
+                    Visible = false,
+                    Judged = false,
+                    HoldRootIndex = 8810,
+                };
+                var end = new RuntimeNote
+                {
+                    Index = 8811,
+                    SourceId = "task4-multiframe-profiler:end",
+                    Beat = 10,
+                    Time = 10,
+                    Lane = 1,
+                    Size = 1,
+                    Kind = RuntimeNoteKind.Sustain,
+                    Visible = false,
+                    Judged = false,
+                    HoldRootIndex = 8810,
+                };
+                chart.Connectors.Add(new RuntimeConnector { Start = start, End = end });
+                var pathBuild = HoldPathBuilder.Build(chart);
+                Require(pathBuild.Paths.Count == 1 && pathBuild.FallbackConnectors.Count == 0,
+                    "The multi-frame profiler must exercise one continuous indexed Hold run");
+                chart.HoldPaths.AddRange(pathBuild.Paths);
+                chartField.SetValue(controller, chart);
+                resetMethod.Invoke(controller, null);
+                runningField.SetValue(controller, true);
+                pausedField.SetValue(controller, false);
+                scheduledDspField.SetValue(controller, AudioSettings.dspTime);
+                updateAction = (Action)Delegate.CreateDelegate(typeof(Action), controller, updateMethod, true);
+                Require(updateAction != null,
+                    "The multi-frame profiler must invoke the actual Update without reflection allocations");
+
+                startedAt = EditorApplication.timeSinceStartup;
+                phase = Phase.Warmup;
+                EditorApplication.QueuePlayerLoopUpdate();
+            }
+
+            public void Advance()
+            {
+                callbackCount++;
+                if (callbackCount > MaximumCallbackCount ||
+                    EditorApplication.timeSinceStartup - startedAt > WatchdogSeconds)
+                    throw new TimeoutException(
+                        $"Gameplay Update profiler watchdog expired at callback={callbackCount}, phase={phase}, " +
+                        $"warmup={warmupFrames}, measured={measuredFrames}");
+
+                switch (phase)
+                {
+                    case Phase.Warmup:
+                        updateAction();
+                        warmupFrames++;
+                        if (warmupFrames == WarmupFrameCount)
+                        {
+                            var options = ProfilerRecorderOptions.StartImmediately |
+                                          ProfilerRecorderOptions.WrapAroundWhenCapacityReached |
+                                          ProfilerRecorderOptions.CollectOnlyOnCurrentThread;
+                            frameRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Scripts,
+                                "Gugarythm.GameplayFrame", MeasuredFrameCount + 16, options);
+                            var allocationOptions = ProfilerRecorderOptions.StartImmediately |
+                                                    ProfilerRecorderOptions.WrapAroundWhenCapacityReached |
+                                                    ProfilerRecorderOptions.CollectOnlyOnCurrentThread;
+                            gcAllocRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Internal,
+                                "GC.Alloc", 16, allocationOptions);
+                            recordersStarted = true;
+                            Require(frameRecorder.Valid,
+                                "The multi-frame profiler must bind Gugarythm.GameplayFrame");
+                            Require(gcAllocRecorder.Valid,
+                                "The multi-frame profiler must bind Unity's current-thread GC.Alloc marker");
+                            phase = Phase.PrimeRecorders;
+                        }
+                        break;
+                    case Phase.PrimeRecorders:
+                        gcAllocRecorder.Reset();
+                        _ = GC.GetAllocatedBytesForCurrentThread();
+                        phase = Phase.Measure;
+                        break;
+                    case Phase.Measure:
+                        MeasureOneUpdate();
+                        measuredFrames++;
+                        if (measuredFrames == MeasuredFrameCount)
+                        {
+                            runningField.SetValue(controller, false);
+                            var idleOptions = ProfilerRecorderOptions.StartImmediately |
+                                              ProfilerRecorderOptions.WrapAroundWhenCapacityReached |
+                                              ProfilerRecorderOptions.CollectOnlyOnCurrentThread;
+                            idleFrameRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Scripts,
+                                "Gugarythm.GameplayFrame", 8, idleOptions);
+                            idleRecorderStarted = true;
+                            Require(idleFrameRecorder.Valid,
+                                "The multi-frame profiler must bind the early-return gameplay marker");
+                            phase = Phase.Idle;
+                        }
+                        break;
+                    case Phase.Idle:
+                        updateAction();
+                        phase = Phase.Flush;
+                        break;
+                    case Phase.Flush:
+                        flushFrames++;
+                        if (flushFrames < 2) break;
+                        ValidateResultsAndExit();
+                        return;
+                    case Phase.Finished:
+                        return;
+                }
+                EditorApplication.QueuePlayerLoopUpdate();
+            }
+
+            void MeasureOneUpdate()
+            {
+                var allocatedBefore = GC.GetAllocatedBytesForCurrentThread();
+                updateAction();
+                scopedThreadBytes += GC.GetAllocatedBytesForCurrentThread() - allocatedBefore;
+            }
+
+            void ValidateResultsAndExit()
+            {
+                phase = Phase.Finished;
+                frameRecorder.Stop();
+                gcAllocRecorder.Stop();
+                idleFrameRecorder.Stop();
+                var markerSamples = frameRecorder.Count;
+                var gcAllocSamples = gcAllocRecorder.Count;
+                var idleMarkerSamples = idleFrameRecorder.Count;
+                var markerLastNanoseconds = markerSamples > 0 ? frameRecorder.LastValue : -1;
+                Require(measuredFrames == MeasuredFrameCount && scopedThreadBytes == 0 &&
+                        gcAllocSamples == 0,
+                    $"The warmed real Update must report zero scoped managed allocation across " +
+                    $"{MeasuredFrameCount} Editor frames, got bytes={scopedThreadBytes}, " +
+                    $"GC.Alloc samples={gcAllocSamples}");
+                Require(markerSamples >= MeasuredFrameCount,
+                    $"ProfilerRecorder must inspect at least {MeasuredFrameCount} flushed gameplay marker samples, " +
+                    $"got {markerSamples}");
+                Require(idleMarkerSamples > 0,
+                    "ProfilerRecorder must inspect a flushed gameplay marker sample on the early-return frame");
+
+                Debug.Log($"GUGARYTHM_TASK4_EDITOR_FRAME_PROFILER_OK warmup={warmupFrames} " +
+                          $"measuredFrames={measuredFrames} markerSamples={markerSamples} " +
+                          $"markerLastNanoseconds={markerLastNanoseconds} idleMarkerSamples={idleMarkerSamples} " +
+                          $"gcAllocSamples={gcAllocSamples} scopedThreadBytes={scopedThreadBytes} " +
+                          $"callbacks={callbackCount}");
+                Exit(0);
+            }
+
+            public void Cleanup()
+            {
+                if (cleanedUp) return;
+                cleanedUp = true;
+                if (idleRecorderStarted) idleFrameRecorder.Dispose();
+                if (recordersStarted)
+                {
+                    gcAllocRecorder.Dispose();
+                    frameRecorder.Dispose();
+                }
+
+                if (activeScene.IsValid() && activeScene.isLoaded)
+                    foreach (var root in activeScene.GetRootGameObjects())
+                        if (!originalRoots.Contains(root.GetInstanceID()))
+                            UnityEngine.Object.DestroyImmediate(root);
+
+                Application.targetFrameRate = originalTargetFrameRate;
+                QualitySettings.vSyncCount = originalVsync;
+                Screen.orientation = originalOrientation;
+                UnityEngine.Profiling.Profiler.enabled = profilerWasEnabled;
+                for (var index = 0; index < preferences.Length; index++) preferences[index].Restore();
+                PlayerPrefs.Save();
+
+                if (enhancedTouchWasEnabled)
+                    UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Enable();
+                else
+                    UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
+                if (touchSimulationExisted)
+                {
+                    if (touchSimulationWasEnabled)
+                        UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Enable();
+                    else
+                        UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.Disable();
+                }
+                else if (UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null)
+                {
+                    UnityEngine.Object.DestroyImmediate(
+                        UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.gameObject);
+                }
+                if (originalMouse != null && originalMouse.added)
+                {
+                    if (originalMouseWasEnabled) UnityEngine.InputSystem.InputSystem.EnableDevice(originalMouse);
+                    else UnityEngine.InputSystem.InputSystem.DisableDevice(originalMouse);
+                }
+            }
+
+            public void RequireRestoredGlobals()
+            {
+                for (var index = 0; index < preferences.Length; index++)
+                    Require(preferences[index].IsRestored(),
+                        $"The multi-frame profiler must restore PlayerPrefs key {preferences[index].Key}");
+                Require(Application.targetFrameRate == originalTargetFrameRate &&
+                        QualitySettings.vSyncCount == originalVsync &&
+                        Screen.orientation == originalOrientation &&
+                        UnityEngine.Profiling.Profiler.enabled == profilerWasEnabled,
+                    "The multi-frame profiler must restore Editor frame, display, and profiler globals");
+                Require(UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled ==
+                        enhancedTouchWasEnabled,
+                    "The multi-frame profiler must restore EnhancedTouchSupport state");
+                Require((UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance != null) ==
+                        touchSimulationExisted &&
+                        (!touchSimulationExisted ||
+                         UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled ==
+                         touchSimulationWasEnabled),
+                    "The multi-frame profiler must restore TouchSimulation existence and enabled state");
+                Require(originalMouse == null || !originalMouse.added ||
+                        originalMouse.enabled == originalMouseWasEnabled,
+                    "The multi-frame profiler must restore the original Mouse enabled state");
+            }
+        }
     }
 
     static void ValidateVirtualSlider()
