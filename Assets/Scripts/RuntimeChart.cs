@@ -35,6 +35,7 @@ namespace Gugarythm
         readonly List<Point> points = new();
 
         public string SourceId { get; }
+        public bool SupportsVisualTimeInversion { get; }
 
         public RuntimeTimeScaleGroup(string sourceId, IEnumerable<(double time, double scale)> source)
         {
@@ -64,6 +65,7 @@ namespace Gugarythm
             }
 
             var zero = unique.FindIndex(value => Math.Abs(value.time) < 1e-9);
+            SupportsVisualTimeInversion = unique.TrueForAll(value => value.scale > 1e-9);
             var positions = new double[unique.Count];
             for (var i = zero + 1; i < unique.Count; i++)
                 positions[i] = positions[i - 1] + (unique[i].time - unique[i - 1].time) * unique[i - 1].scale;
@@ -179,6 +181,8 @@ namespace Gugarythm
         public byte[] CoverBytes;
         public readonly List<RuntimeNote> Notes = new();
         public readonly List<RuntimeConnector> Connectors = new();
+        public readonly List<RuntimeHoldPath> HoldPaths = new();
+        public readonly List<RuntimeConnector> FallbackConnectors = new();
         // SimLine is a visual-only synchronization link between notes. It is
         // neither a playable hold nor an engine decoration guide.
         public readonly List<RuntimeSimLine> SimLines = new();
@@ -250,6 +254,12 @@ namespace Gugarythm
             var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
             return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.TimeAtPosition(position) : position;
         }
+
+        public bool CanInvertVisualTime(string group)
+        {
+            var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
+            return key == null || !TimeScaleGroups.TryGetValue(key, out var map) || map.SupportsVisualTimeInversion;
+        }
     }
 
     /// <summary>
@@ -264,6 +274,14 @@ namespace Gugarythm
         public static void Apply(RuntimeChart chart, Func<double, double> timeAtBeat)
         {
             if (chart == null || timeAtBeat == null) return;
+
+            var pathBuild = HoldPathBuilder.Build(chart);
+            chart.HoldPaths.Clear();
+            chart.HoldPaths.AddRange(pathBuild.Paths);
+            chart.FallbackConnectors.Clear();
+            chart.FallbackConnectors.AddRange(pathBuild.FallbackConnectors);
+            foreach (var warning in pathBuild.Warnings)
+                if (!chart.Warnings.Contains(warning)) chart.Warnings.Add(warning);
 
             var outgoing = chart.Connectors
                 .Where(connector => connector?.Start != null && connector.End != null)
@@ -299,15 +317,18 @@ namespace Gugarythm
                     var start = segment.Value.start;
                     var end = segment.Value.end;
                     var progress = (float)((beat - start.Beat) / (end.Beat - start.Beat));
+                    var checkpointTime = timeAtBeat(beat);
+                    var runtimePath = chart.HoldPaths.FirstOrDefault(candidate => candidate.RootIndex == head.Index);
+                    var evaluated = runtimePath?.Evaluator.Evaluate(checkpointTime);
                     chart.Notes.Add(new RuntimeNote
                     {
                         Index = nextIndex++,
                         SourceId = $"hold:auto:{head.SourceId}:{beat:R}",
                         Archetype = "RuntimeHoldAutoCheckpoint",
                         Beat = beat,
-                        Time = timeAtBeat(beat),
-                        Lane = start.Lane + (end.Lane - start.Lane) * progress,
-                        Size = start.Size + (end.Size - start.Size) * progress,
+                        Time = checkpointTime,
+                        Lane = evaluated?.Lane ?? start.Lane + (end.Lane - start.Lane) * progress,
+                        Size = evaluated?.Size ?? start.Size + (end.Size - start.Size) * progress,
                         Kind = RuntimeNoteKind.Sustain,
                         Critical = head.Critical,
                         TimeScaleGroup = head.TimeScaleGroup,
