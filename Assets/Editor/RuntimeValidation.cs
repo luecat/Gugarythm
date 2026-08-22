@@ -36,6 +36,8 @@ public static class RuntimeValidation
         ValidateUscSlideRoleClassification();
         ValidateUscSlideMidpointRoles();
         ValidateHeadlessCriticalSlideStart();
+        ValidateRuntimeHoldPaths();
+        ValidateChartRenderIndex();
         ValidateNoteRenderWidths();
         ValidateNoteRenderVisibilityWindow();
         ValidateLibrarySelectionFrameGeometry();
@@ -58,6 +60,11 @@ public static class RuntimeValidation
         Require(chart.Notes.Any(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto && !note.Visible),
             "Imported Holds must add invisible eighth-note checkpoints");
         Require(chart.Connectors.Count == 1175, $"Expected 1175 connectors, got {chart.Connectors.Count}");
+        var holdRenderRunCount = chart.HoldPaths.Sum(path => path.RenderRuns.Count);
+        Require(chart.HoldPaths.Count > 0 && chart.FallbackConnectors.Count == 0,
+            "The DOMiNUS regression chart must build complete Hold paths without legacy fallback");
+        Require(holdRenderRunCount < chart.Connectors.Count,
+            $"Hold render runs must reduce Graphic ownership below connector count ({holdRenderRunCount} vs {chart.Connectors.Count})");
         Require(chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "8"),
             "Hold connector geometry must stop at its first particle/control point");
         Require(!chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "7"),
@@ -144,9 +151,243 @@ public static class RuntimeValidation
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         ValidateLatencyCalibrationMath();
-        Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
+        Debug.Log($"GUGARYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} connectors={chart.Connectors.Count} holdPaths={chart.HoldPaths.Count} holdRuns={holdRenderRunCount} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidateRuntimeHoldPaths()
+    {
+        RuntimeNote Point(int index, double time, float lane, float size = 1) => new()
+        {
+            Index = index,
+            SourceId = $"hold-path:{index}",
+            Time = time,
+            Beat = time,
+            Lane = lane,
+            Size = size,
+            Kind = RuntimeNoteKind.Sustain,
+            TimeScaleGroup = "main",
+        };
+
+        var chart = new RuntimeChart();
+        var a = Point(1, 0, 0);
+        var b = Point(2, 1, 0);
+        var c = Point(3, 2, 2);
+        var d = Point(4, 3, 1, .1f);
+        chart.Connectors.Add(new RuntimeConnector { Start = a, End = b, Ease = 0, Critical = false });
+        chart.Connectors.Add(new RuntimeConnector { Start = b, End = c, Ease = 0, Critical = false });
+        chart.Connectors.Add(new RuntimeConnector { Start = c, End = d, Ease = 0, Critical = true });
+
+        var result = HoldPathBuilder.Build(chart);
+        Require(result.Paths.Count == 1 && result.FallbackConnectors.Count == 0,
+            "A non-branching Hold connector chain must build one runtime path");
+        var path = result.Paths[0];
+        Require(path.RenderRuns.Count == 2 && !path.RenderRuns[0].Critical && path.RenderRuns[1].Critical,
+            "A Hold path must split render runs only when its Critical material class changes");
+
+        var atB = path.Evaluator.Evaluate(1);
+        var atC = path.Evaluator.Evaluate(2);
+        Require(Math.Abs(atB.Lane - b.Lane) < 1e-6 && Math.Abs(atC.Lane - c.Lane) < 1e-6,
+            "The Hold evaluator must pass through every authored path node");
+        var epsilon = 1e-3;
+        var leftDerivative = (path.Evaluator.Evaluate(1).Lane - path.Evaluator.Evaluate(1 - epsilon).Lane) / epsilon;
+        var rightDerivative = (path.Evaluator.Evaluate(1 + epsilon).Lane - path.Evaluator.Evaluate(1).Lane) / epsilon;
+        Require(Math.Abs(leftDerivative - rightDerivative) < .02,
+            "A vertical-to-diagonal Hold join must have matching left and right derivatives");
+
+        for (var time = 0d; time <= 3; time += .01)
+        {
+            var sample = path.Evaluator.Evaluate(time);
+            var segment = path.Segments[sample.SegmentIndex];
+            var minLane = Math.Min(segment.Start.Lane, segment.End.Lane) - 1e-5;
+            var maxLane = Math.Max(segment.Start.Lane, segment.End.Lane) + 1e-5;
+            Require(sample.Lane >= minLane && sample.Lane <= maxLane,
+                "Hold interpolation must not overshoot the current segment's lane bounds");
+            Require(sample.Size >= .25f, "Hold interpolation must clamp Size to at least 0.25");
+        }
+
+        var sameTimeChart = new RuntimeChart();
+        var sameA = Point(10, 0, -1);
+        var sameB = Point(11, 1, -1);
+        var sameC = Point(12, 1, 1);
+        var sameD = Point(13, 2, 0);
+        sameTimeChart.Connectors.Add(new RuntimeConnector { Start = sameA, End = sameB });
+        sameTimeChart.Connectors.Add(new RuntimeConnector { Start = sameB, End = sameC });
+        sameTimeChart.Connectors.Add(new RuntimeConnector { Start = sameC, End = sameD });
+        var sameTimeResult = HoldPathBuilder.Build(sameTimeChart);
+        Require(sameTimeResult.Paths.Count == 1 && sameTimeResult.Paths[0].Segments[1].HardCorner,
+            "A same-time horizontal Hold movement must remain a finite explicit hard corner");
+
+        var branchChart = new RuntimeChart();
+        var branchA = Point(20, 0, 0);
+        var branchB = Point(21, 1, -1);
+        var branchC = Point(22, 1, 1);
+        branchChart.Connectors.Add(new RuntimeConnector { Start = branchA, End = branchB });
+        branchChart.Connectors.Add(new RuntimeConnector { Start = branchA, End = branchC });
+        var branchResult = HoldPathBuilder.Build(branchChart);
+        Require(branchResult.Paths.Count == 0 && branchResult.FallbackConnectors.Count == 2 && branchResult.Warnings.Count > 0,
+            "A branched Hold must warn and preserve every source connector for fallback rendering");
+
+        var nullChart = new RuntimeChart();
+        var nullConnector = new RuntimeConnector { Start = Point(25, 0, 0), End = null };
+        nullChart.Connectors.Add(nullConnector);
+        var nullResult = HoldPathBuilder.Build(nullChart);
+        Require(nullResult.FallbackConnectors.Count == 1 && nullResult.Warnings.Count > 0 &&
+                !SonolusLandscapePrototype.CanRenderLegacyConnector(nullConnector),
+            "A null-endpoint connector must warn but never enter the dereferencing legacy renderer");
+
+        var cycleChart = new RuntimeChart();
+        var cycleA = Point(30, 0, 0);
+        var cycleB = Point(31, 1, 1);
+        cycleChart.Connectors.Add(new RuntimeConnector { Start = cycleA, End = cycleB });
+        cycleChart.Connectors.Add(new RuntimeConnector { Start = cycleB, End = cycleA });
+        var cycleResult = HoldPathBuilder.Build(cycleChart);
+        Require(cycleResult.Paths.Count == 0 && cycleResult.FallbackConnectors.Count == 2 && cycleResult.Warnings.Count > 0,
+            "A cyclic Hold must warn and preserve its connectors for fallback rendering");
+
+        var mixedGroupChart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        var mixedA = Point(35, 0, 0); mixedA.TimeScaleGroup = "main";
+        var mixedB = Point(36, 1, 1); mixedB.TimeScaleGroup = "fast";
+        mixedGroupChart.Connectors.Add(new RuntimeConnector { Start = mixedA, End = mixedB });
+        var mixedGroupResult = HoldPathBuilder.Build(mixedGroupChart);
+        Require(mixedGroupResult.Paths.Count == 0 && mixedGroupResult.FallbackConnectors.Count == 1,
+            "A Hold that changes TimeScaleGroup mid-path must retain legacy per-segment rendering");
+
+        var reverseGroupChart = new RuntimeChart { DefaultTimeScaleGroup = "reverse" };
+        reverseGroupChart.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+        var reverseA = Point(37, 0, 0); reverseA.TimeScaleGroup = "reverse";
+        var reverseB = Point(38, 1, 1); reverseB.TimeScaleGroup = "reverse";
+        reverseGroupChart.Connectors.Add(new RuntimeConnector { Start = reverseA, End = reverseB });
+        var reverseGroupResult = HoldPathBuilder.Build(reverseGroupChart);
+        Require(reverseGroupResult.Paths.Count == 0 && reverseGroupResult.FallbackConnectors.Count == 1,
+            "A Hold with a non-invertible reverse TimeScaleGroup must retain legacy clipping and rendering");
+
+        var checkpointChart = new RuntimeChart();
+        var checkpointA = Point(40, 0, 0);
+        var checkpointB = Point(41, 1, 2);
+        var checkpointC = Point(42, 2, 3);
+        checkpointChart.Notes.AddRange(new[] { checkpointA, checkpointB, checkpointC });
+        checkpointChart.Connectors.Add(new RuntimeConnector { Start = checkpointA, End = checkpointB });
+        checkpointChart.Connectors.Add(new RuntimeConnector { Start = checkpointB, End = checkpointC });
+        HoldCheckpointBuilder.Apply(checkpointChart, beat => beat);
+        Require(checkpointChart.HoldPaths.Count == 1,
+            "Hold checkpoint construction must retain the complete runtime path on the chart");
+        var curvedCheckpoint = checkpointChart.Notes.Single(note =>
+            note.HoldCheckpointSource == HoldCheckpointSource.Auto && Math.Abs(note.Beat - .5) < 1e-9);
+        var evaluatedCheckpoint = checkpointChart.HoldPaths[0].Evaluator.Evaluate(curvedCheckpoint.Time);
+        Require(Math.Abs(curvedCheckpoint.Lane - evaluatedCheckpoint.Lane) < 1e-6 &&
+                Math.Abs(curvedCheckpoint.Size - evaluatedCheckpoint.Size) < 1e-6,
+            "Automatic Hold checkpoints must use the same curved evaluator as rendering");
+        Require(Math.Abs(curvedCheckpoint.Lane - 1f) > .01f,
+            "The curved checkpoint regression fixture must differ from old linear interpolation");
+
+        var straightChart = new RuntimeChart();
+        var straightA = Point(50, 0, 0);
+        var straightB = Point(51, 1, 2);
+        straightChart.Connectors.Add(new RuntimeConnector { Start = straightA, End = straightB });
+        var straightPath = HoldPathBuilder.Build(straightChart).Paths[0];
+        var tessellator = new AdaptiveHoldTessellator();
+        var tessellation = new List<HoldTessellationPoint>(AdaptiveHoldTessellator.MaxPointsPerRun);
+        Vector2 Project(HoldTessellationPoint point) => new(point.Sample.Lane * 100, (float)point.Time * 100);
+        tessellator.BuildVisibleRun(straightPath.RenderRuns[0], 0, 1, Project, tessellation);
+        Require(tessellation.Count == 2,
+            "A straight Hold run must tessellate to only its two endpoints");
+
+        tessellator.BuildVisibleRun(path.RenderRuns[0], .25, 1.75, Project, tessellation);
+        Require(tessellation.Count > 2 && tessellation.Count <= AdaptiveHoldTessellator.MaxPointsPerRun,
+            "A curved Hold run must subdivide by screen error without exceeding the run cap");
+        Require(Math.Abs(tessellation[0].Time - .25) < 1e-9 && Math.Abs(tessellation[^1].Time - 1.75) < 1e-9,
+            "Adaptive Hold tessellation must preserve exact visible clip times");
+        var pointsInFirstSegment = tessellation.Count(point => point.Sample.SegmentIndex == 0);
+        Require(pointsInFirstSegment <= AdaptiveHoldTessellator.MaxPointsPerSegment,
+            "Adaptive Hold tessellation must respect its per-source-segment point cap");
+
+        tessellator.BuildVisibleRun(path.RenderRuns[0], 1.75, .25, Project, tessellation);
+        Require(Math.Abs(tessellation[0].Time - .25) < 1e-9 && Math.Abs(tessellation[^1].Time - 1.75) < 1e-9,
+            "Adaptive Hold tessellation must normalize a reversed visible-time interval");
+
+        var stressChart = new RuntimeChart();
+        RuntimeNote stressPrevious = null;
+        for (var stressIndex = 0; stressIndex <= 300; stressIndex++)
+        {
+            var stressPoint = Point(100 + stressIndex, stressIndex * .05, stressIndex % 2 == 0 ? -4 : 4);
+            if (stressPrevious != null)
+                stressChart.Connectors.Add(new RuntimeConnector { Start = stressPrevious, End = stressPoint });
+            stressPrevious = stressPoint;
+        }
+        var stressRun = HoldPathBuilder.Build(stressChart).Paths[0].RenderRuns[0];
+        Vector2 StressProject(HoldTessellationPoint point) => new(point.Sample.Lane * 1000, (float)point.Time * 1000);
+        tessellator.BuildVisibleRun(stressRun, stressRun.Start.Time, stressRun.End.Time, StressProject, tessellation);
+        Require(tessellation.Count <= AdaptiveHoldTessellator.MaxPointsPerRun &&
+                Math.Abs(tessellation[0].Time - stressRun.Start.Time) < 1e-9 &&
+                Math.Abs(tessellation[^1].Time - stressRun.End.Time) < 1e-9,
+            "A high-curvature Hold must preserve both endpoints while respecting the per-run safety cap");
+
+        var graphicObject = new GameObject("Hold geometry dirtiness validation", typeof(RectTransform),
+            typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
+        var graphic = graphicObject.GetComponent<TaperedConnectorGraphic>();
+        graphic.SetGeometry(Vector2.zero, Vector2.one, 10, 20);
+        var firstRevision = graphic.GeometryRevision;
+        graphic.SetGeometry(Vector2.zero, Vector2.one, 10, 20);
+        Require(graphic.GeometryRevision == firstRevision,
+            "Submitting identical Hold geometry must not dirty the uGUI mesh again");
+        graphic.SetGeometry(Vector2.zero, Vector2.one * 2, 10, 20);
+        Require(graphic.GeometryRevision == firstRevision + 1,
+            "Changing Hold geometry must dirty the uGUI mesh exactly once");
+        UnityEngine.Object.DestroyImmediate(graphicObject);
+    }
+
+    static void ValidateChartRenderIndex()
+    {
+        var chart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        chart.TimeScaleGroups["main"] = new RuntimeTimeScaleGroup("main", new[] { (0d, 1d) });
+        chart.TimeScaleGroups["fast"] = new RuntimeTimeScaleGroup("fast", new[] { (0d, 2d) });
+        chart.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+        RuntimeNote NoteAt(int index, double time, string group) => new()
+        {
+            Index = index,
+            Time = time,
+            Beat = time,
+            Lane = index,
+            Size = 1,
+            Visible = true,
+            TimeScaleGroup = group,
+        };
+        var late = NoteAt(2, 1.5, "main");
+        var early = NoteAt(1, .5, "main");
+        var fastOutside = NoteAt(3, 1.5, "fast");
+        var reverse = NoteAt(4, 1.5, "reverse");
+        chart.Notes.AddRange(new[] { late, fastOutside, reverse, early });
+
+        var holdA = NoteAt(10, .25, "main");
+        var holdB = NoteAt(11, 2, "main");
+        chart.Connectors.Add(new RuntimeConnector { Start = holdA, End = holdB });
+        HoldCheckpointBuilder.Apply(chart, beat => beat);
+        var index = new ChartRenderIndex(chart);
+        var notes = new List<RuntimeNote>();
+        index.QueryNotes(0, 0, 2, notes);
+        Require(notes.SequenceEqual(new[] { early, late }),
+            "ChartRenderIndex must query each TimeScaleGroup in visual-position order with stable note ordering");
+        index.QueryNotes(0, .5, .5, notes);
+        Require(notes.Count == 1 && ReferenceEquals(notes[0], early),
+            "ChartRenderIndex note queries must include exact visual-window boundaries");
+        index.QueryNotes(1, .5, .5, notes);
+        Require(notes.Contains(reverse),
+            "ChartRenderIndex must query reverse TimeScaleGroups in visual-position space");
+
+        var runs = new List<HoldRenderRun>();
+        index.QueryHoldRuns(1, 0, .25, runs);
+        Require(runs.Count == 1 && ReferenceEquals(runs[0], chart.HoldPaths[0].RenderRuns[0]),
+            "ChartRenderIndex must return a Hold run whose visual interval overlaps the query window");
+        index.QueryHoldRuns(4, 0, .25, runs);
+        Require(runs.Count == 0, "ChartRenderIndex must exclude Hold runs outside the visual window");
+
+        var emptyIndex = new ChartRenderIndex(new RuntimeChart());
+        emptyIndex.QueryNotes(0, 1, 1, notes);
+        emptyIndex.QueryHoldRuns(0, 1, 1, runs);
+        Require(notes.Count == 0 && runs.Count == 0,
+            "ChartRenderIndex must return empty reusable buffers for an empty chart");
     }
 
     static void ValidateLibrarySelectionFrameGeometry()

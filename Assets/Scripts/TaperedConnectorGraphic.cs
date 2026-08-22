@@ -1,10 +1,16 @@
 using UnityEngine;
 using UnityEngine.UI;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+using Unity.Profiling;
+#endif
 
 namespace Gugarythm
 {
     public sealed class TaperedConnectorGraphic : MaskableGraphic
     {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        static readonly ProfilerMarker MeshRebuildProfiler = new("Gugarythm.HoldMeshRebuild");
+#endif
         public Texture texture;
         public override Texture mainTexture => texture != null ? texture : Texture2D.whiteTexture;
         public bool drawGlow = true;
@@ -24,6 +30,10 @@ namespace Gugarythm
         float[] widths = new float[2];
         float[] alphas = new float[2];
         int pathCount;
+        int previousPathCount;
+        ulong previousGeometryHash;
+
+        public int GeometryRevision { get; private set; }
 
         public void SetGeometry(Vector2 startPoint, Vector2 endPoint, float widthAtStart, float widthAtEnd)
         {
@@ -35,6 +45,8 @@ namespace Gugarythm
 
         public void BeginPath(int pointCount)
         {
+            previousPathCount = pathCount;
+            previousGeometryHash = GeometryHash();
             pathCount = Mathf.Max(0, pointCount);
             if (path.Length < pathCount)
             {
@@ -55,11 +67,39 @@ namespace Gugarythm
 
         public void EndPath()
         {
+            EndPathIfChanged();
+        }
+
+        public bool EndPathIfChanged()
+        {
+            if (previousPathCount == pathCount && previousGeometryHash == GeometryHash()) return false;
+            GeometryRevision++;
             SetVerticesDirty();
+            return true;
+        }
+
+        ulong GeometryHash()
+        {
+            unchecked
+            {
+                var hash = 1469598103934665603UL;
+                hash = (hash ^ (uint)pathCount) * 1099511628211UL;
+                for (var index = 0; index < pathCount; index++)
+                {
+                    hash = (hash ^ (uint)System.BitConverter.SingleToInt32Bits(path[index].x)) * 1099511628211UL;
+                    hash = (hash ^ (uint)System.BitConverter.SingleToInt32Bits(path[index].y)) * 1099511628211UL;
+                    hash = (hash ^ (uint)System.BitConverter.SingleToInt32Bits(widths[index])) * 1099511628211UL;
+                    hash = (hash ^ (uint)System.BitConverter.SingleToInt32Bits(alphas[index])) * 1099511628211UL;
+                }
+                return hash;
+            }
         }
 
         protected override void OnPopulateMesh(VertexHelper vertexHelper)
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            using var profilerScope = MeshRebuildProfiler.Auto();
+#endif
             vertexHelper.Clear();
             if (pathCount < 2) return;
             var baseColor = color;
