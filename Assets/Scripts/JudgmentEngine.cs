@@ -165,16 +165,32 @@ namespace Gugarythm
             IReadOnlyList<ContactPathSegment> contactPaths, bool autoPlay)
         {
             var output = new List<JudgmentEvent>();
+            ProcessInto(songTime, inputBatch, contacts, contactPaths, autoPlay, output);
+            return output;
+        }
+
+        public void ProcessInto(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
+            List<JudgmentEvent> output) =>
+            ProcessInto(songTime, inputBatch, contacts, Array.Empty<ContactPathSegment>(), false, output);
+
+        public void ProcessInto(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
+            IReadOnlyList<ContactPathSegment> contactPaths, List<JudgmentEvent> output) =>
+            ProcessInto(songTime, inputBatch, contacts, contactPaths, false, output);
+
+        public void ProcessInto(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
+            IReadOnlyList<ContactPathSegment> contactPaths, bool autoPlay, List<JudgmentEvent> output)
+        {
+            if (output == null) throw new ArgumentNullException(nameof(output));
+            output.Clear();
             if (autoPlay)
             {
                 ResolveAutoPlay(songTime, output);
-                return output;
+                return;
             }
             RecordContactPaths(songTime, contactPaths);
             MatchDiscreteInputs(inputBatch, output);
             ResolveContactNotes(songTime, contacts, contactPaths, output);
             CommitMisses(songTime, output);
-            return output;
         }
 
         void ResolveAutoPlay(double songTime, List<JudgmentEvent> output)
@@ -286,16 +302,28 @@ namespace Gugarythm
         void RecordContactPaths(double songTime, IReadOnlyList<ContactPathSegment> contactPaths)
         {
             if (contactPaths != null)
-                foreach (var path in contactPaths)
+                for (var index = 0; index < contactPaths.Count; index++)
+                {
+                    var path = contactPaths[index];
                     if (path.EndTime >= path.StartTime) recentContactPaths.Add(path);
+                }
             var oldestRelevantTime = songTime - SustainLookbackWindow;
-            recentContactPaths.RemoveAll(path => path.EndTime < oldestRelevantTime);
+            for (var index = recentContactPaths.Count - 1; index >= 0; index--)
+                if (recentContactPaths[index].EndTime < oldestRelevantTime)
+                    recentContactPaths.RemoveAt(index);
         }
 
         double? LatestCoverageTime(RuntimeNote note, double songTime, IReadOnlyList<ActiveContact> contacts)
         {
-            double? latest = contacts != null && contacts.Any(contact =>
-                LaneMatches(note, contact.Lane) && contact.StartTime <= songTime) ? songTime : null;
+            double? latest = null;
+            if (contacts != null)
+                for (var index = 0; index < contacts.Count; index++)
+                {
+                    var contact = contacts[index];
+                    if (!LaneMatches(note, contact.Lane) || contact.StartTime > songTime) continue;
+                    latest = songTime;
+                    break;
+                }
             var earliest = note.Time - SustainLookbackWindow;
             foreach (var path in recentContactPaths)
             {

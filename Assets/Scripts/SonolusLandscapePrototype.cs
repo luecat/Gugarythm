@@ -19,9 +19,85 @@ using Touch = UnityEngine.InputSystem.EnhancedTouch.Touch;
 
 namespace Gugarythm
 {
+    public static class GameplayTimingPreferences
+    {
+        const string LegacyDeviceOffsetKey = "gugarythm-audio-offset-seconds";
+        const string SettingsDeviceOffsetKey = "gugarythm-settings-delay-offset-seconds";
+
+        public static double LoadDeviceOffset()
+        {
+            var storedLegacyOffset = PlayerPrefs.GetFloat(LegacyDeviceOffsetKey, 0f);
+            var legacyOffset = SonolusLandscapePrototype.SanitizeAudioOffset(storedLegacyOffset);
+            var settingsOffset = SettingsDelayAdjustment.Clamp(PlayerPrefs.GetFloat(
+                SettingsDeviceOffsetKey, (float)legacyOffset));
+            var resolvedOffset = GameplayTiming.ReplaceDeviceOffset(settingsOffset);
+            if (Math.Abs(resolvedOffset - storedLegacyOffset) <= .000001d) return resolvedOffset;
+            PlayerPrefs.SetFloat(LegacyDeviceOffsetKey, (float)resolvedOffset);
+            PlayerPrefs.Save();
+            return resolvedOffset;
+        }
+
+        public static double PersistDeviceOffset(double replacementOffset)
+        {
+            var resolvedOffset = GameplayTiming.ReplaceDeviceOffset(replacementOffset);
+            PlayerPrefs.SetFloat(LegacyDeviceOffsetKey, (float)resolvedOffset);
+            PlayerPrefs.SetFloat(SettingsDeviceOffsetKey, (float)resolvedOffset);
+            PlayerPrefs.Save();
+            return resolvedOffset;
+        }
+    }
+
+    public sealed class GameplayContactCleanupBuffers
+    {
+        public HashSet<int> ActiveContactIds { get; } = new();
+        public List<int> RemovalIds { get; } = new();
+
+        public void BeginFrame()
+        {
+            ActiveContactIds.Clear();
+            RemovalIds.Clear();
+        }
+    }
+
+    public sealed class GameplayHudState
+    {
+        bool hasAccuracy;
+        double accuracyNumerator;
+        int accuracyTotal;
+        bool hasCombo;
+        int combo;
+        bool comboVisible;
+
+        public bool ShouldUpdateAccuracy(double nextAccuracyNumerator, int nextAccuracyTotal)
+        {
+            if (hasAccuracy && accuracyNumerator.Equals(nextAccuracyNumerator) && accuracyTotal == nextAccuracyTotal)
+                return false;
+            hasAccuracy = true;
+            accuracyNumerator = nextAccuracyNumerator;
+            accuracyTotal = nextAccuracyTotal;
+            return true;
+        }
+
+        public bool ShouldUpdateCombo(int nextCombo, bool nextComboVisible)
+        {
+            if (hasCombo && combo == nextCombo && comboVisible == nextComboVisible) return false;
+            hasCombo = true;
+            combo = nextCombo;
+            comboVisible = nextComboVisible;
+            return true;
+        }
+
+        public void Invalidate()
+        {
+            hasAccuracy = false;
+            hasCombo = false;
+        }
+    }
+
     public sealed class SonolusLandscapePrototype : MonoBehaviour
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
+        static readonly ProfilerMarker GameplayFrameProfiler = new("Gugarythm.GameplayFrame");
         static readonly ProfilerMarker UpdateVisualsProfiler = new("Gugarythm.UpdateVisuals");
         static readonly ProfilerMarker NotesProfiler = new("Gugarythm.UpdateVisuals.Notes");
         static readonly ProfilerMarker HoldsProfiler = new("Gugarythm.UpdateVisuals.Holds");
@@ -218,6 +294,9 @@ namespace Gugarythm
         readonly List<InputToken> inputBatch = new();
         readonly List<ActiveContact> contacts = new();
         readonly List<ContactPathSegment> contactPaths = new();
+        readonly List<JudgmentEvent> judgmentEvents = new();
+        readonly GameplayContactCleanupBuffers contactCleanupBuffers = new();
+        readonly GameplayHudState hudState = new();
         readonly VirtualSliderInput virtualSlider = new();
         readonly TaperedConnectorGraphic[] inputLaneFeedback = new TaperedConnectorGraphic[InputLaneFeedbackGridCellCount];
         readonly float[] inputLaneFeedbackUntil = new float[InputLaneFeedbackGridCellCount];
@@ -505,7 +584,7 @@ namespace Gugarythm
             approachDuration = double.IsFinite(approachDuration) ? Math.Max(0, approachDuration) : 0;
             offscreenLead = double.IsFinite(offscreenLead) ? Math.Max(0, offscreenLead) : 0;
             var waterfallStart = firstVisualTime - approachDuration - offscreenLead;
-            var earliestAudioSafeStart = -bgmOffset + audioOffset;
+            var earliestAudioSafeStart = GameplayTiming.EarliestAudioSafeChartTime(bgmOffset, audioOffset);
             return Math.Min(0d, Math.Min(waterfallStart, earliestAudioSafeStart));
         }
 
@@ -517,15 +596,8 @@ namespace Gugarythm
             Screen.orientation = ScreenOrientation.LandscapeLeft;
             QualitySettings.vSyncCount = 0;
             scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
-            var storedAudioOffset = PlayerPrefs.GetFloat("gugarythm-audio-offset-seconds", 0f);
-            audioOffsetSeconds = SanitizeAudioOffset(storedAudioOffset);
-            settingsDelayOffsetSeconds = SettingsDelayAdjustment.Clamp(PlayerPrefs.GetFloat("gugarythm-settings-delay-offset-seconds", (float)audioOffsetSeconds));
-            audioOffsetSeconds = settingsDelayOffsetSeconds;
-            if (Math.Abs(audioOffsetSeconds - storedAudioOffset) > .000001d)
-            {
-                PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
-                PlayerPrefs.Save();
-            }
+            audioOffsetSeconds = GameplayTimingPreferences.LoadDeviceOffset();
+            settingsDelayOffsetSeconds = audioOffsetSeconds;
 #if UNITY_EDITOR || UNITY_STANDALONE
             // TouchSimulation can leave the real Mouse device disabled across
             // editor play sessions. Desktop input is adapted explicitly below.
@@ -676,6 +748,11 @@ namespace Gugarythm
 
         void Update()
         {
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            GameplayFrameProfiler.Begin();
+            try
+            {
+#endif
 #if UNITY_EDITOR || UNITY_STANDALONE
             // The Input System editor setting can re-enable TouchSimulation
             // after Awake during a domain reload. That component disables the
@@ -703,14 +780,19 @@ namespace Gugarythm
             // Input remains fully routed to JudgmentEngine below.  Do not draw
             // a full-depth lane flash here: it reads as a reflected Hold bar
             // beneath the button rather than input feedback.
-            var events = judgmentEngine.Process(songTime, inputBatch, contacts, contactPaths, autoPlayToggle != null && autoPlayToggle.isOn);
-            if (events.Count > 0)
-            {
-                foreach (var judgment in events) OnJudgment(judgment);
-            }
+            judgmentEngine.ProcessInto(songTime, inputBatch, contacts, contactPaths,
+                autoPlayToggle != null && autoPlayToggle.isOn, judgmentEvents);
+            for (var index = 0; index < judgmentEvents.Count; index++) OnJudgment(judgmentEvents[index]);
             UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
             if (songTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+            }
+            finally
+            {
+                GameplayFrameProfiler.End();
+            }
+#endif
         }
 
         bool AreAllNotesResolved()
@@ -815,10 +897,8 @@ namespace Gugarythm
         void AdjustSettingsDelay(double delta)
         {
             settingsDelayOffsetSeconds = SettingsDelayAdjustment.Step(settingsDelayOffsetSeconds, delta);
-            audioOffsetSeconds = settingsDelayOffsetSeconds;
-            PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
-            PlayerPrefs.SetFloat("gugarythm-settings-delay-offset-seconds", (float)settingsDelayOffsetSeconds);
-            PlayerPrefs.Save();
+            audioOffsetSeconds = GameplayTimingPreferences.PersistDeviceOffset(settingsDelayOffsetSeconds);
+            settingsDelayOffsetSeconds = audioOffsetSeconds;
             RefreshSettingsDelayLabel();
         }
 
@@ -858,7 +938,7 @@ namespace Gugarythm
             calibrationOffsets.Clear();
             calibrationRoundIndex = 0;
             calibrationFourthBeatTapRegistered = false;
-            calibrationStartDsp = AudioDeviceRecovery.ChartAnchorDspForAudioOffset(AudioSettings.dspTime + .8d, audioOffsetSeconds);
+            calibrationStartDsp = GameplayTiming.ChartAnchorDspForDeviceOffset(AudioSettings.dspTime + .8d, audioOffsetSeconds);
             ScheduleCalibrationTicks();
             calibrationActive = true;
             calibrationBackdrop?.gameObject.SetActive(true);
@@ -951,11 +1031,8 @@ namespace Gugarythm
 
         void SetAudioOffset(double value)
         {
-            audioOffsetSeconds = double.IsNaN(value) || double.IsInfinity(value) ? 0d : Math.Clamp(value, -.3d, .3d);
+            audioOffsetSeconds = GameplayTimingPreferences.PersistDeviceOffset(value);
             settingsDelayOffsetSeconds = audioOffsetSeconds;
-            PlayerPrefs.SetFloat("gugarythm-audio-offset-seconds", (float)audioOffsetSeconds);
-            PlayerPrefs.SetFloat("gugarythm-settings-delay-offset-seconds", (float)settingsDelayOffsetSeconds);
-            PlayerPrefs.Save();
             RefreshSettingsDelayLabel();
         }
 
@@ -1129,9 +1206,9 @@ namespace Gugarythm
             holdEffects.UnPause();
             var playbackReadyDsp = AudioSettings.dspTime + .25d;
             var firstWaterfallSongTime = FirstWaterfallSongTimeForApproachDuration(chart, ApproachDuration);
-            var earliestAudioSafeStart = -chart.BgmOffset + audioOffsetSeconds;
+            var earliestAudioSafeStart = GameplayTiming.EarliestAudioSafeChartTime(chart.BgmOffset, audioOffsetSeconds);
             var initialSongTime = Math.Min(0d, Math.Min(firstWaterfallSongTime, earliestAudioSafeStart));
-            scheduledDsp = playbackReadyDsp - chart.BgmOffset - initialSongTime;
+            scheduledDsp = GameplayTiming.ScheduledDspForChartTime(playbackReadyDsp, initialSongTime, chart.BgmOffset);
             music.time = 0;
             // Prebuild every chart object at its off-screen perspective
             // position before the scheduled audio begins. Only objects near
@@ -1141,7 +1218,7 @@ namespace Gugarythm
             SetGameplayStageVisible(true);
             UpdateVisuals(lastObservedSongTime + visualOffsetSeconds);
             SetGameplayLoadingVisible(false);
-            music.PlayScheduled(scheduledDsp + audioOffsetSeconds);
+            music.PlayScheduled(GameplayTiming.PlaybackDspForSchedule(scheduledDsp, audioOffsetSeconds));
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
             ShowJudgment("", Color.white);
         }
@@ -1213,11 +1290,11 @@ namespace Gugarythm
             if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
             {
                 var nextDsp = AudioSettings.dspTime + .25;
-                var clipTime = AudioDeviceRecovery.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
-                var playbackDsp = AudioDeviceRecovery.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds);
+                var clipTime = GameplayTiming.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
+                var playbackDsp = GameplayTiming.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds);
                 music.Stop();
                 music.time = clipTime;
-                scheduledDsp = AudioDeviceRecovery.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
+                scheduledDsp = GameplayTiming.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
                 accumulatedPause = 0;
                 music.PlayScheduled(playbackDsp);
                 resumeNeedsAudioReschedule = false;
@@ -1282,6 +1359,9 @@ namespace Gugarythm
             BuildHoldRenderState();
             scoreState.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
+            judgmentEvents.Clear();
+            contactCleanupBuffers.BeginFrame();
+            hudState.Invalidate();
             touches.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
@@ -1310,7 +1390,8 @@ namespace Gugarythm
             chartRenderIndex = new ChartRenderIndex(chart);
         }
 
-        double CurrentSongTime() => AudioSettings.dspTime - scheduledDsp - accumulatedPause - chart.BgmOffset;
+        double CurrentSongTime() => GameplayTiming.ChartTimeAtDsp(
+            AudioSettings.dspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
 
         void CollectInput()
         {
@@ -1318,7 +1399,8 @@ namespace Gugarythm
             contacts.Clear();
             contactPaths.Clear();
             if (!EnhancedTouchSupport.enabled) EnhancedTouchSupport.Enable();
-            var seen = new HashSet<int>();
+            contactCleanupBuffers.BeginFrame();
+            var seen = contactCleanupBuffers.ActiveContactIds;
             foreach (var touch in Touch.activeTouches)
             {
                 var id = touch.touchId;
@@ -1390,8 +1472,12 @@ namespace Gugarythm
 #if UNITY_EDITOR || UNITY_STANDALONE
             CollectMouseAsTouch(seen);
 #endif
-            foreach (var id in touches.Keys.Where(id => !seen.Contains(id)).ToArray())
+            var removalIds = contactCleanupBuffers.RemovalIds;
+            foreach (var id in touches.Keys)
+                if (!seen.Contains(id)) removalIds.Add(id);
+            for (var index = 0; index < removalIds.Count; index++)
             {
+                var id = removalIds[index];
                 touches.Remove(id);
                 virtualSlider.Cancel(id);
             }
@@ -1494,7 +1580,7 @@ namespace Gugarythm
             AudioSettings.dspTime - (InputState.currentTime - inputTime);
 
         double InputEventSongTime(double inputTime) =>
-            InputEventDspTime(inputTime) - scheduledDsp - accumulatedPause - chart.BgmOffset;
+            GameplayTiming.ChartTimeAtDsp(InputEventDspTime(inputTime), scheduledDsp, accumulatedPause, chart.BgmOffset);
 
         static float ScreenToCanvasY(float screenY) => (screenY / Math.Max(1, Screen.height) - .5f) * CanvasHeight;
         static float ScreenToCanvasX(float screenX) => (screenX / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
@@ -3659,9 +3745,13 @@ namespace Gugarythm
 
         void RefreshHud()
         {
-            accuracyLabel.text = $"ACCURACY  {scoreState.AccuracyPercent(chart?.PlayableCount ?? 0):F4}%";
+            var totalNotes = chart?.PlayableCount ?? 0;
+            if (hudState.ShouldUpdateAccuracy(scoreState.AccuracyNumerator, totalNotes))
+                accuracyLabel.text = $"ACCURACY  {scoreState.AccuracyPercent(totalNotes):F4}%";
+            var comboVisible = running && scoreState.Combo > 0;
+            if (!hudState.ShouldUpdateCombo(scoreState.Combo, comboVisible)) return;
             comboLabel.text = "COMBO\n" + scoreState.Combo;
-            comboLabel.gameObject.SetActive(running && scoreState.Combo > 0);
+            comboLabel.gameObject.SetActive(comboVisible);
         }
         void SetStatus(string message) { if (loadStatus != null) loadStatus.text = message; }
         void ShowJudgment(string value, Color color)
