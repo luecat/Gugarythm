@@ -30,6 +30,10 @@ public static class RuntimeValidation
         ValidateScrollSpeedMath();
         ValidateUscLeadingMeasurePadding();
         ValidateInitialWaterfallTiming();
+        ValidatePerformanceSampleWindow();
+        ValidateTimingSampleWindow();
+        ValidateVisualFrameContext();
+        ValidateGameplayTimingSampleSet();
         ValidateTimingAndHotPathReuse();
         ValidateGameplayUpdateStateRestoration();
         ValidateGgrUscHoldRoots();
@@ -45,10 +49,13 @@ public static class RuntimeValidation
         ValidateRuntimeHoldPaths();
         ValidateValidPathAttachEvaluatorAlignment();
         ValidateHoldEaseParity();
+        ValidateGpuRibbonRendering();
         ValidateHoldPlayableRangeCheckpoints();
         ValidateChartRenderIndex();
+        ValidateGuideRenderingOptimization();
         ValidateNoteRenderWidths();
         ValidateTaperedConnectorGeometry();
+        ValidateHoldBatchGeometry();
         ValidateNoteRenderVisibilityWindow();
         ValidateLibrarySelectionFrameGeometry();
         ValidateLibraryDataRefreshContracts();
@@ -167,6 +174,143 @@ public static class RuntimeValidation
         Debug.Log($"GUGARHYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} auto={chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} connectors={chart.Connectors.Count} holdPaths={chart.HoldPaths.Count} holdRuns={holdRenderRunCount} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
                   $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
                   $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
+    }
+
+    static void ValidatePerformanceSampleWindow()
+    {
+        // Hand-derived frame budgets keep the validation independent of the production calculation.
+        var samples = new PerformanceSampleWindow(2);
+        samples.AddFrame(1f / 120f);
+        samples.AddFrame(1f / 60f);
+        var first = samples.Snapshot();
+        Require(first.SampleCount == 2 && Math.Abs(first.CurrentFps - 60f) < .01f &&
+                Math.Abs(first.AverageFps - 80f) < .01f && Math.Abs(first.MinimumFps - 60f) < .01f,
+            "Performance samples must report current, time-weighted average, and minimum FPS");
+
+        samples.AddFrame(1f / 30f);
+        samples.AddFrame(0);
+        samples.AddFrame(float.NaN);
+        var wrapped = samples.Snapshot();
+        Require(wrapped.SampleCount == 2 && Math.Abs(wrapped.CurrentFps - 30f) < .01f &&
+                Math.Abs(wrapped.AverageFps - 40f) < .01f && Math.Abs(wrapped.MinimumFps - 30f) < .01f,
+            "Performance samples must evict the oldest frame and ignore invalid durations without allocating");
+
+        var timed = new PerformanceSampleWindow(120, .05f);
+        timed.AddFrame(.02f);
+        timed.AddFrame(.02f);
+        timed.AddFrame(.02f);
+        Require(timed.Snapshot().SampleCount == 2,
+            "Performance samples must retain only frames inside their configured time window");
+
+        samples.Reset();
+        Require(samples.Snapshot().SampleCount == 0,
+            "Resetting performance samples must remove every prior gameplay frame");
+
+        var budgets = new FrameBudgetCounter();
+        budgets.AddFrame(1f / 120f);
+        budgets.AddFrame(1f / 60f);
+        budgets.AddFrame(1f / 30f);
+        Require(budgets.Over120HzBudget == 2 && budgets.Over60HzBudget == 1 && budgets.Over30HzBudget == 0,
+            $"Frame budget counters must classify 120, 60, and 30 Hz threshold breaches independently " +
+            $"(actual {budgets.Over120HzBudget}/{budgets.Over60HzBudget}/{budgets.Over30HzBudget})");
+    }
+
+    static void ValidateTimingSampleWindow()
+    {
+        var samples = new TimingSampleWindow(32, 10f);
+        for (var value = 1; value <= 20; value++)
+            samples.AddSample(value, .1f);
+        samples.AddSample(float.NaN, .1f);
+        samples.AddSample(-1f, .1f);
+        var percentile = samples.Snapshot();
+        Require(percentile.SampleCount == 20 && Math.Abs(percentile.MaximumMilliseconds - 20f) < .001f &&
+                Math.Abs(percentile.P95Milliseconds - 19f) < .001f && Math.Abs(percentile.P99Milliseconds - 20f) < .001f,
+            "Timing samples must report hand-derived maximum, P95, and P99 while ignoring invalid values");
+
+        var timed = new TimingSampleWindow(120, .05f);
+        timed.AddSample(10f, .02f);
+        timed.AddSample(20f, .02f);
+        timed.AddSample(30f, .02f);
+        var retained = timed.Snapshot();
+        Require(retained.SampleCount == 2 && Math.Abs(retained.MaximumMilliseconds - 30f) < .001f &&
+                Math.Abs(retained.P95Milliseconds - 30f) < .001f,
+            "Timing samples must retain only values inside their configured time window");
+
+        timed.Reset();
+        Require(timed.Snapshot().SampleCount == 0,
+            "Resetting timing samples must remove every prior measurement");
+
+        var hotPathFrame = new HotPathFrameMetrics();
+        hotPathFrame.Record(HotPathStage.GuideTessellation, 1.5f, 3);
+        hotPathFrame.Record(HotPathStage.HoldProjection, .5f, 2);
+        hotPathFrame.SetTimeScaleSearchSteps(7);
+        var hotPathSnapshot = hotPathFrame.Snapshot();
+        Require(hotPathSnapshot.GuideTessellation.Calls == 3 &&
+                Math.Abs(hotPathSnapshot.GuideTessellation.ElapsedMilliseconds - 1.5f) < .001f &&
+                hotPathSnapshot.HoldProjection.Calls == 2 && hotPathSnapshot.TimeScaleSearchSteps == 7,
+            "Hot-path frame metrics must retain independent current-stage calls and elapsed time");
+        var hotPathSamples = new HotPathTimingSampleSet(16, 10f);
+        hotPathSamples.AddFrame(hotPathSnapshot, 1f / 120f);
+        Require(Math.Abs(hotPathSamples.Snapshot().GuideTessellation.P95Milliseconds - 1.5f) < .001f,
+            "Hot-path timing windows must expose independent P95 values from immutable frame snapshots");
+    }
+
+    static void ValidateVisualFrameContext()
+    {
+        var source = new[]
+        {
+            (-3d, .5d), (-1d, 2d), (0d, 0d), (1d, 1d), (3d, -1d),
+        };
+        var group = new RuntimeTimeScaleGroup("main", source);
+        var samples = new[] { -5d, -3d, -2d, -1d, -.5d, 0d, .5d, 1d, 2d, 3d, 4d };
+        foreach (var time in samples)
+        {
+            var binary = group.PositionAt(time, out var searchSteps);
+            var linear = group.PositionAtReferenceLinear(time);
+            Require(Math.Abs(binary - linear) <= 1e-9,
+                $"Binary PositionAt drifted from linear reference at {time}");
+            Require(searchSteps <= 3,
+                $"Binary PositionAt exceeded logarithmic search work at {time}: {searchSteps}");
+        }
+
+        var chart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        chart.TimeScaleGroups["main"] = group;
+        chart.TimeScaleGroups["fast"] = new RuntimeTimeScaleGroup("fast", new[] { (0d, 2d) });
+        var frame = new VisualFrameContext();
+        frame.BeginFrame(chart, 2d);
+        var current = frame.CurrentPosition("main");
+        Require(Math.Abs(current - group.PositionAt(2d)) <= 1e-9,
+            "VisualFrameContext must preserve the current visual position");
+        Require(Math.Abs(frame.CurrentPosition("main") - current) <= 1e-9 && frame.PositionAtCallCount == 1,
+            "VisualFrameContext must evaluate each active current-position anchor once per frame");
+        var target = frame.PositionAt(3d, "main");
+        var approach = frame.Approach(target, "main", 2d);
+        Require(Math.Abs(approach - (1f - (float)((target - current) / 2d))) <= 1e-6,
+            "VisualFrameContext approach values must match the direct visual-position equation");
+        Require(frame.PositionAtCallCount == 2 && frame.PositionAtSearchStepCount > 0,
+            "VisualFrameContext must report PositionAt calls and binary-search steps");
+    }
+
+    static void ValidateGameplayTimingSampleSet()
+    {
+        var samples = new GameplayTimingSampleSet(120, 10f);
+        samples.AddFrame(50f, 10f, 20f, 5f, 2f, .02f);
+        var snapshot = samples.Snapshot();
+        Require(snapshot.Total.SampleCount == 1 && Math.Abs(snapshot.Total.MaximumMilliseconds - 50f) < .001f &&
+                Math.Abs(snapshot.Notes.MaximumMilliseconds - 10f) < .001f &&
+                Math.Abs(snapshot.Holds.MaximumMilliseconds - 20f) < .001f &&
+                Math.Abs(snapshot.Guides.MaximumMilliseconds - 5f) < .001f &&
+                Math.Abs(snapshot.SimLines.MaximumMilliseconds - 2f) < .001f &&
+                Math.Abs(snapshot.Other.MaximumMilliseconds - 13f) < .001f,
+            "Gameplay timing samples must separate visual categories from the remaining CPU frame time");
+
+        samples.AddFrame(10f, 5f, 5f, 5f, 5f, .02f);
+        Require(Math.Abs(samples.Snapshot().Other.MaximumMilliseconds - 13f) < .001f,
+            "Gameplay timing samples must clamp overlapping measurements instead of reporting negative other time");
+
+        samples.Reset();
+        Require(samples.Snapshot().Total.SampleCount == 0,
+            "Resetting gameplay timing samples must remove every category");
     }
 
     static void ValidateRuntimeHoldPaths()
@@ -304,6 +448,17 @@ public static class RuntimeValidation
         tessellator.BuildVisibleRun(straightPath.RenderRuns[0], 0, 1, Project, tessellation);
         Require(tessellation.Count == 2,
             "A straight Hold run must tessellate to only its two endpoints");
+
+        var holdCache = new HoldRenderCache(straightPath, straightChart);
+        var cachedPoint = new HoldTessellationPoint(.5, straightPath.Evaluator.Evaluate(.5));
+        Require(holdCache.TryVisualPosition(cachedPoint, out var cachedPosition) && Math.Abs(cachedPosition - .5) < 1e-9,
+            "Hold render cache must interpolate immutable single-scale visual positions exactly");
+        var projectedHold = new List<HoldProjectedPoint>();
+        tessellator.BuildProjected(straightPath.RenderRuns[0], 0, 1,
+            point => new HoldProjectedPoint(point, new Vector2(point.Sample.Lane, (float)point.Time), point.Sample.Size), projectedHold);
+        Require(projectedHold.Count == 2 && Math.Abs(projectedHold[0].Time) < 1e-9 &&
+                Math.Abs(projectedHold[^1].Time - 1) < 1e-9,
+            "Projected Hold tessellation must retain endpoints and avoid a mesh-submission projection pass");
 
         tessellator.BuildVisibleRun(path.RenderRuns[0], .25, 1.75, Project, tessellation);
         Require(tessellation.Count == 3,
@@ -855,6 +1010,106 @@ public static class RuntimeValidation
         emptyIndex.QueryHoldRuns(0, 1, 1, runs);
         Require(notes.Count == 0 && runs.Count == 0,
             "ChartRenderIndex must return empty reusable buffers for an empty chart");
+    }
+
+    static void ValidateGuideRenderingOptimization()
+    {
+        RuntimeGuidePoint Point(double time, float lane, float size, string group = "main") => new()
+        {
+            Time = time,
+            Beat = time,
+            Lane = lane,
+            Size = size,
+            TimeScaleGroup = group,
+        };
+        RuntimeGuide Guide(double headTime, double tailTime, float headLane, float tailLane, int ease = 0) => new()
+        {
+            Start = Point(headTime - 1, headLane - 1, 1),
+            Head = Point(headTime, headLane, 1),
+            Tail = Point(tailTime, tailLane, 2),
+            End = Point(tailTime + 1, tailLane + 1, 2),
+            Ease = ease,
+            HeadOpacity = .8f,
+            TailOpacity = .2f,
+        };
+
+        var linear = Guide(1, 3, -2, 2);
+        var cache = new GuideRenderCache(linear);
+        var head = cache.Evaluate(0);
+        var middle = cache.Evaluate(.5f);
+        var tail = cache.Evaluate(1);
+        Require(Math.Abs(head.Time - 1) < 1e-9 && Math.Abs(head.Lane + 2) < 1e-6f &&
+                Math.Abs(middle.Lane) < 1e-6f && Math.Abs(middle.Size - 1.5f) < 1e-6f &&
+                Math.Abs(tail.Time - 3) < 1e-9 && Math.Abs(tail.Alpha - .2f) < 1e-6f,
+            "GuideRenderCache must retain exact linear time, lane, size, and fade evaluation");
+
+        var spline = Guide(1, 3, 0, 3, -1);
+        spline.Start = Point(0, -8, 1);
+        spline.End = Point(4, 10, 2);
+        var samples = new List<GuideRenderSample>();
+        new AdaptiveGuideTessellator().Build(new GuideRenderCache(spline), 0, 1,
+            sample =>
+            {
+                var center = new Vector2(sample.Lane * 80, sample.Progress * 100);
+                return new GuideProjectedSample(center, center + Vector2.left * sample.Size * 40,
+                    center + Vector2.right * sample.Size * 40);
+            }, samples);
+        Require(samples.Count > 2 && samples.Count <= AdaptiveGuideTessellator.MaxPoints &&
+                Math.Abs(samples[0].Progress) < 1e-6f && Math.Abs(samples[^1].Progress - 1) < 1e-6f,
+            "Adaptive Guide tessellation must preserve endpoints, subdivide visible curvature, and keep its hard cap");
+
+        var metrics = new GuideRenderMetrics();
+        metrics.SetCandidateCount(4);
+        metrics.RecordGuide(8, 16, 14);
+        metrics.RecordGuide(3, 6, 4);
+        metrics.SetDirtyCount(1);
+        Require(metrics.CandidateCount == 4 && metrics.VisibleCount == 2 && metrics.SampleCount == 11 &&
+                metrics.VertexCount == 22 && metrics.TriangleCount == 18 && metrics.DirtyCount == 1,
+            "Guide render metrics must aggregate candidates, geometry, and one batch dirty event without affecting gameplay state");
+        var frame = metrics.Snapshot();
+        Require(frame.HasValidGeometry && frame.VisibleCount <= frame.CandidateCount &&
+                frame.VertexCount == frame.SampleCount * 2 &&
+                frame.TriangleCount == Math.Max(0, frame.SampleCount - frame.VisibleCount) * 2,
+            "Guide frame snapshots must keep candidate, visible, vertex, and triangle invariants from one frame");
+        var invalidFrame = new GuideFrameSnapshot(1, 2, 4, 8, 4, 0, 0);
+        Require(!invalidFrame.HasValidGeometry,
+            "Guide frame snapshots must reject visible counts above candidate counts");
+
+        var chart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        chart.TimeScaleGroups["main"] = new RuntimeTimeScaleGroup("main", new[] { (0d, 1d) });
+        var later = Guide(2, 3, 1, 2);
+        var earlier = Guide(.5, 1.5, -2, -1);
+        var longGuide = Guide(-1, 4, 0, 0);
+        chart.Guides.AddRange(new[] { later, earlier, longGuide });
+        var guideIndex = new ChartRenderIndex(chart);
+        var visible = new List<RuntimeGuide>();
+        guideIndex.QueryGuides(0, 0, 4, visible);
+        Require(visible.SequenceEqual(new[] { later, earlier, longGuide }),
+            "Guide queries must include overlapping ranges and retain source draw order across index buckets");
+
+        var spanCache = new GuideRenderCache(longGuide);
+        spanCache.BuildVisualSpans(chart);
+        var visualFrame = new VisualFrameContext();
+        visualFrame.BeginFrame(chart, 0);
+        var spans = new List<GuideVisualSpan>();
+        spanCache.QueryVisibleSpans(visualFrame, 4, spans);
+        Require(spans.Count > 0, "Guide visual cache must expose visible monotonic spans");
+        foreach (var span in spans)
+        {
+            var midpoint = (span.FirstProgress + span.LastProgress) * .5f;
+            var direct = chart.VisualPosition(spanCache.Evaluate(midpoint).Time, "main");
+            Require(Math.Abs(direct - span.VisualPositionAt(midpoint)) < 1e-9,
+                "Guide cached visual positions must match RuntimeChart exactly");
+        }
+        var projected = new List<GuideProjectedPoint>();
+        new AdaptiveGuideTessellator().BuildProjected(spanCache, spans[0], sample =>
+            new GuideProjectedPoint(sample.Progress, new Vector2(sample.Lane * 80, (float)sample.VisualPosition * 100),
+                sample.Size * 80, sample.Alpha), projected);
+        Require(projected.Count >= 2 && Math.Abs(projected[0].Progress - spans[0].FirstProgress) < 1e-6f &&
+                Math.Abs(projected[^1].Progress - spans[0].LastProgress) < 1e-6f,
+            "Projected Guide tessellation must retain cached clipping endpoints without a second projection pass");
+        guideIndex.QueryGuides(10, 0, 1, visible);
+        Require(visible.Count == 0, "Guide queries must release candidates outside the visual interval");
     }
 
     static void ValidateLibrarySelectionFrameGeometry()
@@ -1484,6 +1739,203 @@ public static class RuntimeValidation
         helper.Dispose();
         UnityEngine.Object.DestroyImmediate(mesh);
         UnityEngine.Object.DestroyImmediate(graphicObject);
+    }
+
+    static void ValidateHoldBatchGeometry()
+    {
+        var populateMesh = typeof(HoldBatchGraphic).GetMethod(
+            "OnPopulateMesh", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+            null, new[] { typeof(VertexHelper) }, null);
+        Require(populateMesh != null, "Batched Holds must expose one uGUI mesh population path");
+
+        var go = new GameObject("Hold batch geometry validation", typeof(RectTransform),
+            typeof(CanvasRenderer), typeof(HoldBatchGraphic));
+        var batch = go.GetComponent<HoldBatchGraphic>();
+        batch.color = new Color(1, 1, 1, .62f);
+        batch.sourceUvInset = .1f;
+        batch.Prepare(2, 3);
+        batch.BeginFrame();
+        batch.BeginPath(3);
+        batch.SetPathPoint(0, new Vector2(0, 0), 4);
+        batch.SetPathPoint(1, new Vector2(0, 10), 6);
+        batch.SetPathPoint(2, new Vector2(0, 20), 8);
+        batch.EndPath();
+        batch.BeginPath(2);
+        batch.SetPathPoint(0, new Vector2(20, 0), 5);
+        batch.SetPathPoint(1, new Vector2(20, 20), 9);
+        batch.EndPath();
+        batch.EndFrame();
+
+        using var helper = new VertexHelper();
+        populateMesh.Invoke(batch, new object[] { helper });
+        var mesh = new Mesh { name = "Hold batch validation mesh" };
+        helper.FillMesh(mesh);
+        Require(mesh.vertexCount == 10 && mesh.triangles.Length == 18,
+            "Two Hold runs must share one batch mesh while retaining separate ribbon topology");
+        Require(mesh.uv.All(value => Math.Abs(value.x - .1f) < .0001f || Math.Abs(value.x - .9f) < .0001f),
+            "Batched Holds must retain the official texture visible-core inset");
+        var vertices = mesh.vertices;
+        Require(Math.Abs(Vector3.Distance(vertices[0], vertices[1]) - 4f) < .0001f &&
+                Math.Abs(Vector3.Distance(vertices[4], vertices[5]) - 8f) < .0001f &&
+                Math.Abs(Vector3.Distance(vertices[6], vertices[7]) - 5f) < .0001f &&
+                Math.Abs(Vector3.Distance(vertices[8], vertices[9]) - 9f) < .0001f,
+            "Batched Holds must preserve every submitted contour width exactly");
+        UnityEngine.Object.DestroyImmediate(mesh);
+        UnityEngine.Object.DestroyImmediate(go);
+    }
+
+    static void ValidateGpuRibbonRendering()
+    {
+        var chart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        chart.TimeScaleGroups["main"] = new RuntimeTimeScaleGroup("main", new[]
+        {
+            (0d, 1d), (1d, .5d), (2d, -1d), (3d, 1d),
+        });
+        chart.TimeScaleGroups["alt"] = new RuntimeTimeScaleGroup("alt", new[]
+        {
+            (0d, 1d), (1.5d, .75d), (3d, 1d),
+        });
+        var guide = new RuntimeGuide
+        {
+            Start = new RuntimeGuidePoint { Time = 0, Lane = -2, Size = 1, TimeScaleGroup = "main" },
+            Head = new RuntimeGuidePoint { Time = 0, Lane = -1, Size = 1, TimeScaleGroup = "main" },
+            Tail = new RuntimeGuidePoint { Time = 3, Lane = 2, Size = 1.5f, TimeScaleGroup = "main" },
+            End = new RuntimeGuidePoint { Time = 3, Lane = 3, Size = 2, TimeScaleGroup = "main" },
+            Color = 5,
+            Ease = -1,
+            HeadOpacity = 1,
+            TailOpacity = .25f,
+        };
+        chart.Guides.Add(guide);
+        var alternateGuide = new RuntimeGuide
+        {
+            Start = new RuntimeGuidePoint { Time = 0, Lane = 2, Size = 1, TimeScaleGroup = "alt" },
+            Head = new RuntimeGuidePoint { Time = 0, Lane = 2, Size = 1, TimeScaleGroup = "alt" },
+            Tail = new RuntimeGuidePoint { Time = 3, Lane = -2, Size = 1.5f, TimeScaleGroup = "alt" },
+            End = new RuntimeGuidePoint { Time = 3, Lane = -2, Size = 2, TimeScaleGroup = "alt" },
+            Color = 5,
+            Ease = 1,
+            HeadOpacity = 1,
+            TailOpacity = .25f,
+        };
+        chart.Guides.Add(alternateGuide);
+        var head = new RuntimeNote
+        {
+            Index = 10, Time = 0, Beat = 0, Lane = -1, Size = 1, Kind = RuntimeNoteKind.Sustain,
+            HoldRootIndex = 10, TimeScaleGroup = "main", Visible = true, Judged = true,
+        };
+        var tail = new RuntimeNote
+        {
+            Index = 11, Time = 3, Beat = 3, Lane = 2, Size = 2, Kind = RuntimeNoteKind.Release,
+            HoldRootIndex = 10, TimeScaleGroup = "main", Visible = true, Judged = true,
+        };
+        chart.Notes.Add(head);
+        chart.Notes.Add(tail);
+        chart.Connectors.Add(new RuntimeConnector { Start = head, End = tail, Ease = 3, Critical = false });
+        var paths = HoldPathBuilder.Build(chart);
+        chart.HoldPaths.AddRange(paths.Paths);
+        chart.FallbackConnectors.AddRange(paths.FallbackConnectors);
+        RuntimeNote FallbackPoint(int index, double time, float lane, int root) => new()
+        {
+            Index = index, Time = time, Beat = time, Lane = lane, Size = 1,
+            Kind = RuntimeNoteKind.Sustain, HoldRootIndex = root, TimeScaleGroup = "main", Visible = true,
+        };
+        chart.FallbackConnectors.Add(new RuntimeConnector
+        {
+            Start = FallbackPoint(20, .5, -3, 20), End = FallbackPoint(21, 1.5, -2, 20), Critical = true,
+        });
+        chart.FallbackConnectors.Add(new RuntimeConnector
+        {
+            Start = FallbackPoint(30, 1.5, 2, 30), End = FallbackPoint(31, 2.5, 3, 30), Critical = false,
+        });
+        var guideCache = new GuideRenderCache(guide);
+        guideCache.BuildVisualSpans(chart);
+        var alternateGuideCache = new GuideRenderCache(alternateGuide);
+        alternateGuideCache.BuildVisualSpans(chart);
+        var caches = new Dictionary<RuntimeGuide, GuideRenderCache>
+        {
+            [guide] = guideCache,
+            [alternateGuide] = alternateGuideCache,
+        };
+        var first = GpuRibbonMeshBuilder.Build(chart, caches);
+        var second = GpuRibbonMeshBuilder.Build(chart, caches);
+        Require(first.GuidePathCount == 2 && first.HoldPathCount == 3 && first.Chunks.Count == 3,
+            "GPU ribbon mesh build must retain independent Guide and Hold paths");
+        Require(first.Chunks.Count(chunk => chunk.Kind == GpuRibbonKind.Guide) == 1,
+            "GPU ribbon preload must merge Guide paths across time-scale groups into one immutable batch");
+        Require(first.Chunks.GroupBy(chunk => chunk.Kind).All(group => group.Count() == 1),
+            "GPU ribbon preload must merge interleaved Hold styles into one immutable batch per material");
+        Require(first.HoldRootStates.ContainsKey(10),
+            "GPU ribbon mesh build must allocate an event-driven state texel for every Hold root");
+        Require(first.VertexCount > 0 && first.Chunks.All(chunk => chunk.Vertices.Length % 2 == 0 &&
+                    chunk.Indices.Length % 6 == 0 && chunk.Vertices.Length <= 32000),
+            "GPU ribbon chunks must retain paired edges, complete quads, and the 32k vertex limit");
+        Require(first.Chunks.Count == second.Chunks.Count && first.VertexCount == second.VertexCount &&
+                first.Chunks.Select(chunk => chunk.Indices.Length).SequenceEqual(second.Chunks.Select(chunk => chunk.Indices.Length)),
+            "GPU ribbon chart-load mesh generation must be deterministic");
+        Require(first.Chunks.SelectMany(chunk => chunk.Vertices).All(vertex =>
+                    vertex.position != Vector3.zero && vertex.uv1 == Vector4.zero &&
+                    vertex.uv2 == Vector4.zero && vertex.uv3 == Vector4.zero),
+            "GPU ribbon metadata must use only standard Canvas POSITION, COLOR, and UV0 channels");
+
+        var cacheKey = GpuRibbonCache.ComputeKey(chart);
+        Require(cacheKey.Length == 64 && cacheKey == GpuRibbonCache.ComputeKey(chart),
+            "GPU ribbon cache keys must be deterministic SHA-256 chart fingerprints");
+        var cachePath = Path.Combine(Path.GetTempPath(), $"gugarhythm-ribbon-{Guid.NewGuid():N}.bin");
+        try
+        {
+            GpuRibbonCache.Write(cachePath, cacheKey, first);
+            Require(GpuRibbonCache.TryRead(cachePath, cacheKey, out var restored) && restored != null &&
+                    restored.VertexCount == first.VertexCount && restored.GuidePathCount == first.GuidePathCount &&
+                    restored.HoldPathCount == first.HoldPathCount &&
+                    restored.GroupNames.SequenceEqual(first.GroupNames) &&
+                    restored.HoldRootStates.OrderBy(pair => pair.Key)
+                        .SequenceEqual(first.HoldRootStates.OrderBy(pair => pair.Key)) &&
+                    restored.Chunks.Select(chunk => (chunk.Kind, chunk.Vertices.Length, chunk.Indices.Length))
+                        .SequenceEqual(first.Chunks.Select(chunk =>
+                            (chunk.Kind, chunk.Vertices.Length, chunk.Indices.Length))),
+                "GPU ribbon disk cache must round-trip immutable display geometry exactly");
+            Require(!GpuRibbonCache.TryRead(cachePath, new string('0', 64), out _),
+                "GPU ribbon disk cache must reject a stale chart fingerprint without throwing");
+        }
+        finally
+        {
+            if (File.Exists(cachePath)) File.Delete(cachePath);
+        }
+
+        var canvasHeight = 1920f * Screen.height / Math.Max(1, Screen.width);
+        foreach (var lane in new[] { -8f, -6f, -1f, 0f, 1f, 6f, 8f })
+            Require(Math.Abs(GpuRibbonProjection.LaneX(lane, 1, canvasHeight) -
+                             SonolusLandscapePrototype.JudgmentLaneCanvasX(lane)) <= 1e-4f,
+                $"GPU ribbon lane projection drifted from the CPU reference at lane {lane}");
+        foreach (var approach in new[] { -.25f, 0f, .25f, .5f, .75f, 1f, 1.1f })
+            Require(float.IsFinite(GpuRibbonProjection.Perspective(approach)),
+                $"GPU ribbon perspective must remain finite at approach {approach}");
+        Require(Resources.Load<Shader>("Shaders/GpuRibbonUI") != null,
+            "GPU ribbon UI shader must be included through Resources");
+
+        var gameObject = new GameObject("GPU Ribbon Geometry Test", typeof(RectTransform),
+            typeof(CanvasRenderer), typeof(GpuRibbonGraphic));
+        try
+        {
+            var graphic = gameObject.GetComponent<GpuRibbonGraphic>();
+            graphic.SetStaticGeometry(first.Chunks[0], Texture2D.whiteTexture);
+            var helper = new VertexHelper();
+            var populate = typeof(GpuRibbonGraphic).GetMethod("OnPopulateMesh",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Instance,
+                null, new[] { typeof(VertexHelper) }, null);
+            Require(populate != null, "GPU ribbon graphic must expose a UI mesh population path");
+            populate.Invoke(graphic, new object[] { helper });
+            Require(helper.currentVertCount == first.Chunks[0].Vertices.Length && graphic.StaticBuildCount == 1,
+                "GPU ribbon graphic must upload its immutable metadata mesh exactly once");
+            helper.Dispose();
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(gameObject);
+        }
+        Debug.Log($"GUGARHYTHM_GPU_RIBBON_VALIDATION_OK chunks={first.Chunks.Count} " +
+                  $"vertices={first.VertexCount} guides={first.GuidePathCount} holds={first.HoldPathCount}");
     }
 
     static void ValidateNoteSurfaceProjection()

@@ -88,7 +88,26 @@ namespace Gugarhythm
             }
         }
 
-        public double PositionAt(double time)
+        public double PositionAt(double time) => PositionAt(time, out _);
+
+        public double PositionAt(double time, out int searchSteps)
+        {
+            var low = 0;
+            var high = points.Count;
+            searchSteps = 0;
+            while (low < high)
+            {
+                searchSteps++;
+                var middle = low + ((high - low) >> 1);
+                if (points[middle].Time <= time) low = middle + 1;
+                else high = middle;
+            }
+            var point = points[Math.Max(0, low - 1)];
+            return point.Position + (time - point.Time) * point.Scale;
+        }
+
+        // Kept solely as an independent parity oracle for RuntimeValidation.
+        public double PositionAtReferenceLinear(double time)
         {
             var point = points[0];
             foreach (var candidate in points)
@@ -97,6 +116,54 @@ namespace Gugarhythm
                 point = candidate;
             }
             return point.Position + (time - point.Time) * point.Scale;
+        }
+
+        // Presentation caches use timing-section boundaries to split a visual
+        // curve into monotonic spans.  The points remain immutable after chart
+        // creation, and callers own the reusable destination buffer.
+        public void AppendBoundaryTimes(double firstTime, double lastTime, List<double> output)
+        {
+            if (output == null) throw new ArgumentNullException(nameof(output));
+            var minimum = Math.Min(firstTime, lastTime);
+            var maximum = Math.Max(firstTime, lastTime);
+            foreach (var point in points)
+                if (point.Time > minimum + 1e-9 && point.Time < maximum - 1e-9)
+                    output.Add(point.Time);
+        }
+
+        // Chart-load caches need the canonical time/scale control points, not
+        // sampled positions, so their key changes whenever projection changes.
+        public void AppendCacheFingerprintValues(List<double> output)
+        {
+            if (output == null) throw new ArgumentNullException(nameof(output));
+            foreach (var point in points)
+            {
+                output.Add(point.Time);
+                output.Add(point.Scale);
+            }
+        }
+
+        public bool IsSingleScaleInterval(double firstTime, double lastTime)
+        {
+            var first = PointIndexAt(firstTime);
+            var last = PointIndexAt(lastTime);
+            if (first == last) return true;
+            if (last == first + 1 && Math.Abs(lastTime - points[last].Time) < 1e-9) return true;
+            if (first == last + 1 && Math.Abs(firstTime - points[first].Time) < 1e-9) return true;
+            return false;
+        }
+
+        int PointIndexAt(double time)
+        {
+            var low = 0;
+            var high = points.Count;
+            while (low < high)
+            {
+                var middle = low + ((high - low) >> 1);
+                if (points[middle].Time <= time) low = middle + 1;
+                else high = middle;
+            }
+            return Math.Max(0, low - 1);
         }
 
         public double TimeAtPosition(double position)

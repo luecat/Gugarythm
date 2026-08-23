@@ -12,9 +12,7 @@ using UnityEngine.InputSystem;
 using UnityEngine.InputSystem.EnhancedTouch;
 using UnityEngine.InputSystem.LowLevel;
 using UnityEngine.InputSystem.UI;
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
 using Unity.Profiling;
-#endif
 using Touch = UnityEngine.InputSystem.EnhancedTouch.Touch;
 
 namespace Gugarhythm
@@ -370,7 +368,6 @@ namespace Gugarhythm
         readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
         readonly HashSet<int> renderedPersistentHoldHeads = new();
         readonly HashSet<int> renderedNoteIds = new();
-        readonly HashSet<HoldRenderRun> renderedHoldRuns = new();
         readonly Dictionary<HoldRenderRun, TaperedConnectorGraphic> holdRunViews = new();
         readonly Dictionary<RuntimeConnector, TaperedConnectorGraphic> connectorViews = new();
         readonly Dictionary<RuntimeSimLine, SimLineGraphic> simLineViews = new();
@@ -394,9 +391,16 @@ namespace Gugarhythm
         readonly float[] inputLaneFeedbackUntil = new float[InputLaneFeedbackGridCellCount];
         readonly float[] connectorPathSamples = new float[ConnectorPathSegments + 3];
         readonly AdaptiveHoldTessellator holdTessellator = new();
-        readonly List<HoldTessellationPoint> holdTessellationPoints = new(AdaptiveHoldTessellator.MaxPointsPerRun);
+        readonly List<HoldProjectedPoint> holdTessellationPoints = new(AdaptiveHoldTessellator.MaxPointsPerRun);
+        readonly AdaptiveGuideTessellator guideTessellator = new();
+        readonly List<GuideProjectedPoint> guideTessellationPoints = new(AdaptiveGuideTessellator.MaxPoints);
+        readonly List<GuideVisualSpan> visibleGuideSpans = new();
         readonly List<RuntimeNote> visibleNotes = new();
         readonly List<HoldRenderRun> visibleHoldRuns = new();
+        readonly List<RuntimeGuide> visibleGuides = new();
+        readonly Dictionary<RuntimeGuide, GuideRenderCache> guideRenderCaches = new();
+        readonly Dictionary<RuntimeHoldPath, HoldRenderCache> holdRenderCaches = new();
+        readonly Dictionary<string, HoldVisualRange> holdVisualRanges = new(StringComparer.Ordinal);
         readonly List<int> noteViewReleaseKeys = new();
         readonly List<int> persistentHeadReleaseKeys = new();
         readonly List<HoldRenderRun> holdRunReleaseKeys = new();
@@ -405,11 +409,23 @@ namespace Gugarhythm
         readonly List<RuntimeGuide> guideReleaseKeys = new();
         readonly ScoreState scoreState = new();
         readonly List<IChartImporter> importers = new() { new GgrChartImporter() };
+        readonly PerformanceSampleWindow performanceSamples = new(1200, 10f);
+        readonly GameplayTimingSampleSet gameplayTimingSamples = new(1200, 10f);
+        readonly HotPathFrameMetrics hotPathFrameMetrics = new();
+        readonly HotPathTimingSampleSet hotPathTimingSamples = new(1200, 10f);
+        readonly VisualFrameContext visualFrameContext = new();
+        readonly FrameBudgetCounter frameBudgetCounter = new();
+        readonly GuideRenderMetrics guideRenderMetrics = new();
+        readonly FrameTiming[] frameTimingBuffer = new FrameTiming[1];
 
         Texture2D backgroundTexture;
-        Func<HoldTessellationPoint, Vector2> holdPointProjector;
+        Func<HoldTessellationPoint, HoldProjectedPoint> holdPointProjector;
+        Func<GuideRenderSample, GuideProjectedPoint> guideSampleProjector;
         RuntimeHoldPath projectingHoldPath;
+        HoldRenderCache projectingHoldCache;
         double projectingHoldVisualTime;
+        GuideRenderCache projectingGuideCache;
+        RuntimeChart cachedGuideChart;
         ChartRenderIndex chartRenderIndex;
         Texture2D laneTexture;
         Texture2D damageTexture;
@@ -446,14 +462,23 @@ namespace Gugarhythm
         RectTransform canvasRoot;
         RectTransform backgroundLayer;
         RectTransform stage;
+        Canvas gameplayStageCanvas;
         RectTransform safeAreaRoot;
         RectTransform guideLayer;
+        GuideBatchGraphic guideBatch;
         RectTransform connectorLayer;
+        HoldBatchGraphic holdGreenBatch;
+        HoldBatchGraphic holdYellowBatch;
+        HoldBatchGraphic missedHoldGreenBatch;
+        HoldBatchGraphic missedHoldYellowBatch;
+        GpuRibbonRenderer gpuRibbonRenderer;
+        string gpuRibbonFallbackReason = string.Empty;
         RectTransform simLineLayer;
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
         RectTransform menuPanel;
         RectTransform gameplayLoadingOverlay;
+        RectTransform performanceHudPanel;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
         RectTransform settingsAudioPanel;
@@ -472,6 +497,7 @@ namespace Gugarhythm
         RawImage judgmentImage;
         Text loadStatus;
         Text gameplayLoadingLabel;
+        Text performanceHudLabel;
         Text libraryCountLabel;
         Text librarySortLabel;
         Text librarySortModeLabel;
@@ -557,6 +583,28 @@ namespace Gugarhythm
         bool calibrationFourthBeatTapRegistered;
         float scrollSpeed = DefaultScrollSpeed;
         float judgmentHideAt = -1f;
+        float nextPerformanceHudRefresh;
+        double latestCpuFrameTimeMs = double.NaN;
+        double latestGpuFrameTimeMs = double.NaN;
+        float latestNotesMilliseconds;
+        float latestHoldsMilliseconds;
+        float latestGuidesMilliseconds;
+        float latestSimLinesMilliseconds;
+        GuideFrameSnapshot latestGuideFrameSnapshot;
+        HotPathFrameSnapshot latestHotPathFrameSnapshot;
+        ProfilerRecorder gcAllocationRecorder;
+
+        readonly struct HoldVisualRange
+        {
+            public readonly double NearTime;
+            public readonly double FarTime;
+
+            public HoldVisualRange(double nearTime, double farTime)
+            {
+                NearTime = nearTime;
+                FarTime = farTime;
+            }
+        }
 
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
         static float TopY => CanvasHeight * .5f;
@@ -684,6 +732,7 @@ namespace Gugarhythm
         {
             GugarhythmPreferenceMigration.Migrate();
             holdPointProjector = ProjectHoldPoint;
+            guideSampleProjector = ProjectGuideSample;
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.targetFrameRate = 120;
             LandscapeOrientation.Lock();
@@ -700,6 +749,7 @@ namespace Gugarhythm
             EnhancedTouchSupport.Enable();
             LoadArtwork();
             BuildInterface();
+            gcAllocationRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Allocated In Frame", 1);
             SetStatus("請匯入 GGR 封包。");
         }
 
@@ -765,6 +815,7 @@ namespace Gugarhythm
         {
             if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(visible);
             if (stage != null) stage.gameObject.SetActive(visible);
+            if (performanceHudPanel != null) performanceHudPanel.gameObject.SetActive(visible);
         }
 
         void SetGameplayLoadingVisible(bool visible, string message = null)
@@ -837,11 +888,16 @@ namespace Gugarhythm
             if (EnhancedTouchSupport.enabled) EnhancedTouchSupport.Disable();
             if (laneMaterial != null) Destroy(laneMaterial);
             if (missedHoldMaterial != null) Destroy(missedHoldMaterial);
+            gpuRibbonRenderer?.Dispose();
+            gpuRibbonRenderer = null;
             if (detailCoverTexture != null) Destroy(detailCoverTexture);
+            if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
         }
 
         void Update()
         {
+            var gameplayTimingStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            UpdatePerformanceHud();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             GameplayFrameProfiler.Begin();
             try
@@ -879,6 +935,11 @@ namespace Gugarhythm
             for (var index = 0; index < judgmentEvents.Count; index++) OnJudgment(judgmentEvents[index]);
             UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
+            gameplayTimingSamples.AddFrame(
+                MillisecondsBetween(gameplayTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
+                latestNotesMilliseconds, latestHoldsMilliseconds, latestGuidesMilliseconds,
+                latestSimLinesMilliseconds, Time.unscaledDeltaTime);
+            hotPathTimingSamples.AddFrame(latestHotPathFrameSnapshot, Time.unscaledDeltaTime);
             if (songTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
@@ -1287,6 +1348,20 @@ namespace Gugarhythm
             if (loading || chart == null || music.clip == null) return;
             CancelResumeCountdown();
             ResetRuntime();
+            performanceSamples.Reset();
+            gameplayTimingSamples.Reset();
+            hotPathTimingSamples.Reset();
+            hotPathFrameMetrics.Reset();
+            frameBudgetCounter.Reset();
+            latestCpuFrameTimeMs = double.NaN;
+            latestGpuFrameTimeMs = double.NaN;
+            latestNotesMilliseconds = 0;
+            latestHoldsMilliseconds = 0;
+            latestGuidesMilliseconds = 0;
+            latestSimLinesMilliseconds = 0;
+            latestGuideFrameSnapshot = default;
+            latestHotPathFrameSnapshot = default;
+            nextPerformanceHudRefresh = 0;
             menuPanel.gameObject.SetActive(false);
             resultPanel.gameObject.SetActive(false);
             pauseOverlay.gameObject.SetActive(false);
@@ -1451,6 +1526,7 @@ namespace Gugarhythm
             ClearHoldSound();
             foreach (var note in chart.Notes) note.Grade = JudgmentGrade.Pending;
             BuildHoldRenderState();
+            gpuRibbonRenderer?.ClearHoldStates();
             scoreState.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
             judgmentEvents.Clear();
@@ -1482,6 +1558,51 @@ namespace Gugarhythm
             foreach (var checkpoints in holdCheckpoints.Values)
                 checkpoints.Sort((left, right) => left.Time.CompareTo(right.Time));
             chartRenderIndex = new ChartRenderIndex(chart);
+            BuildGuideRenderCaches();
+        }
+
+        void BuildGuideRenderCaches()
+        {
+            if (!ReferenceEquals(cachedGuideChart, chart))
+            {
+                cachedGuideChart = chart;
+                guideRenderCaches.Clear();
+                foreach (var guide in chart.Guides)
+                {
+                    var cache = new GuideRenderCache(guide);
+                    cache.BuildVisualSpans(chart);
+                    guideRenderCaches.Add(guide, cache);
+                }
+                holdRenderCaches.Clear();
+                foreach (var path in chart.HoldPaths) holdRenderCaches.Add(path, new HoldRenderCache(path, chart));
+            }
+            var pathCapacity = 0;
+            foreach (var cache in guideRenderCaches.Values) pathCapacity += cache.VisualSpanCount;
+            guideBatch?.Prepare(pathCapacity, AdaptiveGuideTessellator.MaxPoints);
+            var holdPathCapacity = chart.FallbackConnectors.Count;
+            foreach (var path in chart.HoldPaths) holdPathCapacity += path.RenderRuns.Count;
+            var holdPointCapacity = Math.Max(ConnectorPathSegments + 2, AdaptiveHoldTessellator.MaxPointsPerRun);
+            holdGreenBatch?.Prepare(holdPathCapacity, holdPointCapacity);
+            holdYellowBatch?.Prepare(holdPathCapacity, holdPointCapacity);
+            missedHoldGreenBatch?.Prepare(holdPathCapacity, holdPointCapacity);
+            missedHoldYellowBatch?.Prepare(holdPathCapacity, holdPointCapacity);
+            if (gpuRibbonRenderer == null || !ReferenceEquals(gpuRibbonRenderer.Chart, chart))
+            {
+                gpuRibbonRenderer?.Dispose();
+                gpuRibbonRenderer = null;
+                if (!GpuRibbonRenderer.TryCreate(chart, guideRenderCaches, guideLayer, connectorLayer,
+                        gameplayStageCanvas, holdGreenConnectorTexture, holdYellowConnectorTexture,
+                        out gpuRibbonRenderer, out gpuRibbonFallbackReason))
+                {
+                    Debug.LogWarning(gpuRibbonFallbackReason);
+                }
+            }
+            var cpuFallback = gpuRibbonRenderer == null;
+            if (guideBatch != null) guideBatch.gameObject.SetActive(cpuFallback);
+            if (holdGreenBatch != null) holdGreenBatch.gameObject.SetActive(cpuFallback);
+            if (holdYellowBatch != null) holdYellowBatch.gameObject.SetActive(cpuFallback);
+            if (missedHoldGreenBatch != null) missedHoldGreenBatch.gameObject.SetActive(cpuFallback);
+            if (missedHoldYellowBatch != null) missedHoldYellowBatch.gameObject.SetActive(cpuFallback);
         }
 
         double CurrentSongTime() => GameplayTiming.ChartTimeAtDsp(
@@ -1700,6 +1821,9 @@ namespace Gugarhythm
         {
             ShowJudgment(judgment.Grade);
             PlayJudgmentSound(judgment);
+            if (judgment.Note != null && judgment.Note.HoldRootIndex >= 0)
+                gpuRibbonRenderer?.SetHoldMissed(judgment.Note.HoldRootIndex,
+                    IsHoldCurrentlyMissed(judgment.Note.HoldRootIndex));
             if (judgment.Grade != JudgmentGrade.Miss)
             {
                 SpawnHitParticle(judgment.Note);
@@ -1790,33 +1914,52 @@ namespace Gugarhythm
 
         void UpdateVisuals(double visualTime)
         {
+            hotPathFrameMetrics.Reset();
+            visualFrameContext.BeginFrame(chart, visualTime);
+            var sectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             UpdateVisualsProfiler.Begin();
             GuidesProfiler.Begin();
 #endif
             renderedPersistentHoldHeads.Clear();
-            foreach (var guide in chart.Guides)
+            if (gpuRibbonRenderer != null)
             {
-                var headApproach = ApproachProgress(guide.Head.Time, visualTime, guide.Head.TimeScaleGroup);
-                var tailApproach = ApproachProgress(guide.Tail.Time, visualTime, guide.Tail.TimeScaleGroup);
-                var headY = ScreenY(PerspectiveProgress(headApproach));
-                var show = headY <= TopY + 8 && HasVisibleDecorationSegment(headApproach, tailApproach);
-                if (!show)
+                gpuRibbonRenderer.UpdateFrame(visualFrameContext, ApproachDuration, CanvasHeight, NearTrackProgress);
+                latestGuideFrameSnapshot = default;
+            }
+            else
+            {
+                guideBatch.BeginFrame();
+                chartRenderIndex.QueryGuides(visualFrameContext, 0, ApproachDuration, visibleGuides);
+                guideRenderMetrics.Reset();
+                guideRenderMetrics.SetCandidateCount(visibleGuides.Count);
+                foreach (var guide in visibleGuides)
                 {
-                    if (guideViews.TryGetValue(guide, out var oldGuide)) ReleaseGuide(guide, oldGuide);
-                    continue;
+                    var clippingStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var cache = guideRenderCaches[guide];
+                    cache.QueryVisibleSpans(visualFrameContext, ApproachDuration, visibleGuideSpans);
+                    hotPathFrameMetrics.Record(HotPathStage.GuideClipping,
+                        MillisecondsBetween(clippingStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+                    var sampleCount = 0;
+                    foreach (var span in visibleGuideSpans)
+                        sampleCount += SetGuidePath(guideBatch, cache, span);
+                    if (sampleCount > 0)
+                        guideRenderMetrics.RecordGuide(sampleCount, sampleCount * 2,
+                            System.Math.Max(0, sampleCount - visibleGuideSpans.Count) * 2);
                 }
-                if (!guideViews.TryGetValue(guide, out var guideLine))
-                {
-                    guideLine = AcquireGuide();
-                    guideViews[guide] = guideLine;
-                    guideLine.color = GuideColor(guide.Color);
-                }
-                SetGuidePath(guideLine, guide, visualTime, headApproach, tailApproach);
+                guideBatch.EndFrame();
+                guideRenderMetrics.SetDirtyCount(guideBatch.LastFrameDirtied ? 1 : 0);
+                guideRenderMetrics.SetMeshBuildMilliseconds(guideBatch.MeshBuildMilliseconds);
+                latestGuideFrameSnapshot = guideRenderMetrics.Snapshot();
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             GuidesProfiler.End();
+#endif
+            var sectionEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            latestGuidesMilliseconds = MillisecondsBetween(sectionStart, sectionEnd);
+            sectionStart = sectionEnd;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             SimLinesProfiler.Begin();
 #endif
             foreach (var simLine in chart.SimLines)
@@ -1863,10 +2006,15 @@ namespace Gugarhythm
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             SimLinesProfiler.End();
+#endif
+            sectionEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            latestSimLinesMilliseconds = MillisecondsBetween(sectionStart, sectionEnd);
+            sectionStart = sectionEnd;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             NotesProfiler.Begin();
 #endif
             renderedNoteIds.Clear();
-            chartRenderIndex.QueryNotes(visualTime, ApproachDuration, ApproachDuration * 2, visibleNotes);
+            chartRenderIndex.QueryNotes(visualFrameContext, ApproachDuration, ApproachDuration * 2, visibleNotes);
             foreach (var note in visibleNotes)
             {
                 var approachProgress = ApproachProgress(note, visualTime);
@@ -1940,56 +2088,56 @@ namespace Gugarhythm
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             NotesProfiler.End();
+#endif
+            sectionEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            latestNotesMilliseconds = MillisecondsBetween(sectionStart, sectionEnd);
+            sectionStart = sectionEnd;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             HoldsProfiler.Begin();
 #endif
-            renderedHoldRuns.Clear();
-            chartRenderIndex.QueryHoldRuns(visualTime, 0, ApproachDuration, visibleHoldRuns);
-            foreach (var run in visibleHoldRuns)
-                if (RenderHoldRun(run, visualTime)) renderedHoldRuns.Add(run);
-
-            holdRunReleaseKeys.Clear();
-            foreach (var pair in holdRunViews)
-                if (!renderedHoldRuns.Contains(pair.Key)) holdRunReleaseKeys.Add(pair.Key);
-            foreach (var run in holdRunReleaseKeys)
-                if (holdRunViews.TryGetValue(run, out var oldRun)) ReleaseHoldRun(run, oldRun);
-
-            foreach (var connector in chart.FallbackConnectors)
+            holdVisualRanges.Clear();
+            if (gpuRibbonRenderer != null)
             {
-                if (!CanRenderLegacyConnector(connector)) continue;
-                var startApproach = ApproachProgress(connector.Start, visualTime);
-                var endApproach = ApproachProgress(connector.End, visualTime);
-                var startScreen = PerspectiveProgress(startApproach);
-                var endScreen = PerspectiveProgress(endApproach);
-                var startY = ScreenY(startScreen);
-                var endY = ScreenY(endScreen);
-                var holdMode = ResolveConnectorRenderMode(connector);
-                var show = startY <= TopY + 8 && (holdMode == HoldConnectorRenderMode.AnchorClipped
-                    ? endApproach < JudgmentBottomApproach
-                    : endY >= NoteExitY);
-                if (!show)
+                chartRenderIndex.QueryHoldRuns(visualFrameContext, 0, ApproachDuration, visibleHoldRuns);
+                foreach (var run in visibleHoldRuns) RenderGpuPersistentHoldHead(run, visualTime);
+            }
+            else
+            {
+                holdGreenBatch.BeginFrame();
+                holdYellowBatch.BeginFrame();
+                missedHoldGreenBatch.BeginFrame();
+                missedHoldYellowBatch.BeginFrame();
+                chartRenderIndex.QueryHoldRuns(visualFrameContext, 0, ApproachDuration, visibleHoldRuns);
+                foreach (var run in visibleHoldRuns)
+                    RenderHoldRun(run, visualTime);
+                foreach (var connector in chart.FallbackConnectors)
                 {
-                    if (connectorViews.TryGetValue(connector, out var old)) ReleaseConnector(connector, old);
-                    continue;
+                    if (!CanRenderLegacyConnector(connector)) continue;
+                    var startApproach = ApproachProgress(connector.Start, visualTime);
+                    var endApproach = ApproachProgress(connector.End, visualTime);
+                    var startScreen = PerspectiveProgress(startApproach);
+                    var endScreen = PerspectiveProgress(endApproach);
+                    var startY = ScreenY(startScreen);
+                    var endY = ScreenY(endScreen);
+                    var holdMode = ResolveConnectorRenderMode(connector);
+                    var show = startY <= TopY + 8 && (holdMode == HoldConnectorRenderMode.AnchorClipped
+                        ? endApproach < JudgmentBottomApproach
+                        : endY >= NoteExitY);
+                    if (!show) continue;
+                    var line = LegacyHoldBatch(connector);
+                    SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
+                    if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
+                        holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root) &&
+                        ShouldRenderPersistentHoldHead(root))
+                    {
+                        var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
+                        RenderPersistentHoldHead(root, connector, headT);
+                    }
                 }
-                if (!connectorViews.TryGetValue(connector, out var line))
-                {
-                    line = AcquireConnector();
-                    connectorViews[connector] = line;
-                    line.texture = connector.Critical ? holdYellowConnectorTexture : holdGreenConnectorTexture;
-                    // The atlas already carries 0.8 center / 0.4 shoulder
-                    // alpha. The reference recording applies a further slide
-                    // opacity of about 0.62, yielding a ~0.5 center opacity.
-                    line.color = new Color(1, 1, 1, .62f);
-                }
-                line.material = IsHoldCurrentlyMissed(connector) ? missedHoldMaterial : null;
-                SetConnectorPath(line, connector, visualTime, startApproach, endApproach, holdMode);
-                if (connector.Start.HoldRootIndex >= 0 && startApproach >= 1f && endApproach <= 1f &&
-                    holdRoots.TryGetValue(connector.Start.HoldRootIndex, out var root) &&
-                    ShouldRenderPersistentHoldHead(root))
-                {
-                    var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
-                    RenderPersistentHoldHead(root, connector, headT);
-                }
+                holdGreenBatch.EndFrame();
+                holdYellowBatch.EndFrame();
+                missedHoldGreenBatch.EndFrame();
+                missedHoldYellowBatch.EndFrame();
             }
             persistentHeadReleaseKeys.Clear();
             foreach (var pair in persistentHoldHeadViews)
@@ -2000,75 +2148,95 @@ namespace Gugarhythm
             HoldsProfiler.End();
             UpdateVisualsProfiler.End();
 #endif
+            latestHoldsMilliseconds = MillisecondsBetween(sectionStart, System.Diagnostics.Stopwatch.GetTimestamp());
+            hotPathFrameMetrics.Record(HotPathStage.TimeScalePositionAt,
+                visualFrameContext.PositionAtMilliseconds, visualFrameContext.PositionAtCallCount);
+            hotPathFrameMetrics.SetTimeScaleSearchSteps(visualFrameContext.PositionAtSearchStepCount);
+            latestHotPathFrameSnapshot = hotPathFrameMetrics.Snapshot();
+        }
+
+        void RenderGpuPersistentHoldHead(HoldRenderRun run, double visualTime)
+        {
+            var path = run?.Path;
+            if (path == null || !holdRoots.TryGetValue(path.RootIndex, out var root) ||
+                !ShouldRenderPersistentHoldHead(root)) return;
+            var group = string.IsNullOrEmpty(run.Start.TimeScaleGroup)
+                ? run.End.TimeScaleGroup : run.Start.TimeScaleGroup;
+            var range = HoldVisualRangeFor(group, visualTime);
+            var nearTime = range.NearTime;
+            if (nearTime < run.Start.Time - 1e-9 || nearTime > run.End.Time + 1e-9) return;
+            RenderPersistentHoldHead(root, path.Evaluator.Evaluate(nearTime));
         }
 
         bool RenderHoldRun(HoldRenderRun run, double visualTime)
         {
             var path = run.Path;
             var group = string.IsNullOrEmpty(run.Start.TimeScaleGroup) ? run.End.TimeScaleGroup : run.Start.TimeScaleGroup;
-            var currentVisualPosition = chart.VisualPosition(visualTime, group);
-            var nearTime = chart.TimeAtVisualPosition(currentVisualPosition, group);
-            var farTime = chart.TimeAtVisualPosition(currentVisualPosition + ApproachDuration, group);
-            var firstVisibleTime = Math.Max(run.Start.Time, Math.Min(nearTime, farTime));
-            var lastVisibleTime = Math.Min(run.End.Time, Math.Max(nearTime, farTime));
+            var range = HoldVisualRangeFor(group, visualTime);
+            var firstVisibleTime = Math.Max(run.Start.Time, Math.Min(range.NearTime, range.FarTime));
+            var lastVisibleTime = Math.Min(run.End.Time, Math.Max(range.NearTime, range.FarTime));
             if (lastVisibleTime < firstVisibleTime - 1e-9)
-            {
-                if (holdRunViews.TryGetValue(run, out var old)) ReleaseHoldRun(run, old);
                 return false;
-            }
 
             projectingHoldPath = path;
+            projectingHoldCache = holdRenderCaches[path];
             projectingHoldVisualTime = visualTime;
-            holdTessellator.BuildVisibleRun(run, firstVisibleTime, lastVisibleTime, holdPointProjector, holdTessellationPoints);
+            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            holdTessellator.BuildProjected(run, firstVisibleTime, lastVisibleTime, holdPointProjector, holdTessellationPoints);
+            hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
+                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()));
             if (holdTessellationPoints.Count < 2)
-            {
-                if (holdRunViews.TryGetValue(run, out var old)) ReleaseHoldRun(run, old);
                 return false;
-            }
-            if (!holdRunViews.TryGetValue(run, out var line))
-            {
-                line = AcquireConnector();
-                holdRunViews[run] = line;
-                line.texture = run.Critical ? holdYellowConnectorTexture : holdGreenConnectorTexture;
-                line.color = new Color(1, 1, 1, .62f);
-            }
-            line.material = IsHoldCurrentlyMissed(path.RootIndex) ? missedHoldMaterial : null;
+            var line = HoldRunBatch(run);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             HoldMeshSubmissionProfiler.Begin();
 #endif
+            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
             line.BeginPath(holdTessellationPoints.Count);
             for (var index = 0; index < holdTessellationPoints.Count; index++)
             {
                 var point = holdTessellationPoints[index];
-                var projected = ProjectHoldPoint(point);
-                var segment = path.Segments[point.Sample.SegmentIndex];
-                var segmentGroup = string.IsNullOrEmpty(segment.Start.TimeScaleGroup)
-                    ? segment.End.TimeScaleGroup : segment.Start.TimeScaleGroup;
-                var approach = ApproachProgress(point.Time, visualTime, segmentGroup);
-                var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
-                var bodyWidth = LaneWidth(point.Sample.Lane, point.Sample.Size, screenProgress);
-                var width = HoldConnectorLaneWidth(bodyWidth);
-                line.SetPathPoint(index, projected, width);
+                line.SetPathPoint(index, point.Position, point.Width);
             }
             line.EndPath();
+            hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
+                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), holdTessellationPoints.Count);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             HoldMeshSubmissionProfiler.End();
 #endif
 
-            if (firstVisibleTime <= nearTime + 1e-9 && nearTime <= lastVisibleTime + 1e-9 &&
+            if (firstVisibleTime <= range.NearTime + 1e-9 && range.NearTime <= lastVisibleTime + 1e-9 &&
                 holdRoots.TryGetValue(path.RootIndex, out var root) && ShouldRenderPersistentHoldHead(root))
-                RenderPersistentHoldHead(root, path.Evaluator.Evaluate(nearTime));
+                RenderPersistentHoldHead(root, path.Evaluator.Evaluate(range.NearTime));
             return true;
         }
 
-        Vector2 ProjectHoldPoint(HoldTessellationPoint point)
+        HoldVisualRange HoldVisualRangeFor(string group, double visualTime)
         {
+            var key = string.IsNullOrEmpty(group) ? chart.DefaultTimeScaleGroup ?? string.Empty : group;
+            if (holdVisualRanges.TryGetValue(key, out var range)) return range;
+            var position = visualFrameContext.CurrentPosition(key);
+            range = new HoldVisualRange(chart.TimeAtVisualPosition(position, key),
+                chart.TimeAtVisualPosition(position + ApproachDuration, key));
+            holdVisualRanges.Add(key, range);
+            return range;
+        }
+
+        HoldProjectedPoint ProjectHoldPoint(HoldTessellationPoint point)
+        {
+            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
             var segment = projectingHoldPath.Segments[point.Sample.SegmentIndex];
             var group = string.IsNullOrEmpty(segment.Start.TimeScaleGroup)
                 ? segment.End.TimeScaleGroup : segment.Start.TimeScaleGroup;
-            var approach = ApproachProgress(point.Time, projectingHoldVisualTime, group);
+            var visualPosition = projectingHoldCache.TryVisualPosition(point, out var cachedPosition)
+                ? cachedPosition : visualFrameContext.PositionAt(point.Time, group);
+            var approach = visualFrameContext.Approach(visualPosition, group, ApproachDuration);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
-            return new Vector2(X(point.Sample.Lane, screenProgress), ScreenY(screenProgress));
+            var projected = new Vector2(X(point.Sample.Lane, screenProgress), ScreenY(screenProgress));
+            var width = HoldConnectorLaneWidth(LaneWidth(point.Sample.Lane, point.Sample.Size, screenProgress));
+            hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
+                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            return new HoldProjectedPoint(point, projected, width);
         }
 
         void RenderPersistentHoldHead(RuntimeNote root, RuntimeConnector connector, float progress)
@@ -2145,64 +2313,39 @@ namespace Gugarhythm
             return latestGrade == JudgmentGrade.Miss;
         }
 
-        void SetGuidePath(TaperedConnectorGraphic line, RuntimeGuide guide, double visualTime, float headApproach, float tailApproach)
+        int SetGuidePath(GuideBatchGraphic batch, GuideRenderCache cache, GuideVisualSpan span)
         {
-            var approachSpan = headApproach - tailApproach;
-            var nearT = approachSpan <= 1e-5f ? 0 : FindGuideProgress(guide, visualTime, 1f, headApproach, tailApproach);
-            var farT = approachSpan <= 1e-5f ? 1 : FindGuideProgress(guide, visualTime, 0f, headApproach, tailApproach);
-            var sampleCount = BuildStablePathSamples(nearT, farT);
-            line.BeginPath(sampleCount);
-            for (var index = 0; index < sampleCount; index++)
+            projectingGuideCache = cache;
+            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            guideTessellator.BuildProjected(cache, span, guideSampleProjector, guideTessellationPoints);
+            hotPathFrameMetrics.Record(HotPathStage.GuideTessellation,
+                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            batch.BeginPath(GuideColor(cache.Color), guideTessellationPoints.Count);
+            for (var index = 0; index < guideTessellationPoints.Count; index++)
             {
-                var t = connectorPathSamples[index];
-                var lane = InterpolateGuide(guide, t, point => point.Lane);
-                var size = Mathf.Max(.01f, InterpolateGuide(guide, t, point => point.Size));
-                var approach = GuideApproach(guide, visualTime, t);
-                var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
-                var alpha = Mathf.Lerp(guide.HeadOpacity, guide.TailOpacity, t);
-                line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), LaneWidth(lane, size, screenProgress), alpha);
+                var projected = guideTessellationPoints[index];
+                batch.SetPathPoint(index, projected.Center, projected.Width, projected.Alpha);
             }
-            line.EndPath();
+            batch.EndPath();
+            hotPathFrameMetrics.Record(HotPathStage.GuideMeshWrite,
+                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), guideTessellationPoints.Count);
+            return guideTessellationPoints.Count;
         }
 
-        float FindGuideProgress(RuntimeGuide guide, double visualTime, float target, float headApproach, float tailApproach)
+        GuideProjectedPoint ProjectGuideSample(GuideRenderSample sample)
         {
-            if (target >= headApproach) return 0;
-            if (target <= tailApproach) return 1;
-            var low = 0f;
-            var high = 1f;
-            for (var iteration = 0; iteration < 20; iteration++)
-            {
-                var middle = (low + high) * .5f;
-                if (GuideApproach(guide, visualTime, middle) > target) low = middle;
-                else high = middle;
-            }
-            return (low + high) * .5f;
-        }
-
-        float GuideApproach(RuntimeGuide guide, double visualTime, float progress)
-        {
-            var time = guide.Head.Time + (guide.Tail.Time - guide.Head.Time) * progress;
-            var group = string.IsNullOrEmpty(guide.Head.TimeScaleGroup)
-                ? guide.Tail.TimeScaleGroup : guide.Head.TimeScaleGroup;
-            return ApproachProgress(time, visualTime, group);
-        }
-
-        static float InterpolateGuide(RuntimeGuide guide, float progress, Func<RuntimeGuidePoint, float> value)
-        {
-            if (guide.Ease != -1)
-                return Mathf.Lerp(value(guide.Head), value(guide.Tail), EaseConnector(progress, guide.Ease));
-
-            // Spline guides use the surrounding start/end points as tangents.
-            // They are decoration geometry only and may intentionally leave the
-            // central lane range, so do not clamp the resulting lane value.
-            var p0 = value(guide.Start);
-            var p1 = value(guide.Head);
-            var p2 = value(guide.Tail);
-            var p3 = value(guide.End);
-            var t2 = progress * progress;
-            var t3 = t2 * progress;
-            return .5f * ((2 * p1) + (-p0 + p2) * progress + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 + (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var visualPosition = sample.HasVisualPosition ? sample.VisualPosition :
+                visualFrameContext.PositionAt(sample.Time, projectingGuideCache.TimeScaleGroup);
+            var approach = visualFrameContext.Approach(visualPosition, projectingGuideCache.TimeScaleGroup, ApproachDuration);
+            var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
+            var center = new Vector2(X(sample.Lane, screenProgress), ScreenY(screenProgress));
+            var projected = new GuideProjectedPoint(sample.Progress, center,
+                LaneWidth(sample.Lane, sample.Size, screenProgress), sample.Alpha);
+            hotPathFrameMetrics.Record(HotPathStage.GuideProjection,
+                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            return projected;
         }
 
         static Color GuideColor(int color) => color switch
@@ -2222,17 +2365,27 @@ namespace Gugarhythm
             var approachSpan = startApproach - endApproach;
             if (approachSpan <= 1e-5f)
             {
+                var degenerateTessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
+                    MillisecondsBetween(degenerateTessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()), 2);
+                var degenerateMeshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
                 line.BeginPath(2);
                 SetConnectorPoint(line, 0, connector, 0, startApproach);
                 SetConnectorPoint(line, 1, connector, 1, endApproach);
                 line.EndPath();
+                hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
+                    MillisecondsBetween(degenerateMeshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), 2);
                 return;
             }
 
+            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
             var nearApproach = holdMode == HoldConnectorRenderMode.AnchorClipped ? 1f : NearTrackApproach;
             var nearT = FindConnectorProgress(connector, visualTime, nearApproach, startApproach, endApproach);
             var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
+            hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
+                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
+            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
             line.BeginPath(sampleCount);
             for (var index = 0; index < sampleCount; index++)
             {
@@ -2240,6 +2393,38 @@ namespace Gugarhythm
                 SetConnectorPoint(line, index, connector, t, ConnectorApproach(connector, visualTime, t));
             }
             line.EndPath();
+            hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
+                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
+        }
+
+        void SetConnectorPath(HoldBatchGraphic batch, RuntimeConnector connector, double visualTime, float startApproach,
+            float endApproach, HoldConnectorRenderMode holdMode)
+        {
+            var approachSpan = startApproach - endApproach;
+            var nearT = 0f;
+            var farT = 1f;
+            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            if (approachSpan > 1e-5f)
+            {
+                var nearApproach = holdMode == HoldConnectorRenderMode.AnchorClipped ? 1f : NearTrackApproach;
+                nearT = FindConnectorProgress(connector, visualTime, nearApproach, startApproach, endApproach);
+                farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
+            }
+            var sampleCount = approachSpan <= 1e-5f ? 2 : BuildStablePathSamples(nearT, farT);
+            hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
+                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
+            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            batch.BeginPath(sampleCount);
+            for (var index = 0; index < sampleCount; index++)
+            {
+                var progress = approachSpan <= 1e-5f ? index : connectorPathSamples[index];
+                var approach = approachSpan <= 1e-5f ? (index == 0 ? startApproach : endApproach) :
+                    ConnectorApproach(connector, visualTime, progress);
+                SetConnectorPoint(batch, index, connector, progress, approach);
+            }
+            batch.EndPath();
+            hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
+                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
         }
 
         float FindConnectorProgress(RuntimeConnector connector, double visualTime, float target, float startApproach, float endApproach)
@@ -2281,14 +2466,34 @@ namespace Gugarhythm
             return count;
         }
 
-        static void SetConnectorPoint(TaperedConnectorGraphic line, int index, RuntimeConnector connector, float timeProgress, float approachProgress)
+        void SetConnectorPoint(TaperedConnectorGraphic line, int index, RuntimeConnector connector, float timeProgress, float approachProgress)
         {
+            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
             var laneProgress = EaseConnector(timeProgress, connector.Ease);
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
             var bodyWidth = LaneWidth(lane, size, screenProgress);
-            line.SetPathPoint(index, new Vector2(X(lane, screenProgress), ScreenY(screenProgress)), HoldConnectorLaneWidth(bodyWidth));
+            var position = new Vector2(X(lane, screenProgress), ScreenY(screenProgress));
+            var width = HoldConnectorLaneWidth(bodyWidth);
+            hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
+                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            line.SetPathPoint(index, position, width);
+        }
+
+        void SetConnectorPoint(HoldBatchGraphic batch, int index, RuntimeConnector connector, float timeProgress,
+            float approachProgress)
+        {
+            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var laneProgress = EaseConnector(timeProgress, connector.Ease);
+            var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
+            var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
+            var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
+            var position = new Vector2(X(lane, screenProgress), ScreenY(screenProgress));
+            var width = HoldConnectorLaneWidth(LaneWidth(lane, size, screenProgress));
+            hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
+                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            batch.SetPathPoint(index, position, width);
         }
 
         static float EaseConnector(float progress, int ease) => ease switch
@@ -2303,8 +2508,11 @@ namespace Gugarhythm
         float ApproachProgress(RuntimeNote note, double visualTime) =>
             ApproachProgress(note.Time, visualTime, note.TimeScaleGroup);
 
-        float ApproachProgress(double noteTime, double visualTime, string timeScaleGroup) =>
-            1f - (float)((chart.VisualPosition(noteTime, timeScaleGroup) - chart.VisualPosition(visualTime, timeScaleGroup)) / ApproachDuration);
+        float ApproachProgress(double noteTime, double visualTime, string timeScaleGroup)
+        {
+            var notePosition = visualFrameContext.PositionAt(noteTime, timeScaleGroup);
+            return visualFrameContext.Approach(notePosition, timeScaleGroup, ApproachDuration);
+        }
 
         // Perspective projection of constant-depth motion. The derivatives at
         // both boundaries are continued linearly to keep off-stage clipping
@@ -2645,7 +2853,7 @@ namespace Gugarhythm
             Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
             backgroundLayer = RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
-            stage.gameObject.AddComponent<Canvas>();
+            gameplayStageCanvas = stage.gameObject.AddComponent<Canvas>();
             var trackObject = new GameObject("Track Depth", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var trackRect = trackObject.GetComponent<RectTransform>(); trackRect.SetParent(stage, false); Fill(trackRect);
             var trackGraphic = trackObject.GetComponent<TaperedConnectorGraphic>(); trackGraphic.raycastTarget = false; trackGraphic.color = new Color(0, 0, .035f, .72f);
@@ -2668,12 +2876,20 @@ namespace Gugarhythm
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
             BuildInputLaneFeedback(stage);
             guideLayer = Layer("Decoration Guides", stage);
+            var guideBatchObject = new GameObject("Decoration Guide Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(GuideBatchGraphic));
+            var guideBatchRect = guideBatchObject.GetComponent<RectTransform>(); guideBatchRect.SetParent(guideLayer, false); Fill(guideBatchRect);
+            guideBatch = guideBatchObject.GetComponent<GuideBatchGraphic>(); guideBatch.raycastTarget = false; guideBatch.color = Color.white;
             connectorLayer = Layer("Hold Connectors", stage);
+            holdGreenBatch = CreateHoldBatch("Legacy Hold Green Batch", holdGreenConnectorTexture, null);
+            holdYellowBatch = CreateHoldBatch("Legacy Hold Yellow Batch", holdYellowConnectorTexture, null);
+            missedHoldGreenBatch = CreateHoldBatch("Legacy Missed Hold Green Batch", holdGreenConnectorTexture, missedHoldMaterial);
+            missedHoldYellowBatch = CreateHoldBatch("Legacy Missed Hold Yellow Batch", holdYellowConnectorTexture, missedHoldMaterial);
             simLineLayer = Layer("Synchronization Lines", stage);
             persistentHoldHeadLayer = Layer("Persistent Hold Heads", stage);
             noteLayer = Layer("Notes", stage);
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
+            BuildPerformanceHud(safeAreaRoot);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
             BuildLatencyCalibration(safeAreaRoot);
@@ -2698,6 +2914,97 @@ namespace Gugarhythm
             gameplayLoadingLabel.rectTransform.sizeDelta = new Vector2(560, 120);
             gameplayLoadingLabel.rectTransform.anchoredPosition = new Vector2(0, 8);
             gameplayLoadingOverlay.gameObject.SetActive(false);
+        }
+
+        void BuildPerformanceHud(RectTransform root)
+        {
+            performanceHudPanel = Panel("Performance HUD", root, new Color(.015f, .03f, .08f, .88f),
+                new Vector2(570, 422), Vector2.zero);
+            PinToAnchor(performanceHudPanel, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -112));
+            Outline(performanceHudPanel.gameObject, new Color(.25f, .85f, 1f, .82f), 2);
+            performanceHudPanel.GetComponent<Image>().raycastTarget = false;
+            performanceHudLabel = Label("PERFORMANCE\n等待遊戲資料…", performanceHudPanel, 16);
+            performanceHudLabel.alignment = TextAnchor.UpperLeft;
+            performanceHudLabel.horizontalOverflow = HorizontalWrapMode.Wrap;
+            performanceHudLabel.verticalOverflow = VerticalWrapMode.Overflow;
+            performanceHudLabel.rectTransform.anchorMin = Vector2.zero;
+            performanceHudLabel.rectTransform.anchorMax = Vector2.one;
+            performanceHudLabel.rectTransform.offsetMin = new Vector2(14, 10);
+            performanceHudLabel.rectTransform.offsetMax = new Vector2(-12, -10);
+        }
+
+        void UpdatePerformanceHud()
+        {
+            if (performanceHudPanel == null || !performanceHudPanel.gameObject.activeInHierarchy) return;
+            if (!running || paused || chart == null || judgmentEngine == null) return;
+
+            performanceSamples.AddFrame(Time.unscaledDeltaTime);
+            frameBudgetCounter.AddFrame(Time.unscaledDeltaTime);
+            if (Time.unscaledTime < nextPerformanceHudRefresh) return;
+            nextPerformanceHudRefresh = Time.unscaledTime + .25f;
+            FrameTimingManager.CaptureFrameTimings();
+            if (FrameTimingManager.GetLatestTimings(1, frameTimingBuffer) > 0)
+            {
+                latestCpuFrameTimeMs = frameTimingBuffer[0].cpuFrameTime;
+                latestGpuFrameTimeMs = frameTimingBuffer[0].gpuFrameTime;
+            }
+            var snapshot = performanceSamples.Snapshot();
+            if (snapshot.SampleCount == 0) return;
+            var timings = gameplayTimingSamples.Snapshot();
+            var hotPathTimings = hotPathTimingSamples.Snapshot();
+            var guideFrame = latestGuideFrameSnapshot;
+            var hotPathFrame = latestHotPathFrameSnapshot;
+
+            var refreshRate = Screen.currentResolution.refreshRateRatio.value;
+            var gcBytes = gcAllocationRecorder.Valid ? gcAllocationRecorder.LastValue : -1;
+            var ribbonStatus = gpuRibbonRenderer != null
+                ? $"GPU RIBBON C {gpuRibbonRenderer.ChunkCount} V {gpuRibbonRenderer.VertexCount} " +
+                  $"B {gpuRibbonRenderer.StaticBuildCount} CACHE {(gpuRibbonRenderer.CacheHit ? "HIT" : "MISS")}"
+                : $"CPU RIBBON {gpuRibbonFallbackReason}";
+            performanceHudLabel.text =
+                $"FPS  {snapshot.CurrentFps:0.0}   AVG  {snapshot.AverageFps:0.0}   MIN  {snapshot.MinimumFps:0.0}\n" +
+                $"FRAME  {1000f / snapshot.CurrentFps:0.00} ms   CPU  {FormatMilliseconds(latestCpuFrameTimeMs)}\n" +
+                $"GPU  {FormatMilliseconds(latestGpuFrameTimeMs)}   GC  {FormatBytes(gcBytes)}\n" +
+                "10S MAX/P95/P99 ms\n" +
+                $"NOTE  {FormatTimingTriplet(timings.Notes)}   HOLD  {FormatTimingTriplet(timings.Holds)}\n" +
+                $"GUIDE {FormatTimingTriplet(timings.Guides)}   SIM   {FormatTimingTriplet(timings.SimLines)}\n" +
+                ribbonStatus + "\n" +
+                $"G {guideFrame.CandidateCount}/{guideFrame.VisibleCount}  S {guideFrame.SampleCount}  " +
+                $"V {guideFrame.VertexCount}  T {guideFrame.TriangleCount}  D {guideFrame.DirtyCount}  M {guideFrame.MeshBuildMilliseconds:0.00}\n" +
+                $"TS C/S {hotPathFrame.TimeScalePositionAt.Calls}/{hotPathFrame.TimeScaleSearchSteps} " +
+                $"{FormatHotPathTiming(hotPathFrame.TimeScalePositionAt, hotPathTimings.TimeScalePositionAt)}\n" +
+                $"G C/T/P/W  {FormatHotPathTiming(hotPathFrame.GuideClipping, hotPathTimings.GuideClipping)}  " +
+                $"{FormatHotPathTiming(hotPathFrame.GuideTessellation, hotPathTimings.GuideTessellation)}\n" +
+                $"          {FormatHotPathTiming(hotPathFrame.GuideProjection, hotPathTimings.GuideProjection)}  " +
+                $"{FormatHotPathTiming(hotPathFrame.GuideMeshWrite, hotPathTimings.GuideMeshWrite)}\n" +
+                $"H T/P/W    {FormatHotPathTiming(hotPathFrame.HoldTessellation, hotPathTimings.HoldTessellation)}  " +
+                $"{FormatHotPathTiming(hotPathFrame.HoldProjection, hotPathTimings.HoldProjection)}\n" +
+                $"          {FormatHotPathTiming(hotPathFrame.HoldMeshWrite, hotPathTimings.HoldMeshWrite)}\n" +
+                $"OTHER {FormatTimingTriplet(timings.Other)}   GAME  {FormatTimingTriplet(timings.Total)}\n" +
+                $">8.33 {frameBudgetCounter.Over120HzBudget}  >16.67 {frameBudgetCounter.Over60HzBudget}  >33.33 {frameBudgetCounter.Over30HzBudget}\n" +
+                $"{Screen.width} × {Screen.height}   @ {refreshRate:0.##} Hz   {snapshot.SampleCount} frames\n" +
+                BuildIdentity.Display;
+        }
+
+        static string FormatMilliseconds(double value) =>
+            double.IsFinite(value) && value > 0 ? $"{value:0.00} ms" : "--";
+
+        static string FormatTimingTriplet(TimingSnapshot value) => value.SampleCount > 0
+            ? $"{value.MaximumMilliseconds:0.00}/{value.P95Milliseconds:0.00}/{value.P99Milliseconds:0.00}"
+            : "--/--/--";
+
+        static string FormatHotPathTiming(HotPathStageSnapshot current, TimingSnapshot timing) =>
+            $"{current.Calls}:{current.ElapsedMilliseconds:0.00}/{timing.P95Milliseconds:0.00}/{timing.P99Milliseconds:0.00}";
+
+        static float MillisecondsBetween(long startTimestamp, long endTimestamp) =>
+            (float)((endTimestamp - startTimestamp) * 1000d / System.Diagnostics.Stopwatch.Frequency);
+
+        static string FormatBytes(long bytes)
+        {
+            if (bytes < 0) return "--";
+            if (bytes >= 1024 * 1024) return $"{bytes / (1024d * 1024d):0.00} MB";
+            if (bytes >= 1024) return $"{bytes / 1024d:0.0} KB";
+            return $"{bytes} B";
         }
 
         void BuildInputLaneFeedback(RectTransform root)
@@ -3805,6 +4112,33 @@ namespace Gugarhythm
             graphic.drawGlow = false; graphic.drawEdges = false;
             graphic.fillAlphaScale = 1; graphic.fillAlphaLimit = 1;
             graphic.sourceUvInset = HoldConnectorVisibleUvInset;
+        }
+
+        HoldBatchGraphic CreateHoldBatch(string name, Texture2D texture, Material material)
+        {
+            var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(HoldBatchGraphic));
+            var rect = go.GetComponent<RectTransform>(); rect.SetParent(connectorLayer, false); Fill(rect);
+            var batch = go.GetComponent<HoldBatchGraphic>();
+            batch.raycastTarget = false;
+            batch.texture = texture;
+            batch.material = material;
+            batch.color = new Color(1, 1, 1, .62f);
+            batch.sourceUvInset = HoldConnectorVisibleUvInset;
+            return batch;
+        }
+
+        HoldBatchGraphic LegacyHoldBatch(RuntimeConnector connector)
+        {
+            var missed = IsHoldCurrentlyMissed(connector);
+            if (connector.Critical) return missed ? missedHoldYellowBatch : holdYellowBatch;
+            return missed ? missedHoldGreenBatch : holdGreenBatch;
+        }
+
+        HoldBatchGraphic HoldRunBatch(HoldRenderRun run)
+        {
+            var missed = IsHoldCurrentlyMissed(run.Path.RootIndex);
+            if (run.Critical) return missed ? missedHoldYellowBatch : holdYellowBatch;
+            return missed ? missedHoldGreenBatch : holdGreenBatch;
         }
         static void ConfigureGuideGraphic(TaperedConnectorGraphic graphic)
         {

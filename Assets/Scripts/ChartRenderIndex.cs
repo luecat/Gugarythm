@@ -10,6 +10,8 @@ namespace Gugarhythm
         readonly Dictionary<string, Bucket<HoldRenderRun>> holdRuns = new(StringComparer.Ordinal);
         readonly Dictionary<string, Bucket<RuntimeSimLine>> simLines = new(StringComparer.Ordinal);
         readonly Dictionary<string, Bucket<RuntimeGuide>> guides = new(StringComparer.Ordinal);
+        readonly Dictionary<RuntimeGuide, int> guideOrder = new();
+        readonly Comparison<RuntimeGuide> guideOrderComparison;
 
         static readonly Comparison<RuntimeNote> NoteOrder = (left, right) =>
             left.Time != right.Time ? left.Time.CompareTo(right.Time) : left.Index.CompareTo(right.Index);
@@ -24,6 +26,7 @@ namespace Gugarhythm
         public ChartRenderIndex(RuntimeChart chart)
         {
             this.chart = chart ?? throw new ArgumentNullException(nameof(chart));
+            guideOrderComparison = (left, right) => guideOrder[left].CompareTo(guideOrder[right]);
             foreach (var note in chart.Notes)
             {
                 if (!note.Visible) continue;
@@ -46,9 +49,12 @@ namespace Gugarhythm
                 var last = chart.VisualPosition(simLine.B?.Time ?? 0, group);
                 Add(simLines, group, new Entry<RuntimeSimLine>(Math.Min(first, last), Math.Max(first, last), simLine));
             }
-            foreach (var guide in chart.Guides)
+            for (var index = 0; index < chart.Guides.Count; index++)
             {
-                var group = Group(guide.Head.TimeScaleGroup);
+                var guide = chart.Guides[index];
+                guideOrder[guide] = index;
+                var group = Group(string.IsNullOrEmpty(guide.Head.TimeScaleGroup)
+                    ? guide.Tail.TimeScaleGroup : guide.Head.TimeScaleGroup);
                 var first = chart.VisualPosition(guide.Head.Time, group);
                 var last = chart.VisualPosition(guide.Tail.Time, group);
                 Add(guides, group, new Entry<RuntimeGuide>(Math.Min(first, last), Math.Max(first, last), guide));
@@ -65,17 +71,41 @@ namespace Gugarhythm
             output.Sort(NoteOrder);
         }
 
+        public void QueryNotes(VisualFrameContext frame, double behind, double ahead, List<RuntimeNote> output)
+        {
+            Query(notes, frame, behind, ahead, false, output);
+            output.Sort(NoteOrder);
+        }
+
         public void QueryHoldRuns(double visualTime, double behind, double ahead, List<HoldRenderRun> output)
         {
             Query(holdRuns, visualTime, behind, ahead, true, output);
             output.Sort(HoldOrder);
         }
 
+        public void QueryHoldRuns(VisualFrameContext frame, double behind, double ahead, List<HoldRenderRun> output)
+        {
+            Query(holdRuns, frame, behind, ahead, true, output);
+            output.Sort(HoldOrder);
+        }
+
         public void QuerySimLines(double visualTime, double behind, double ahead, List<RuntimeSimLine> output) =>
             Query(simLines, visualTime, behind, ahead, true, output);
 
-        public void QueryGuides(double visualTime, double behind, double ahead, List<RuntimeGuide> output) =>
+        public void QuerySimLines(VisualFrameContext frame, double behind, double ahead, List<RuntimeSimLine> output) =>
+            Query(simLines, frame, behind, ahead, true, output);
+
+        public void QueryGuides(double visualTime, double behind, double ahead, List<RuntimeGuide> output)
+        {
             Query(guides, visualTime, behind, ahead, true, output);
+            output.Sort(guideOrderComparison);
+        }
+
+        public void QueryGuides(VisualFrameContext frame, double behind, double ahead, List<RuntimeGuide> output)
+        {
+            Query(guides, frame, behind, ahead, true, output);
+            output.Sort(guideOrderComparison);
+        }
 
         string Group(string group) => string.IsNullOrEmpty(group) ? chart.DefaultTimeScaleGroup ?? string.Empty : group;
 
@@ -100,6 +130,21 @@ namespace Gugarhythm
             foreach (var pair in buckets)
             {
                 var current = chart.VisualPosition(visualTime, pair.Key);
+                pair.Value.Query(current - behind, current + ahead, intervals, output);
+            }
+        }
+
+        void Query<T>(Dictionary<string, Bucket<T>> buckets, VisualFrameContext frame, double behind, double ahead,
+            bool intervals, List<T> output)
+        {
+            if (frame == null) throw new ArgumentNullException(nameof(frame));
+            if (output == null) throw new ArgumentNullException(nameof(output));
+            output.Clear();
+            behind = Math.Max(0, behind);
+            ahead = Math.Max(0, ahead);
+            foreach (var pair in buckets)
+            {
+                var current = frame.CurrentPosition(pair.Key);
                 pair.Value.Query(current - behind, current + ahead, intervals, output);
             }
         }

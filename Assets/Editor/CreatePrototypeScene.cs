@@ -5,6 +5,8 @@ using UnityEditor.SceneManagement;
 using UnityEditor.Build;
 using UnityEngine;
 using UnityEngine.SceneManagement;
+using System;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 
@@ -17,6 +19,7 @@ public static class CreatePrototypeScene
     const string GameplayScenePath = "Assets/Scenes/RhythmPrototype.unity";
     const string ApplicationIconPath = "Assets/Art/AppIcon/gugarhythm-icon.png";
     const string SplashScreenPath = "Assets/Art/SplashScreen/gugarhythm-splash.png";
+    const string BuildIdentityPath = "Assets/Resources/BuildIdentity.txt";
 
     [MenuItem("GUGArhythm/Open Rhythm Prototype")]
     public static void Open()
@@ -98,6 +101,7 @@ public static class CreatePrototypeScene
     {
         EnsurePlayerScenes();
         EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.Android, BuildTarget.Android);
+        WriteBuildIdentity();
         ConfigureApplicationIcon();
         ConfigureSplashScreen();
         PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarythm");
@@ -120,6 +124,85 @@ public static class CreatePrototypeScene
         });
         if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
             throw new System.Exception($"Android build failed: {report.summary.result}");
+    }
+
+    [MenuItem("GUGArhythm/Build iOS Development")]
+    public static void BuildIosDevelopment()
+    {
+        EnsurePlayerScenes();
+        EditorUserBuildSettings.SwitchActiveBuildTarget(BuildTargetGroup.iOS, BuildTarget.iOS);
+        WriteBuildIdentity();
+        ConfigureApplicationIcon();
+        ConfigureSplashScreen();
+        PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.iOS, "com.luecat.gugarythm");
+        PlayerSettings.SetScriptingBackend(NamedBuildTarget.iOS, ScriptingImplementation.IL2CPP);
+        PlayerSettings.productName = "GUGArhythm";
+        PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
+        PlayerSettings.allowedAutorotateToPortrait = false;
+        PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
+        PlayerSettings.allowedAutorotateToLandscapeLeft = false;
+        PlayerSettings.allowedAutorotateToLandscapeRight = false;
+        var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
+        {
+            scenes = PlayerBuildScenePaths(),
+            locationPathName = Path.Combine("Builds", "iOS"),
+            target = BuildTarget.iOS,
+            options = BuildOptions.Development | BuildOptions.AllowDebugging,
+        });
+        if (report.summary.result != UnityEditor.Build.Reporting.BuildResult.Succeeded)
+            throw new Exception($"iOS development build failed: {report.summary.result}");
+    }
+
+    static void WriteBuildIdentity()
+    {
+        var revision = Environment.GetEnvironmentVariable("GUGARYTHM_SOURCE_REVISION");
+        if (string.IsNullOrWhiteSpace(revision)) revision = SourceRevision();
+        var contents = string.Join("\n", PlayerSettings.bundleVersion, PlayerSettings.iOS.buildNumber, revision) + "\n";
+        File.WriteAllText(BuildIdentityPath, contents);
+        AssetDatabase.ImportAsset(BuildIdentityPath, ImportAssetOptions.ForceSynchronousImport);
+    }
+
+    static string SourceRevision()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "rev-parse --short HEAD",
+                WorkingDirectory = Directory.GetCurrentDirectory(),
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (process == null) return "unknown";
+            var revision = process.StandardOutput.ReadToEnd().Trim();
+            process.WaitForExit();
+            if (process.ExitCode != 0 || string.IsNullOrEmpty(revision)) return "unknown";
+            return HasWorkingTreeChanges() ? $"{revision}-dirty" : revision;
+        }
+        catch { return "unknown"; }
+    }
+
+    static bool HasWorkingTreeChanges()
+    {
+        try
+        {
+            using var process = Process.Start(new ProcessStartInfo
+            {
+                FileName = "git",
+                Arguments = "status --porcelain",
+                WorkingDirectory = Directory.GetCurrentDirectory(),
+                RedirectStandardOutput = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            });
+            if (process == null) return true;
+            var changes = process.StandardOutput.ReadToEnd();
+            process.WaitForExit();
+            return process.ExitCode != 0 || !string.IsNullOrWhiteSpace(changes);
+        }
+        catch { return true; }
     }
 
     static void ConfigureApplicationIcon()
