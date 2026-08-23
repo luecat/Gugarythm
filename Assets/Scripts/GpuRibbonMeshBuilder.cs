@@ -54,28 +54,47 @@ namespace Gugarhythm
                 List<RibbonPoint> points)
             {
                 if (points.Count < 2) return;
-                var requiredVertices = points.Count * 2;
-                if (active && (kind != nextKind || vertices.Count + requiredVertices > MaximumVerticesPerChunk))
-                    Flush();
-                if (!active)
+                var sourceIndex = 0;
+                while (sourceIndex < points.Count - 1)
                 {
-                    active = true;
-                    kind = nextKind;
-                }
+                    if (active && kind != nextKind) Flush();
+                    if (!active)
+                    {
+                        active = true;
+                        kind = nextKind;
+                    }
 
+                    var availablePoints = (MaximumVerticesPerChunk - vertices.Count) / 2;
+                    if (availablePoints < 2)
+                    {
+                        Flush();
+                        continue;
+                    }
+
+                    var chunkPointCount = Math.Min(points.Count - sourceIndex, availablePoints);
+                    AppendPathPart(points, sourceIndex, chunkPointCount, nextKind, groupIndex, auxiliaryIndex);
+                    sourceIndex += chunkPointCount - 1;
+                }
+            }
+
+            void AppendPathPart(List<RibbonPoint> points, int sourceStart, int sourceCount,
+                GpuRibbonKind nextKind, int groupIndex, int auxiliaryIndex)
+            {
                 var firstVertex = vertices.Count;
-                for (var index = 0; index < points.Count; index++)
+                var denominator = points.Count - 1;
+                for (var localIndex = 0; localIndex < sourceCount; localIndex++)
                 {
-                    var point = points[index];
-                    var textureV = index / (float)(points.Count - 1);
+                    var sourceIndex = sourceStart + localIndex;
+                    var point = points[sourceIndex];
+                    var textureV = sourceIndex / (float)denominator;
                     var guide = nextKind == GpuRibbonKind.Guide;
                     vertices.Add(GpuRibbonProjection.Vertex(point.Lane, point.Size, point.VisualPosition, -1,
                         textureV, groupIndex, auxiliaryIndex, point.Alpha, guide));
                     vertices.Add(GpuRibbonProjection.Vertex(point.Lane, point.Size, point.VisualPosition, 1,
                         textureV, groupIndex, auxiliaryIndex, point.Alpha, guide));
-                    if (index == 0) continue;
-                    var previous = firstVertex + (index - 1) * 2;
-                    var current = firstVertex + index * 2;
+                    if (localIndex == 0) continue;
+                    var previous = firstVertex + (localIndex - 1) * 2;
+                    var current = firstVertex + localIndex * 2;
                     indices.Add(previous); indices.Add(previous + 1); indices.Add(current + 1);
                     indices.Add(previous); indices.Add(current + 1); indices.Add(current);
                 }

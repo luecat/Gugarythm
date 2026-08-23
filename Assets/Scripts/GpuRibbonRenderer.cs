@@ -73,9 +73,22 @@ namespace Gugarhythm
             stateTexture.Apply(false, false);
 
             var materialByKind = new Dictionary<GpuRibbonKind, Material>();
+            var validChunkCount = 0;
 
             foreach (var chunk in build.Chunks)
             {
+                if (chunk == null)
+                {
+                    Debug.LogWarning("GPU ribbon chunk is missing.");
+                    continue;
+                }
+
+                if (!TryNormalizeChunk(chunk, out var vertices, out var indices, out var warning))
+                {
+                    Debug.LogWarning($"GPU ribbon chunk was skipped: {warning}");
+                    continue;
+                }
+
                 var parent = chunk.Kind == GpuRibbonKind.Guide ? guideLayer : holdLayer;
                 var go = new GameObject($"GPU Ribbon {chunk.Kind}", typeof(RectTransform), typeof(CanvasRenderer),
                     typeof(GpuRibbonGraphic));
@@ -109,11 +122,17 @@ namespace Gugarhythm
                     GpuRibbonKind.HoldNormal => holdGreen,
                     _ => Texture2D.whiteTexture,
                 };
-                graphic.SetStaticGeometry(chunk, texture);
+                graphic.SetStaticGeometry(new GpuRibbonChunkData(chunk.Kind, vertices, indices), texture);
                 entries.Add(new Entry
                 {
                     Graphic = graphic,
                 });
+                validChunkCount++;
+            }
+
+            if (validChunkCount == 0)
+            {
+                throw new InvalidOperationException("GPU ribbon data has no usable chunks.");
             }
         }
 
@@ -128,6 +147,16 @@ namespace Gugarhythm
             if (chart == null || guideLayer == null || holdLayer == null || stageCanvas == null)
             {
                 fallbackReason = "GPU ribbon initialization is missing chart or Canvas state.";
+                return false;
+            }
+            // The precomputed GPU mesh is safe for decoration-only ribbons,
+            // but the Hold body still needs the runtime clipping and
+            // tessellation used by HoldBatchGraphic.  Keep that path as the
+            // authoritative renderer until GPU Hold clipping can match it for
+            // every time-scale/segment combination.
+            if (chart.HoldPaths.Count > 0 || chart.FallbackConnectors.Count > 0)
+            {
+                fallbackReason = "GPU Hold ribbon disabled; using the CPU Hold renderer for complete paths.";
                 return false;
             }
             if (!SystemInfo.SupportsTextureFormat(TextureFormat.RGBAFloat))
@@ -215,6 +244,63 @@ namespace Gugarhythm
             materials.Clear();
             if (groupPositionTexture != null) UnityEngine.Object.Destroy(groupPositionTexture);
             if (stateTexture != null) UnityEngine.Object.Destroy(stateTexture);
+        }
+
+        static bool TryNormalizeChunk(GpuRibbonChunkData chunk, out UIVertex[] vertices, out int[] indices, out string reason)
+        {
+            vertices = chunk.Vertices ?? Array.Empty<UIVertex>();
+            indices = chunk.Indices ?? Array.Empty<int>();
+            if (vertices.Length == 0 || indices.Length == 0)
+            {
+                reason = "Chunk has no vertices or no indices.";
+                return false;
+            }
+
+            if (vertices.Length % 2 != 0)
+            {
+                reason = $"Chunk has odd vertex count: {vertices.Length}.";
+                return false;
+            }
+
+            if (indices.Length % 3 != 0)
+            {
+                reason = $"Chunk has invalid index count: {indices.Length}.";
+                return false;
+            }
+
+            var safeIndices = new List<int>(indices.Length);
+            for (var index = 0; index < indices.Length; index += 3)
+            {
+                var i0 = indices[index];
+                var i1 = indices[index + 1];
+                var i2 = indices[index + 2];
+                if (i0 < 0 || i0 >= vertices.Length ||
+                    i1 < 0 || i1 >= vertices.Length ||
+                    i2 < 0 || i2 >= vertices.Length)
+                {
+                    continue;
+                }
+
+                safeIndices.Add(i0);
+                safeIndices.Add(i1);
+                safeIndices.Add(i2);
+            }
+
+            if (safeIndices.Count == 0)
+            {
+                reason = "All indices are out of range.";
+                return false;
+            }
+
+            if (safeIndices.Count < indices.Length)
+            {
+                reason = $"Chunk had out-of-range triangles and was sanitized: {indices.Length} -> {safeIndices.Count}.";
+                indices = safeIndices.ToArray();
+                return true;
+            }
+
+            reason = null;
+            return true;
         }
     }
 }

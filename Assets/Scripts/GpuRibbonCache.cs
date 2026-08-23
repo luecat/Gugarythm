@@ -14,7 +14,8 @@ namespace Gugarhythm
     public static class GpuRibbonCache
     {
         const int Magic = 0x47525055; // UPRG
-        const int FormatVersion = 2;
+        const int FormatVersion = 3;
+        const int BuildKeyVersion = 2;
         const int MaximumChunkCount = 4096;
         const int MaximumVertexCount = 8_000_000;
         const int MaximumIndexCount = 24_000_000;
@@ -26,6 +27,7 @@ namespace Gugarhythm
             using var stream = new MemoryStream();
             using (var writer = new BinaryWriter(stream, Encoding.UTF8, true))
             {
+                writer.Write(BuildKeyVersion);
                 writer.Write(FormatVersion);
                 WriteString(writer, chart.DefaultTimeScaleGroup);
                 var values = new List<double>();
@@ -214,6 +216,7 @@ namespace Gugarhythm
                     var vertexCount = ReadCount(reader, MaximumVertexCount);
                     actualVertices += vertexCount;
                     if (actualVertices > MaximumVertexCount) return false;
+                    if (vertexCount == 0 || vertexCount % 2 != 0) return false;
                     var vertices = new UIVertex[vertexCount];
                     for (var vertexIndex = 0; vertexIndex < vertexCount; vertexIndex++)
                     {
@@ -225,6 +228,7 @@ namespace Gugarhythm
                         vertices[vertexIndex] = vertex;
                     }
                     var indexCount = ReadCount(reader, MaximumIndexCount);
+                    if (indexCount == 0 || indexCount % 6 != 0) return false;
                     var indices = new int[indexCount];
                     for (var index = 0; index < indexCount; index++)
                     {
