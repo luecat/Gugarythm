@@ -414,12 +414,17 @@ namespace Gugarhythm
         {
             foreach (var node in path)
             {
-                var isTail = node.Judged && node.SlideNodeRole == SlideNodeRole.End;
-                node.IsHoldTerminal = isTail;
-                if (isTail)
+                var isJudgedEnd = node.Judged && node.SlideNodeRole == SlideNodeRole.End;
+                node.IsHoldTerminal = isJudgedEnd;
+                if (isJudgedEnd)
                 {
                     if (node.Kind == RuntimeNoteKind.Release) node.Kind = RuntimeNoteKind.Sustain;
-                    node.HoldCheckpointSource = HoldCheckpointSource.Tail;
+                    // Geometry termination and judgment type are independent.
+                    // A Trace at the final path point ends the Hold lifecycle,
+                    // but remains a Trace checkpoint rather than a Tail cue.
+                    node.HoldCheckpointSource = node.SlideJudgeMode == SlideJudgeMode.Trace
+                        ? HoldCheckpointSource.Mid
+                        : HoldCheckpointSource.Tail;
                 }
                 else if (node.Judged && node.Kind == RuntimeNoteKind.Sustain &&
                     node.SlideNodeRole is SlideNodeRole.Tick or SlideNodeRole.Attach)

@@ -205,7 +205,6 @@ namespace Gugarhythm
         {
             None = 0,
             GradeOneShot = 1 << 0,
-            PerfectOneShot = 1 << 1,
             FlickOneShot = 1 << 2,
             ActivateHoldLoop = 1 << 3,
             DeactivateHoldLoop = 1 << 4,
@@ -230,8 +229,8 @@ namespace Gugarhythm
                 if (note == null || judgment.Grade == JudgmentGrade.Pending) return JudgmentAudioRoute.None;
 
                 var root = note.HoldRootIndex;
-                var isTail = note.IsHoldTerminal || note.HoldCheckpointSource == HoldCheckpointSource.Tail;
-                if (isTail)
+                var isTerminal = note.IsHoldTerminal || note.HoldCheckpointSource == HoldCheckpointSource.Tail;
+                if (isTerminal)
                 {
                     if (root >= 0)
                     {
@@ -241,9 +240,11 @@ namespace Gugarhythm
 
                     if (judgment.Grade == JudgmentGrade.Miss)
                         return root >= 0 ? JudgmentAudioRoute.DeactivateHoldLoop : JudgmentAudioRoute.None;
-                    var oneShot = note.Kind == RuntimeNoteKind.Flick
+                    if (note.SlideJudgeMode == SlideJudgeMode.Trace)
+                        return root >= 0 ? JudgmentAudioRoute.DeactivateHoldLoop : JudgmentAudioRoute.None;
+                    var oneShot = note.SlideJudgeMode == SlideJudgeMode.Flick || note.Kind == RuntimeNoteKind.Flick
                         ? JudgmentAudioRoute.FlickOneShot
-                        : JudgmentAudioRoute.PerfectOneShot;
+                        : JudgmentAudioRoute.GradeOneShot;
                     return root >= 0 ? oneShot | JudgmentAudioRoute.DeactivateHoldLoop : oneShot;
                 }
 
@@ -262,7 +263,8 @@ namespace Gugarhythm
                 }
 
                 if (judgment.Grade == JudgmentGrade.Miss) return JudgmentAudioRoute.None;
-                return note.Kind == RuntimeNoteKind.Flick
+                if (note.SlideJudgeMode == SlideJudgeMode.Trace) return JudgmentAudioRoute.None;
+                return note.SlideJudgeMode == SlideJudgeMode.Flick || note.Kind == RuntimeNoteKind.Flick
                     ? JudgmentAudioRoute.FlickOneShot
                     : JudgmentAudioRoute.GradeOneShot;
             }
@@ -287,9 +289,10 @@ namespace Gugarhythm
         const float HitSourceY = 500f;
         const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
-        // ±6 are the centres of the outermost buttons; their normal half-size
-        // reaches the visible lane boundary at ±6.5.
-        const float VisibleTrackLaneEdge = CentralHalfLanes + .5f;
+        // The authored playable surface spans exactly -6 through +6. Hold
+        // heads include transparent sprite padding, so their rendered quad
+        // must still be clipped to these visible track edges.
+        const float VisibleTrackLaneEdge = CentralHalfLanes;
         const float PerspectiveDepthRatio = 3.2f;
         public const float DefaultScrollSpeed = 4f;
         public const float NoteApproachDurationSeconds = 2f;
@@ -331,13 +334,6 @@ namespace Gugarhythm
         const float HoldConnectorTextureWidth = 306f;
         const float HoldConnectorVisibleTextureWidth = 240f;
         const float HoldConnectorVisibleUvInset = (HoldConnectorTextureWidth - HoldConnectorVisibleTextureWidth) / HoldConnectorTextureWidth * .5f;
-        const float HoldHeadTextureWidth = 354f;
-        // Both Hold head atlases and both connector atlases use a 240px solid
-        // center.  Match those cores rather than their soft outer glow.
-        const float HoldHeadCoreTextureWidth = 240f;
-        // Hold heads keep their authored lane width, but their atlas is a little
-        // taller than the purple judgment strip when projected at the hit edge.
-        const float HoldHeadHeightScale = .96f;
         // Button sprites begin their visible antialiased edge at pixel 44.
         // Using the old 40px glow bound made every normal Tap visibly narrow.
         const float NormalButtonVisibleEdgePaddingPixels = 44f;
@@ -1707,8 +1703,6 @@ namespace Gugarhythm
             AudioClip clip;
             if ((route & JudgmentAudioRoute.FlickOneShot) != 0)
                 clip = judgment.Note.Critical && criticalFlickSound != null ? criticalFlickSound : flickSound;
-            else if ((route & JudgmentAudioRoute.PerfectOneShot) != 0)
-                clip = perfectSound;
             else if ((route & JudgmentAudioRoute.GradeOneShot) != 0)
                 clip = judgment.Grade switch
             {
@@ -2105,15 +2099,19 @@ namespace Gugarhythm
 
         static float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
         {
-            // Authored notes may deliberately extend beyond the playable lanes.
-            // Only constrain heads whose authored body is fully inside the
-            // visible ±6.5 track bounds.  Deliberate chart out-of-bounds paths
-            // retain their original extent.
-            if (lane - size < -VisibleTrackLaneEdge || lane + size > VisibleTrackLaneEdge) return renderWidth;
+            _ = size;
+            // Always constrain the complete Hold-head quad to the visible
+            // playable track, including notes authored at or beyond an edge.
             var center = X(lane, screenProgress);
             var left = X(-VisibleTrackLaneEdge, screenProgress);
             var right = X(VisibleTrackLaneEdge, screenProgress);
-            return Mathf.Min(renderWidth, 2f * Mathf.Min(center - left, right - center));
+            return ClampCenteredWidthToBounds(renderWidth, center, left, right);
+        }
+
+        static float ClampCenteredWidthToBounds(float renderWidth, float center, float left, float right)
+        {
+            var halfAvailable = Math.Max(0f, Math.Min(center - left, right - center));
+            return Math.Min(renderWidth, 2f * halfAvailable);
         }
 
         bool IsHoldCurrentlyMissed(RuntimeConnector connector)
@@ -2447,8 +2445,11 @@ namespace Gugarhythm
         {
             if (IsDamage(note)) return 21f;
             if (IsTrace(note)) return note.Critical ? 30f : 41f;
-            return note.Critical ? 28f : NormalButtonVisibleEdgePaddingPixels;
+            return ButtonOuterPaddingPixels(note.Critical);
         }
+
+        static float ButtonOuterPaddingPixels(bool critical) =>
+            critical ? 28f : NormalButtonVisibleEdgePaddingPixels;
 
         public static float NoteRenderQuadWidth(float bodyWidth, float height, RuntimeNote note)
         {
@@ -2463,13 +2464,11 @@ namespace Gugarhythm
 
         public static float HoldHeadRenderQuadWidth(float bodyWidth, float height, bool critical)
         {
-            return bodyWidth * HoldHeadTextureWidth / HoldHeadCoreTextureWidth;
+            var padding = height * ButtonOuterPaddingPixels(critical) / NoteTextureHeight;
+            return bodyWidth + padding * 2;
         }
 
-        public static float HoldHeadRenderHeight(float height) => height * HoldHeadHeightScale;
-
-        public static float HoldHeadVisibleCoreWidth(float renderWidth) =>
-            renderWidth * HoldHeadCoreTextureWidth / HoldHeadTextureWidth;
+        public static float HoldHeadRenderHeight(float height) => height;
 
         public static float HoldConnectorRenderWidth(float bodyWidth) =>
             bodyWidth * HoldConnectorTextureWidth / HoldConnectorVisibleTextureWidth;
@@ -2479,9 +2478,12 @@ namespace Gugarhythm
 
         public static float HoldConnectorRenderWidth(float bodyWidth, float lane, float size, float screenProgress)
         {
-            var headQuadWidth = HoldHeadRenderQuadWidth(bodyWidth, 0, false);
+            var headHeight = HoldHeadRenderHeight(NoteSurfaceHeight(screenProgress));
+            var headQuadWidth = HoldHeadRenderQuadWidth(bodyWidth, headHeight, false);
             var clippedHeadQuadWidth = ClampInBoundsHoldHeadWidth(headQuadWidth, lane, size, screenProgress);
-            return HoldConnectorRenderWidth(HoldHeadVisibleCoreWidth(clippedHeadQuadWidth));
+            var padding = headHeight * ButtonOuterPaddingPixels(false) / NoteTextureHeight;
+            var visibleHeadWidth = Mathf.Max(0, clippedHeadQuadWidth - padding * 2);
+            return HoldConnectorRenderWidth(visibleHeadWidth);
         }
 
         public static float HoldConnectorVisibleBodyWidth(float renderWidth) =>

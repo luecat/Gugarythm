@@ -128,6 +128,7 @@ namespace Gugarhythm
                 Beat = beat, Time = tempo.SecondsAt(beat), Lane = (float?)item["lane"] ?? 0, Size = Math.Max(.25f, (float?)item["size"] ?? 1),
                 Direction = FlickDirection(item["direction"]),
                 Critical = (bool?)item["critical"] == true, Kind = flick ? RuntimeNoteKind.Flick : trace ? RuntimeNoteKind.Sustain : RuntimeNoteKind.Tap,
+                SlideJudgeMode = flick ? SlideJudgeMode.Flick : trace ? SlideJudgeMode.Trace : SlideJudgeMode.Normal,
                 TimeScaleGroup = TimeScaleGroupKey(chart, item["timeScaleGroup"]),
             });
         }
@@ -147,16 +148,13 @@ namespace Gugarhythm
                 var flick = connection["direction"] != null;
                 var trace = judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase);
                 // USC middle connections encode independent path and particle
-                // roles: tick changes the path, attach is particle-only, and
-                // a tick carrying critical does both.
-                var isAttach = connectionType == "attach";
+                // roles: tick changes only the path, while attach is the
+                // explicit particle-only connection.
+                var isAttach = connectionType.Equals("attach", StringComparison.OrdinalIgnoreCase);
                 var isPathPoint = !isAttach;
-                // A critical value on a Slide start may only describe the
-                // eventual Trace tail.  It is not a yellow head when the
-                // start has judgeType:none.  Only middle-role connections
-                // can create the particle-only visual.
-                var hasParticle = isAttach ||
-                    (connectionType.Equals("tick", StringComparison.OrdinalIgnoreCase) && connection["critical"] != null);
+                // Critical controls the material/texture treatment. It does
+                // not turn a geometry-only tick into a particle note.
+                var hasParticle = isAttach;
                 var semantics = MapSlideSemantics(connectionType, judgeType, flick, hasParticle);
                 var lane = (float?)connection["lane"] ?? 0;
                 var size = Math.Max(.25f, (float?)connection["size"] ?? 1);
@@ -213,7 +211,7 @@ namespace Gugarhythm
                 connectionType.Equals("end", StringComparison.OrdinalIgnoreCase) ? SlideNodeRole.End : SlideNodeRole.Tick;
             var judgeMode = judgeType.Equals("none", StringComparison.OrdinalIgnoreCase) ? SlideJudgeMode.None :
                 judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase) ? SlideJudgeMode.Trace : SlideJudgeMode.Normal;
-            if (judgeMode != SlideJudgeMode.None && role == SlideNodeRole.End && directional)
+            if (judgeMode != SlideJudgeMode.None && directional)
                 judgeMode = SlideJudgeMode.Flick;
             var judged = judgeMode != SlideJudgeMode.None;
             var kind = (role, judgeMode) switch

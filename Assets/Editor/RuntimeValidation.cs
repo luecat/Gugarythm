@@ -203,11 +203,10 @@ public static class RuntimeValidation
         var atC = path.Evaluator.Evaluate(2);
         Require(Math.Abs(atB.Lane - b.Lane) < 1e-6 && Math.Abs(atC.Lane - c.Lane) < 1e-6,
             "The Hold evaluator must pass through every authored path node");
-        var epsilon = 1e-3;
-        var leftDerivative = (path.Evaluator.Evaluate(1).Lane - path.Evaluator.Evaluate(1 - epsilon).Lane) / epsilon;
-        var rightDerivative = (path.Evaluator.Evaluate(1 + epsilon).Lane - path.Evaluator.Evaluate(1).Lane) / epsilon;
-        Require(Math.Abs(leftDerivative - rightDerivative) < .02,
-            "A vertical-to-diagonal Hold join must have matching left and right derivatives");
+        Require(Math.Abs(path.Evaluator.Evaluate(.5).Lane) < 1e-6 &&
+                Math.Abs(path.Evaluator.Evaluate(1.5).Lane - 1f) < 1e-6 &&
+                Math.Abs(path.Evaluator.Evaluate(2.5).Lane - 1.5f) < 1e-6,
+            "Linear Hold segments must remain straight and preserve ordinary authored corners");
 
         for (var time = 0d; time <= 3; time += .01)
         {
@@ -285,14 +284,14 @@ public static class RuntimeValidation
         HoldCheckpointBuilder.Apply(checkpointChart, beat => beat);
         Require(checkpointChart.HoldPaths.Count == 1,
             "Hold checkpoint construction must retain the complete runtime path on the chart");
-        var curvedCheckpoint = checkpointChart.Notes.Single(note =>
+        var linearCheckpoint = checkpointChart.Notes.Single(note =>
             note.HoldCheckpointSource == HoldCheckpointSource.Auto && Math.Abs(note.Beat - .5) < 1e-9);
-        var evaluatedCheckpoint = checkpointChart.HoldPaths[0].Evaluator.Evaluate(curvedCheckpoint.Time);
-        Require(Math.Abs(curvedCheckpoint.Lane - evaluatedCheckpoint.Lane) < 1e-6 &&
-                Math.Abs(curvedCheckpoint.Size - evaluatedCheckpoint.Size) < 1e-6,
-            "Automatic Hold checkpoints must use the same curved evaluator as rendering");
-        Require(Math.Abs(curvedCheckpoint.Lane - 1f) > .01f,
-            "The curved checkpoint regression fixture must differ from old linear interpolation");
+        var evaluatedCheckpoint = checkpointChart.HoldPaths[0].Evaluator.Evaluate(linearCheckpoint.Time);
+        Require(Math.Abs(linearCheckpoint.Lane - evaluatedCheckpoint.Lane) < 1e-6 &&
+                Math.Abs(linearCheckpoint.Size - evaluatedCheckpoint.Size) < 1e-6,
+            "Automatic Hold checkpoints must use the same segment evaluator as rendering");
+        Require(Math.Abs(linearCheckpoint.Lane - 1f) < 1e-6,
+            "A checkpoint on a linear Hold segment must retain exact linear interpolation");
 
         var straightChart = new RuntimeChart();
         var straightA = Point(50, 0, 0);
@@ -307,8 +306,8 @@ public static class RuntimeValidation
             "A straight Hold run must tessellate to only its two endpoints");
 
         tessellator.BuildVisibleRun(path.RenderRuns[0], .25, 1.75, Project, tessellation);
-        Require(tessellation.Count > 2 && tessellation.Count <= AdaptiveHoldTessellator.MaxPointsPerRun,
-            "A curved Hold run must subdivide by screen error without exceeding the run cap");
+        Require(tessellation.Count == 3,
+            "Piecewise-linear Hold runs must retain the authored corner without curve-only subdivision");
         Require(Math.Abs(tessellation[0].Time - .25) < 1e-9 && Math.Abs(tessellation[^1].Time - 1.75) < 1e-9,
             "Adaptive Hold tessellation must preserve exact visible clip times");
         var pointsInFirstSegment = tessellation.Count(point => point.Sample.SegmentIndex == 0);
@@ -455,6 +454,12 @@ public static class RuntimeValidation
         HoldCheckpointBuilder.Apply(singleJudged, beat => beat);
         var singleJudgedAutos = AutoBeats(singleJudged);
 
+        var judgedHeadToNoneEnd = Chain(
+            Node(2043, 0, SlideNodeRole.Start, SlideJudgeMode.Normal, true, -2),
+            Node(2044, 4, SlideNodeRole.End, SlideJudgeMode.None, false, 2));
+        HoldCheckpointBuilder.Apply(judgedHeadToNoneEnd, beat => beat);
+        var judgedHeadToNoneEndAutos = AutoBeats(judgedHeadToNoneEnd);
+
         var fallback = new RuntimeChart();
         var fallbackHead = Node(2050, 0, SlideNodeRole.Start, SlideJudgeMode.Normal, true);
         var fallbackLeft = Node(2051, 1, SlideNodeRole.End, SlideJudgeMode.Trace, true, -1);
@@ -470,7 +475,9 @@ public static class RuntimeValidation
                   $"repeatedPlayable={sameBeat.PlayableCount} repeatedAuto={repeatedAutos.Length} " +
                   $"duplicateAutoBeats={repeatedAutoDuplicates} authoredCollisions={authoredCollisionCount} " +
                   $"legacyPlayable={legacy.PlayableCount} legacyAuto={legacyAutos.Length} " +
-                  $"singleJudgedPlayable={singleJudged.PlayableCount} singleJudgedAuto={singleJudgedAutos.Length}");
+                  $"singleJudgedPlayable={singleJudged.PlayableCount} singleJudgedAuto={singleJudgedAutos.Length} " +
+                  $"judgedHeadToNoneEndPlayable={judgedHeadToNoneEnd.PlayableCount} " +
+                  $"judgedHeadToNoneEndAuto={judgedHeadToNoneEndAutos.Length}");
 
         Require(allNoneAutos.Length == 0 && allNone.PlayableCount == 0,
             $"An explicit all-none Hold must have no playable range or Auto checkpoints, got Auto={allNoneAutos.Length}");
@@ -486,6 +493,9 @@ public static class RuntimeValidation
                 !singleJudged.Notes[1].IsHoldTerminal && singleJudged.Notes[1].HoldCheckpointSource != HoldCheckpointSource.Tail &&
                 !singleJudged.Notes[2].IsHoldTerminal && singleJudged.Notes[2].HoldCheckpointSource != HoldCheckpointSource.Tail,
             "A one-judged-node path has no interior Auto and only an explicit judged structural End may become Tail");
+        Require(judgedHeadToNoneEndAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2d, 2.5d, 3d, 3.5d }) &&
+                judgedHeadToNoneEnd.PlayableCount == 8,
+            $"A judged Hold head must sustain Auto checkpoints through an unjudged visual End, got {string.Join(",", judgedHeadToNoneEndAutos)}");
         var noneLeadTail = noneLead.Connectors[^1].End;
         Require(noneLeadTail.IsHoldTerminal && noneLeadTail.HoldCheckpointSource == HoldCheckpointSource.Tail,
             "An explicit judged structural End must retain Tail metadata");
@@ -774,6 +784,8 @@ public static class RuntimeValidation
                 var validPathLane = validPath.Evaluator.Evaluate(attachNotes[sample].Time).Lane;
                 Require(Math.Abs(attachNotes[sample].Lane - validPathLane) < 1e-6,
                     $"Valid-path USC Attach Ease {ease} drifted from its shared evaluator at progress {sampleProgress[sample]}");
+                Require(Math.Abs(validPathLane - expectedLane) < 1e-6,
+                    $"Valid-path USC segment Ease {ease} drifted from authored per-segment interpolation at progress {sampleProgress[sample]}");
                 Require(Math.Abs(fallbackLanes[sample] - expectedLane) < 1e-6,
                     $"Safe fallback Ease {ease} drifted at progress {sampleProgress[sample]}");
             }
@@ -1161,37 +1173,55 @@ public static class RuntimeValidation
         if (string.IsNullOrWhiteSpace(path) || !File.Exists(path)) return;
         var result = new GgrChartImporter().Import(Path.GetFileName(path), File.ReadAllBytes(path));
         Require(result.Success, "Attached GGR must import successfully: " + result.Error);
+        var autoNotes = result.Chart.Notes.Where(note =>
+            note.HoldCheckpointSource == HoldCheckpointSource.Auto).ToArray();
+        var authoredJudgments = result.Chart.Notes.Count(note =>
+            note.Judged && note.HoldCheckpointSource != HoldCheckpointSource.Auto);
         Debug.Log($"GUGARHYTHM_TASK2_ATTACHED_GGR_COUNTS playable={result.Chart.PlayableCount} " +
-                  $"auto={result.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} " +
-                  $"autoRoots={result.Chart.Notes.Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto).Select(note => note.HoldRootIndex).Distinct().Count()} " +
+                  $"authored={authoredJudgments} auto={autoNotes.Length} " +
+                  $"autoRoots={autoNotes.Select(note => note.HoldRootIndex).Distinct().Count()} " +
                   $"holdPaths={result.Chart.HoldPaths.Count} fallback={result.Chart.FallbackConnectors.Count} " +
                   $"playableRanges={result.Chart.HoldPaths.Count(holdPath => holdPath.HasPlayableRange)} " +
                   $"semanticJudged={result.Chart.HoldPaths.Sum(holdPath => holdPath.SemanticNodes.Count(note => note.Judged))} " +
                   $"warnings={string.Join(" | ", result.Chart.Warnings)}");
-        Require(result.Chart.PlayableCount == 3710 &&
-                result.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto) == 554,
-            $"Attached GGR must retain 3156 authored judgments plus 554 semantic-safe fallback Auto checkpoints, got {result.Chart.PlayableCount}");
+        Require(authoredJudgments == 3156 && autoNotes.Length >= 554 &&
+                result.Chart.PlayableCount == authoredJudgments + autoNotes.Length &&
+                autoNotes.All(note => note.HoldRootIndex >= 0),
+            $"Attached GGR must retain all 3156 authored judgments and at least its 554 prior safe Auto checkpoints, " +
+            $"got authored={authoredJudgments} auto={autoNotes.Length} playable={result.Chart.PlayableCount}");
     }
 
     static void ValidateNoteRenderWidths()
     {
         var normalTap = new RuntimeNote { Kind = RuntimeNoteKind.Tap };
+        var criticalTap = new RuntimeNote { Kind = RuntimeNoteKind.Tap, Critical = true };
         var tapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, normalTap);
+        var criticalTapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, criticalTap);
         Require(Math.Abs(SonolusLandscapePrototype.NoteBodyWidth(tapQuadWidth, 104.7f, normalTap) - 147.5f) < .0001f,
             "A normal Tap's visible body must span exactly one authored note track");
-        var holdHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, 104.7f, false);
-        var criticalHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, 104.7f, true);
-        var holdCapBodyWidth = 147.5f;
-        Require(Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(holdHeadQuadWidth) - holdCapBodyWidth) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.HoldHeadVisibleCoreWidth(criticalHoldHeadQuadWidth) - holdCapBodyWidth) < .0001f,
-            "Mint and yellow Hold heads' solid cores must retain the authored Hold width");
+        var holdHeadHeight = SonolusLandscapePrototype.HoldHeadRenderHeight(104.7f);
+        var holdHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, holdHeadHeight, false);
+        var criticalHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, holdHeadHeight, true);
+        Require(Math.Abs(holdHeadHeight - 104.7f) < .0001f,
+            "A Hold head must use the same projected height as a Tap");
+        Require(Math.Abs(holdHeadQuadWidth - tapQuadWidth) < .0001f &&
+                Math.Abs(criticalHoldHeadQuadWidth - criticalTapQuadWidth) < .0001f,
+            "Normal and Critical Hold heads must use the same width calculation as equivalent Taps");
+        var wideTapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(295f, 104.7f, normalTap);
+        var wideHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(295f, holdHeadHeight, false);
+        Require(Math.Abs(wideHoldHeadQuadWidth - wideTapQuadWidth) < .0001f,
+            "Hold and Tap width calculations must remain identical for wider authored note sizes");
         var descendingHoldHead = new RuntimeNote { Index = 7, HoldRootIndex = 7, Kind = RuntimeNoteKind.Sustain };
-        Require(Math.Abs(SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, descendingHoldHead) - holdHeadQuadWidth) < .0001f,
+        Require(Math.Abs(SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, holdHeadHeight, descendingHoldHead) - holdHeadQuadWidth) < .0001f,
             "A descending Hold head must use the same quad width as its persistent judgment-line head");
         var connectorVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(
             SonolusLandscapePrototype.HoldConnectorRenderWidth(147.5f));
         Require(Math.Abs(connectorVisibleWidth - 147.5f) < .0001f,
             "A Hold ribbon's visible fill must align with its USC-authored head width");
+        var projectedConnectorVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(
+            SonolusLandscapePrototype.HoldConnectorRenderWidth(147.5f, 0f, 1f, 1f));
+        Require(Math.Abs(projectedConnectorVisibleWidth - 147.5f) < .0001f,
+            "Changing Hold-head atlas padding must not shrink an unclipped Hold ribbon");
         Require(Math.Abs(SonolusLandscapePrototype.HoldConnectorLaneWidth(147.5f) - 147.5f) < .0001f,
             "A rendered Hold ribbon must stay within its authored lane span instead of expanding into a neighboring lane");
         Require(Math.Abs((1 - SonolusLandscapePrototype.HoldConnectorSourceUvInset * 2) * 306 - 240) < .0001f,
@@ -1206,6 +1236,20 @@ public static class RuntimeValidation
         var clippedVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(clippedRenderWidth);
         Require(clippedVisibleWidth < 1000f,
             "An edge-clamped Hold connector must shrink with its head instead of retaining its authored full width");
+
+        var clampHeadWidth = typeof(SonolusLandscapePrototype).GetMethod(
+            "ClampInBoundsHoldHeadWidth", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        var projectLane = typeof(SonolusLandscapePrototype).GetMethod(
+            "X", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(clampHeadWidth != null && projectLane != null,
+            "Hold-head track-bound validation requires the production clamp and lane projector");
+        var trackLeft = (float)projectLane.Invoke(null, new object[] { -6f, 1f });
+        var trackRight = (float)projectLane.Invoke(null, new object[] { 6f, 1f });
+        var completeTrackWidth = trackRight - trackLeft;
+        var fullTrackHeadWidth = (float)clampHeadWidth.Invoke(null, new object[] { 10000f, 0f, 6f, 1f });
+        var oversizedHeadWidth = (float)clampHeadWidth.Invoke(null, new object[] { 10000f, 0f, 7f, 1f });
+        Require(fullTrackHeadWidth <= completeTrackWidth + .001f && oversizedHeadWidth <= completeTrackWidth + .001f,
+            "Descending Hold-head alpha bounds must never exceed the visible -6 to +6 note track");
     }
 
     static void ValidateNoteRenderVisibilityWindow()
@@ -1503,6 +1547,10 @@ public static class RuntimeValidation
                     { ""type"": ""slide"", ""connections"": [
                         { ""beat"": 6, ""judgeType"": ""none"", ""lane"": -4, ""size"": 1, ""type"": ""start"" },
                         { ""beat"": 6.25, ""judgeType"": ""normal"", ""lane"": -3, ""size"": 1, ""type"": ""end"" }
+                    ] },
+                    { ""type"": ""slide"", ""connections"": [
+                        { ""beat"": 7, ""judgeType"": ""normal"", ""lane"": 0, ""size"": 1, ""type"": ""start"", ""direction"": ""right"" },
+                        { ""beat"": 7.25, ""judgeType"": ""none"", ""lane"": 2, ""size"": 1, ""type"": ""end"" }
                     ] }
                 ]
             }
@@ -1527,6 +1575,7 @@ public static class RuntimeValidation
         var firstJudgedAfterNoneHead = At(17);
         var noneHeadTail = At(18);
         var terminalFirstJudgedAfterNoneHead = At(20);
+        var flickHead = At(21);
 
         Require(firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain,
             "firstJudgedConnection must not promote a structural Slide Tick to Tap");
@@ -1543,12 +1592,18 @@ public static class RuntimeValidation
             "Every non-directional Trace Slide node must use sustained-contact judgment");
         Require(normalMid.Judged && normalMid.Kind == RuntimeNoteKind.Sustain,
             "A judged normal structural Slide Tick must use sustained-contact judgment");
-        Require(normalTail.Judged && normalTail.Kind == RuntimeNoteKind.Sustain && normalTail.IsHoldTerminal && normalTail.HoldCheckpointSource == tailSource &&
-                traceTail.Judged && traceTail.Kind == RuntimeNoteKind.Sustain && traceTail.IsHoldTerminal && traceTail.HoldCheckpointSource == tailSource,
-            "Normal and trace Slide terminals must be judged Sustain Tail checkpoints");
+        Require(normalTail.Judged && normalTail.Kind == RuntimeNoteKind.Sustain && normalTail.IsHoldTerminal && normalTail.HoldCheckpointSource == tailSource,
+            "A normal Slide terminal must remain a judged Sustain Tail checkpoint");
+        Require(traceTail.Judged && traceTail.Kind == RuntimeNoteKind.Sustain && traceTail.IsHoldTerminal &&
+                traceTail.HoldCheckpointSource == HoldCheckpointSource.Mid,
+            "A Trace at the geometric End must finish its Hold without being rewritten as a Tail judgment");
         Require(flickTail.Judged && flickTail.Kind == RuntimeNoteKind.Flick && flickTail.IsHoldTerminal && flickTail.HoldCheckpointSource == tailSource,
             "Directional Slide terminals must remain judged Flick Tail checkpoints");
-        Require(noneNodes.All(note => !note.Judged) && !noneDirectionTail.Judged && !noneHeadTail.Judged && chart.PlayableCount == 13,
+        Require(flickHead.Judged && flickHead.Kind == RuntimeNoteKind.Flick && flickHead.Direction > 0 &&
+                flickHead.SlideNodeRole == SlideNodeRole.Start && flickHead.SlideJudgeMode == SlideJudgeMode.Flick &&
+                !flickHead.IsHoldTerminal,
+            "A directional Slide Start must remain a Flick head instead of being consumed as a Tap");
+        Require(noneNodes.All(note => !note.Judged) && !noneDirectionTail.Judged && !noneHeadTail.Judged && chart.PlayableCount == 14,
             "Slide judgeType:none nodes must stay out of judgment and PlayableCount");
         Require(!noneHead.Judged && firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain,
             "A judged structural Slide Tick after a none head must remain contact-judged");
@@ -1595,6 +1650,16 @@ public static class RuntimeValidation
         Require(flickTail.Grade == JudgmentGrade.Perfect,
             "A Slide Flick tail must resolve from a Flick token");
 
+        var flickHeadEngine = new JudgmentEngine(new[] { flickHead }, new ScoreState());
+        flickHeadEngine.Process(flickHead.Time,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, flickHead.Time, flickHead.Lane) }, Array.Empty<ActiveContact>());
+        Require(flickHead.Grade == JudgmentGrade.Pending,
+            "A Slide Flick head must not be consumed by a Tap token");
+        flickHeadEngine.Process(flickHead.Time,
+            new[] { new InputToken(1, RuntimeNoteKind.Flick, flickHead.Time, flickHead.Lane, flickHead.Lane, flickHead.Time) }, Array.Empty<ActiveContact>());
+        Require(flickHead.Grade == JudgmentGrade.Perfect,
+            "A Slide Flick head must resolve from a Flick token");
+
         var noneDirectionScore = new ScoreState();
         var noneDirectionEngine = new JudgmentEngine(new[] { noneDirectionTail }, noneDirectionScore);
         noneDirectionEngine.Process(noneDirectionTail.Time,
@@ -1628,7 +1693,7 @@ public static class RuntimeValidation
         RuntimeNote At(double beat) => nodes.Single(note => Math.Abs(note.Beat - beat) < 1e-9);
         var bendOnly = At(10.1);
         var particleOnly = At(10.2);
-        var bendAndParticle = At(10.3);
+        var criticalBend = At(10.3);
 
         Require(!bendOnly.Visible && !bendOnly.Judged && !chart.Notes.Contains(bendOnly),
             "A tick without critical must bend the Hold path without creating a particle or judgment");
@@ -1642,19 +1707,19 @@ public static class RuntimeValidation
                 !SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, .999f) &&
                 SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, 1f),
             "An attach particle must belong to its Hold and retract at the same judgment-line threshold");
-        Require(bendAndParticle.Visible && !bendAndParticle.Judged && chart.Notes.Contains(bendAndParticle),
-            "A tick with critical must both bend the Hold path and create a visible particle");
+        Require(!criticalBend.Visible && !criticalBend.Judged && !chart.Notes.Contains(criticalBend),
+            "A geometry Tick must stay particle-free even when it carries Critical segment styling");
         Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, bendOnly)) &&
                 chart.Connectors.Any(connector => ReferenceEquals(connector.Start, bendOnly)),
             "A bend-only tick must remain in the connector path");
         Require(!chart.Connectors.Any(connector => ReferenceEquals(connector.Start, particleOnly) || ReferenceEquals(connector.End, particleOnly)),
             "An attach particle must not create a Hold-path bend");
-        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, bendAndParticle)) &&
-                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, bendAndParticle)),
-            "A tick with critical must remain in the connector path");
+        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, criticalBend)) &&
+                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, criticalBend)),
+            "A Critical geometry Tick must remain in the connector path");
         Require(SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, true) &&
-                SonolusLandscapePrototype.ShouldShowNoteParticle(bendAndParticle, true),
-            "USC attach and critical tick particles must be visible even though they are not Trace notes");
+                !SonolusLandscapePrototype.ShouldShowNoteParticle(criticalBend, true),
+            "Only an explicit USC Attach may create an unjudged Hold midpoint particle");
         Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(bendOnly, true) &&
                 !SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, false),
             "Bend-only ticks and missing particle textures must remain hidden");
@@ -1786,13 +1851,16 @@ public static class RuntimeValidation
 
     static void ValidateHoldJudgmentAudioRouting()
     {
-        RuntimeNote HoldPart(int index, int root, HoldCheckpointSource source, RuntimeNoteKind kind = RuntimeNoteKind.Sustain)
+        RuntimeNote HoldPart(int index, int root, HoldCheckpointSource source,
+            RuntimeNoteKind kind = RuntimeNoteKind.Sustain, SlideJudgeMode judgeMode = SlideJudgeMode.Unspecified,
+            bool isTerminal = false)
         {
             var note = Note(index, index, 0);
             note.Kind = kind;
             note.HoldRootIndex = root;
             note.HoldCheckpointSource = source;
-            note.IsHoldTerminal = source == HoldCheckpointSource.Tail;
+            note.SlideJudgeMode = judgeMode;
+            note.IsHoldTerminal = isTerminal || source == HoldCheckpointSource.Tail;
             return note;
         }
 
@@ -1802,6 +1870,12 @@ public static class RuntimeValidation
         Require(headRoute == SonolusLandscapePrototype.JudgmentAudioRoute.GradeOneShot &&
                 !state.ShouldPlay && state.ActiveCount == 0,
             "A successful Slide head must route only to its ordinary judgment one-shot and never activate the Hold loop");
+
+        var standaloneTrace = HoldPart(90, -1, HoldCheckpointSource.None,
+            RuntimeNoteKind.Sustain, SlideJudgeMode.Trace);
+        Require(state.Route(new JudgmentEvent(standaloneTrace, JudgmentGrade.Perfect, 0)) ==
+                SonolusLandscapePrototype.JudgmentAudioRoute.None,
+            "A successful Trace judgment must not fall through to the Tap-grade one-shot route");
 
         var mid = HoldPart(101, 100, HoldCheckpointSource.Mid);
         var midRoute = state.Route(new JudgmentEvent(mid, JudgmentGrade.Great, 0));
@@ -1837,10 +1911,19 @@ public static class RuntimeValidation
         state.Route(new JudgmentEvent(normalAuto, JudgmentGrade.Perfect, 0));
         var normalTail = HoldPart(302, 300, HoldCheckpointSource.Tail);
         var normalTailRoute = state.Route(new JudgmentEvent(normalTail, JudgmentGrade.Perfect, 0));
-        Require(normalTailRoute == (SonolusLandscapePrototype.JudgmentAudioRoute.PerfectOneShot |
+        Require(normalTailRoute == (SonolusLandscapePrototype.JudgmentAudioRoute.GradeOneShot |
                                     SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
                 state.ActiveCount == 1,
-            "A successful non-Flick Hold tail must deactivate its root and retain the Perfect one-shot route");
+            "A successful normal Hold tail must deactivate its root and retain its resolved grade one-shot route");
+
+        var traceAuto = HoldPart(401, 400, HoldCheckpointSource.Auto);
+        state.Route(new JudgmentEvent(traceAuto, JudgmentGrade.Perfect, 0));
+        var traceTerminal = HoldPart(402, 400, HoldCheckpointSource.Mid,
+            RuntimeNoteKind.Sustain, SlideJudgeMode.Trace, true);
+        var traceTerminalRoute = state.Route(new JudgmentEvent(traceTerminal, JudgmentGrade.Perfect, 0));
+        Require(traceTerminalRoute == SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
+                state.ActiveCount == 1,
+            "A Trace at a Hold End must stop its loop without being rewritten to a Tap or Tail one-shot");
 
         var flickTail = HoldPart(202, 200, HoldCheckpointSource.Tail, RuntimeNoteKind.Flick);
         var flickTailRoute = state.Route(new JudgmentEvent(flickTail, JudgmentGrade.Perfect, 0));

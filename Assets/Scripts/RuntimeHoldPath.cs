@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 namespace Gugarhythm
 {
@@ -140,6 +141,22 @@ namespace Gugarhythm
                     endBeat = Math.Max(endBeat, node.Beat);
                     startTime = Math.Min(startTime, node.Time);
                     endTime = Math.Max(endTime, node.Time);
+                }
+                var judgedStructuralStart = semanticNodes
+                    .Where(node => node.Judged && node.SlideNodeRole == SlideNodeRole.Start)
+                    .OrderBy(node => node.Beat)
+                    .ThenBy(node => node.Index)
+                    .FirstOrDefault();
+                if (judgedStructuralStart != null)
+                {
+                    // A judged Start opens a playable Hold interval even when
+                    // the authored End is judgeType:none. The End remains
+                    // non-judged, while runtime Auto checkpoints sustain Combo
+                    // through the complete visual path.
+                    startBeat = judgedStructuralStart.Beat;
+                    startTime = judgedStructuralStart.Time;
+                    endBeat = VisualEndBeat;
+                    endTime = VisualEndTime;
                 }
                 HasPlayableRange = hasJudgedNode;
                 if (hasJudgedNode)
