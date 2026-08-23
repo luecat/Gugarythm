@@ -198,6 +198,20 @@ namespace Gugarhythm
             }
         }
 
+        public readonly struct NoteSurfaceMapping
+        {
+            public readonly NoteSurfaceQuad Quad;
+            public readonly float HorizontalStart;
+            public readonly float HorizontalEnd;
+
+            public NoteSurfaceMapping(NoteSurfaceQuad quad, float horizontalStart, float horizontalEnd)
+            {
+                Quad = quad;
+                HorizontalStart = horizontalStart;
+                HorizontalEnd = horizontalEnd;
+            }
+        }
+
         public enum HoldConnectorRenderMode { AnchorClipped, NaturalPassThrough }
 
         [Flags]
@@ -1880,10 +1894,11 @@ namespace Gugarhythm
                 // the lane made the visible key look too narrow.
                 var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
                 var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
-                if (note.HoldRootIndex == note.Index)
-                    renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, note.Lane, note.Size, screenProgress);
                 var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
-                ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
+                if (note.HoldRootIndex == note.Index)
+                    ApplyNoteSurfaceQuad(view, BuildClippedHoldHeadSurface(note.Lane, renderSize, screenProgress, height));
+                else
+                    ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
                 view.color = IsHoldMid(note) ? Color.clear : Color.white;
                 var traceParticle = view.TraceParticle;
                 if (traceParticle != null)
@@ -2092,9 +2107,8 @@ namespace Gugarhythm
             // lane boundaries at the judgment line.
             var bodyWidth = LaneWidth(lane, size, screenProgress);
             var renderWidth = HoldHeadRenderQuadWidth(bodyWidth, height, root.Critical);
-            renderWidth = ClampInBoundsHoldHeadWidth(renderWidth, lane, size, screenProgress);
             var renderSize = size * renderWidth / Mathf.Max(.001f, bodyWidth);
-            ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(lane, renderSize, screenProgress, height));
+            ApplyNoteSurfaceQuad(view, BuildClippedHoldHeadSurface(lane, renderSize, screenProgress, height));
         }
 
         static float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
@@ -2320,16 +2334,37 @@ namespace Gugarhythm
 
         public static NoteSurfaceQuad BuildNoteSurfaceQuad(float lane, float size, float screenProgress, float height)
         {
+            return BuildNoteSurfaceQuadRange(lane - size, lane + size, screenProgress, height);
+        }
+
+        public static NoteSurfaceMapping BuildClippedHoldHeadSurface(
+            float lane, float renderSize, float screenProgress, float height)
+        {
+            var fullLeft = lane - renderSize;
+            var fullRight = lane + renderSize;
+            var fullSpan = Mathf.Max(.0001f, fullRight - fullLeft);
+            var clippedLeft = Mathf.Clamp(fullLeft, -VisibleTrackLaneEdge, VisibleTrackLaneEdge);
+            var clippedRight = Mathf.Clamp(fullRight, clippedLeft, VisibleTrackLaneEdge);
+            var horizontalStart = Mathf.Clamp01((clippedLeft - fullLeft) / fullSpan);
+            var horizontalEnd = Mathf.Clamp01((clippedRight - fullLeft) / fullSpan);
+            return new NoteSurfaceMapping(
+                BuildNoteSurfaceQuadRange(clippedLeft, clippedRight, screenProgress, height),
+                horizontalStart, horizontalEnd);
+        }
+
+        static NoteSurfaceQuad BuildNoteSurfaceQuadRange(
+            float leftLane, float rightLane, float screenProgress, float height)
+        {
             var centerY = ScreenY(screenProgress);
             var upperY = centerY + height * .5f;
             var lowerY = centerY - height * .5f;
             var upperProgress = ScreenProgressAtY(upperY);
             var lowerProgress = ScreenProgressAtY(lowerY);
             return new NoteSurfaceQuad(
-                new Vector2(X(lane - size, upperProgress), upperY),
-                new Vector2(X(lane + size, upperProgress), upperY),
-                new Vector2(X(lane + size, lowerProgress), lowerY),
-                new Vector2(X(lane - size, lowerProgress), lowerY));
+                new Vector2(X(leftLane, upperProgress), upperY),
+                new Vector2(X(rightLane, upperProgress), upperY),
+                new Vector2(X(rightLane, lowerProgress), lowerY),
+                new Vector2(X(leftLane, lowerProgress), lowerY));
         }
 
         static void ApplyNoteSurfaceQuad(HorizontalSlicedRawImage view, NoteSurfaceQuad quad)
@@ -2340,6 +2375,19 @@ namespace Gugarhythm
             view.rectTransform.anchoredPosition = center;
             view.rectTransform.sizeDelta = new Vector2(width, height);
             view.SetSurfaceQuad(quad.UpperLeft - center, quad.UpperRight - center, quad.LowerRight - center, quad.LowerLeft - center);
+        }
+
+        static void ApplyNoteSurfaceQuad(HorizontalSlicedRawImage view, NoteSurfaceMapping mapping)
+        {
+            var quad = mapping.Quad;
+            var center = (quad.UpperLeft + quad.UpperRight + quad.LowerRight + quad.LowerLeft) * .25f;
+            var width = Mathf.Max(quad.UpperRight.x - quad.UpperLeft.x, quad.LowerRight.x - quad.LowerLeft.x);
+            var height = Mathf.Max(quad.UpperLeft.y - quad.LowerLeft.y, quad.UpperRight.y - quad.LowerRight.y);
+            view.rectTransform.anchoredPosition = center;
+            view.rectTransform.sizeDelta = new Vector2(width, height);
+            view.SetSurfaceQuad(quad.UpperLeft - center, quad.UpperRight - center,
+                quad.LowerRight - center, quad.LowerLeft - center,
+                mapping.HorizontalStart, mapping.HorizontalEnd);
         }
 
         static float ScreenProgressAtY(float y) => (TopY - y) / (TopY - HitY);

@@ -16,6 +16,8 @@ namespace Gugarhythm
         Vector2 surfaceUpperRight;
         Vector2 surfaceLowerRight;
         Vector2 surfaceLowerLeft;
+        float surfaceHorizontalStart;
+        float surfaceHorizontalEnd = 1;
         bool useSurfaceQuad;
 
         public Texture texture
@@ -49,12 +51,15 @@ namespace Gugarhythm
         /// The caller owns the RectTransform's center and submits corners relative
         /// to that center, so the UI hierarchy and child effects remain unchanged.
         /// </summary>
-        public void SetSurfaceQuad(Vector2 upperLeft, Vector2 upperRight, Vector2 lowerRight, Vector2 lowerLeft)
+        public void SetSurfaceQuad(Vector2 upperLeft, Vector2 upperRight, Vector2 lowerRight, Vector2 lowerLeft,
+            float horizontalStart = 0, float horizontalEnd = 1)
         {
             surfaceUpperLeft = upperLeft;
             surfaceUpperRight = upperRight;
             surfaceLowerRight = lowerRight;
             surfaceLowerLeft = lowerLeft;
+            surfaceHorizontalStart = Mathf.Clamp01(horizontalStart);
+            surfaceHorizontalEnd = Mathf.Clamp(horizontalEnd, surfaceHorizontalStart, 1);
             useSurfaceQuad = true;
             SetVerticesDirty();
         }
@@ -101,27 +106,54 @@ namespace Gugarhythm
         {
             if (ratio <= .001f || sourceTexture == null)
             {
-                AddSurfaceQuad(helper, surfaceUpperLeft, surfaceUpperRight, surfaceLowerRight, surfaceLowerLeft, 0, 1);
+                AddSurfaceQuad(helper, surfaceUpperLeft, surfaceUpperRight, surfaceLowerRight, surfaceLowerLeft,
+                    surfaceHorizontalStart, surfaceHorizontalEnd);
                 return;
             }
 
             var averageHeight = ((surfaceUpperLeft - surfaceLowerLeft).magnitude +
                 (surfaceUpperRight - surfaceLowerRight).magnitude) * .5f;
-            var widestEdge = Mathf.Max((surfaceUpperRight - surfaceUpperLeft).magnitude,
+            var clippedWidestEdge = Mathf.Max((surfaceUpperRight - surfaceUpperLeft).magnitude,
                 (surfaceLowerRight - surfaceLowerLeft).magnitude);
+            var horizontalSpan = surfaceHorizontalEnd - surfaceHorizontalStart;
+            if (horizontalSpan <= .0001f || clippedWidestEdge <= .0001f) return;
+            var widestEdge = clippedWidestEdge / horizontalSpan;
             var sourceCapPixels = sourceTexture.width * ratio;
             var capWidth = Mathf.Min(widestEdge * .5f, averageHeight * sourceCapPixels / Mathf.Max(1, sourceTexture.height));
             var capFraction = widestEdge <= .001f ? .5f : capWidth / widestEdge;
             capFraction = Mathf.Clamp(capFraction, 0, .5f);
 
-            AddSurfaceQuad(helper, surfaceUpperLeft, Vector2.LerpUnclamped(surfaceUpperLeft, surfaceUpperRight, capFraction),
-                Vector2.LerpUnclamped(surfaceLowerLeft, surfaceLowerRight, capFraction), surfaceLowerLeft, 0, ratio);
-            AddSurfaceQuad(helper, Vector2.LerpUnclamped(surfaceUpperLeft, surfaceUpperRight, capFraction),
-                Vector2.LerpUnclamped(surfaceUpperLeft, surfaceUpperRight, 1 - capFraction),
-                Vector2.LerpUnclamped(surfaceLowerLeft, surfaceLowerRight, 1 - capFraction),
-                Vector2.LerpUnclamped(surfaceLowerLeft, surfaceLowerRight, capFraction), ratio, 1 - ratio);
-            AddSurfaceQuad(helper, Vector2.LerpUnclamped(surfaceUpperLeft, surfaceUpperRight, 1 - capFraction), surfaceUpperRight,
-                surfaceLowerRight, Vector2.LerpUnclamped(surfaceLowerLeft, surfaceLowerRight, 1 - capFraction), 1 - ratio, 1);
+            AddMappedSurfaceSegment(helper, surfaceHorizontalStart, Mathf.Min(surfaceHorizontalEnd, capFraction),
+                capFraction, ratio);
+            AddMappedSurfaceSegment(helper, Mathf.Max(surfaceHorizontalStart, capFraction),
+                Mathf.Min(surfaceHorizontalEnd, 1 - capFraction), capFraction, ratio);
+            AddMappedSurfaceSegment(helper, Mathf.Max(surfaceHorizontalStart, 1 - capFraction), surfaceHorizontalEnd,
+                capFraction, ratio);
+        }
+
+        void AddMappedSurfaceSegment(VertexHelper helper, float start, float end, float capFraction, float sourceRatio)
+        {
+            if (end <= start + .0001f) return;
+            var horizontalSpan = surfaceHorizontalEnd - surfaceHorizontalStart;
+            var localStart = (start - surfaceHorizontalStart) / horizontalSpan;
+            var localEnd = (end - surfaceHorizontalStart) / horizontalSpan;
+            AddSurfaceQuad(helper,
+                Vector2.LerpUnclamped(surfaceUpperLeft, surfaceUpperRight, localStart),
+                Vector2.LerpUnclamped(surfaceUpperLeft, surfaceUpperRight, localEnd),
+                Vector2.LerpUnclamped(surfaceLowerLeft, surfaceLowerRight, localEnd),
+                Vector2.LerpUnclamped(surfaceLowerLeft, surfaceLowerRight, localStart),
+                SourceUAt(start, capFraction, sourceRatio), SourceUAt(end, capFraction, sourceRatio));
+        }
+
+        static float SourceUAt(float horizontalPosition, float capFraction, float sourceRatio)
+        {
+            if (capFraction <= .0001f) return horizontalPosition;
+            if (horizontalPosition <= capFraction)
+                return horizontalPosition / capFraction * sourceRatio;
+            if (horizontalPosition >= 1 - capFraction)
+                return 1 - sourceRatio + (horizontalPosition - (1 - capFraction)) / capFraction * sourceRatio;
+            var centerSpan = 1 - capFraction * 2;
+            return sourceRatio + (horizontalPosition - capFraction) / centerSpan * (1 - sourceRatio * 2);
         }
 
         void AddQuad(VertexHelper helper, float x0, float x1, float y0, float y1, float u0, float u1)

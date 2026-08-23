@@ -1250,6 +1250,29 @@ public static class RuntimeValidation
         var oversizedHeadWidth = (float)clampHeadWidth.Invoke(null, new object[] { 10000f, 0f, 7f, 1f });
         Require(fullTrackHeadWidth <= completeTrackWidth + .001f && oversizedHeadWidth <= completeTrackWidth + .001f,
             "Descending Hold-head alpha bounds must never exceed the visible -6 to +6 note track");
+
+        var edgeBody = SonolusLandscapePrototype.BuildNoteSurfaceQuad(-5f, 1f, 1f, holdHeadHeight);
+        var edgeRenderSize = holdHeadQuadWidth / 147.5f;
+        var leftEdgeHead = SonolusLandscapePrototype.BuildClippedHoldHeadSurface(
+            -5f, edgeRenderSize, 1f, holdHeadHeight);
+        Require(leftEdgeHead.HorizontalStart > 0f && Math.Abs(leftEdgeHead.HorizontalEnd - 1f) < .0001f,
+            "A left-edge Hold head must crop only its out-of-track source pixels");
+        Require(Math.Abs(leftEdgeHead.Quad.UpperLeft.x - edgeBody.UpperLeft.x) < .0001f &&
+                Math.Abs(leftEdgeHead.Quad.LowerLeft.x - edgeBody.LowerLeft.x) < .0001f &&
+                leftEdgeHead.Quad.UpperRight.x > edgeBody.UpperRight.x &&
+                leftEdgeHead.Quad.LowerRight.x > edgeBody.LowerRight.x,
+            "Cropping a left-edge Hold head must preserve its authored visible body and opposite-side padding");
+
+        var rightEdgeBody = SonolusLandscapePrototype.BuildNoteSurfaceQuad(5f, 1f, 1f, holdHeadHeight);
+        var rightEdgeHead = SonolusLandscapePrototype.BuildClippedHoldHeadSurface(
+            5f, edgeRenderSize, 1f, holdHeadHeight);
+        Require(Math.Abs(rightEdgeHead.HorizontalStart) < .0001f && rightEdgeHead.HorizontalEnd < 1f,
+            "A right-edge Hold head must crop only its out-of-track source pixels");
+        Require(rightEdgeHead.Quad.UpperLeft.x < rightEdgeBody.UpperLeft.x &&
+                rightEdgeHead.Quad.LowerLeft.x < rightEdgeBody.LowerLeft.x &&
+                Math.Abs(rightEdgeHead.Quad.UpperRight.x - rightEdgeBody.UpperRight.x) < .0001f &&
+                Math.Abs(rightEdgeHead.Quad.LowerRight.x - rightEdgeBody.LowerRight.x) < .0001f,
+            "Cropping a right-edge Hold head must preserve its authored visible body and opposite-side padding");
     }
 
     static void ValidateNoteRenderVisibilityWindow()
