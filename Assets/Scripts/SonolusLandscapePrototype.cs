@@ -413,6 +413,10 @@ namespace Gugarhythm
         readonly List<IChartImporter> importers = new() { new GgrChartImporter() };
         readonly PerformanceSampleWindow performanceSamples = new(1200, 10f);
         readonly GameplayTimingSampleSet gameplayTimingSamples = new(1200, 10f);
+        readonly TimingSampleWindow rawDspDeltaSamples = new(1200, 10f);
+        readonly TimingSampleWindow presentationDeltaSamples = new(1200, 10f);
+        readonly TimingSampleWindow presentationPhaseErrorSamples = new(1200, 10f);
+        readonly TimingSampleWindow judgmentDurationSamples = new(1200, 10f);
         readonly HotPathFrameMetrics hotPathFrameMetrics = new();
         readonly HotPathTimingSampleSet hotPathTimingSamples = new(1200, 10f);
         readonly VisualFrameContext visualFrameContext = new();
@@ -573,6 +577,7 @@ namespace Gugarhythm
         bool resumeNeedsAudioReschedule;
         Coroutine resumeCoroutine;
         Coroutine holdFadeCoroutine;
+        readonly GameplayPresentationClock presentationClock = new();
         Rect appliedSafeArea = new(-1, -1, -1, -1);
         double scheduledDsp;
         double pauseDsp;
@@ -594,6 +599,8 @@ namespace Gugarhythm
         bool performanceDiagnosticsEnabled;
         double latestCpuFrameTimeMs = double.NaN;
         double latestGpuFrameTimeMs = double.NaN;
+        double previousDiagnosticsRawDspTime = double.NaN;
+        double previousDiagnosticsPresentationDspTime = double.NaN;
         float latestNotesMilliseconds;
         float latestHoldsMilliseconds;
         float latestGuidesMilliseconds;
@@ -601,6 +608,9 @@ namespace Gugarhythm
         GuideFrameSnapshot latestGuideFrameSnapshot;
         HotPathFrameSnapshot latestHotPathFrameSnapshot;
         ProfilerRecorder gcAllocationRecorder;
+
+        const double PresentationClockFallbackHardResetThreshold = .1d;
+        double presentationClockHardResetThreshold = PresentationClockFallbackHardResetThreshold;
 
         readonly struct HoldVisualRange
         {
@@ -742,6 +752,7 @@ namespace Gugarhythm
             holdPointProjector = ProjectHoldPoint;
             guideSampleProjector = ProjectGuideSample;
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
+            RefreshPresentationClockHardResetThreshold();
             Application.targetFrameRate = 120;
             LandscapeOrientation.Lock();
             QualitySettings.vSyncCount = 0;
@@ -865,6 +876,7 @@ namespace Gugarhythm
                 yield break;
             }
 
+            presentationClock.Invalidate();
             chart = result.Chart;
             musicLoadSucceeded = false;
             if (chart.BgmBytes != null)
@@ -890,6 +902,7 @@ namespace Gugarhythm
         void OnDestroy()
         {
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
+            presentationClock.Invalidate();
             StopCalibrationTickAudio();
             ClearHoldSound();
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -935,16 +948,28 @@ namespace Gugarhythm
                 else ClearHoldSound();
             }
             if (!running || paused || chart == null || judgmentEngine == null) return;
-            var songTime = CurrentSongTime();
-            lastObservedSongTime = songTime;
+            var rawDspTime = AudioSettings.dspTime;
+            var realtime = Time.realtimeSinceStartupAsDouble;
+            var authoritativeSongTime = GameplayTiming.ChartTimeAtDsp(
+                rawDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+            var presentationDspTime = presentationClock.Sample(
+                rawDspTime, realtime, presentationClockHardResetThreshold);
+            var presentationSongTime = GameplayTiming.ChartTimeAtDsp(
+                presentationDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+            lastObservedSongTime = authoritativeSongTime;
             CollectInput();
             // Input remains fully routed to JudgmentEngine below.  Do not draw
             // a full-depth lane flash here: it reads as a reflected Hold bar
             // beneath the button rather than input feedback.
-            judgmentEngine.ProcessInto(songTime, inputBatch, contacts, contactPaths,
+            var judgmentTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            judgmentEngine.ProcessInto(authoritativeSongTime, inputBatch, contacts, contactPaths,
                 autoPlayToggle != null && autoPlayToggle.isOn, judgmentEvents);
+            if (measurePerformance)
+                RecordFramePacingDiagnostics(rawDspTime, presentationDspTime,
+                    MillisecondsBetween(judgmentTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
+                    Time.unscaledDeltaTime);
             for (var index = 0; index < judgmentEvents.Count; index++) OnJudgment(judgmentEvents[index]);
-            UpdateVisuals(songTime + visualOffsetSeconds);
+            UpdateVisuals(presentationSongTime + visualOffsetSeconds);
             RefreshHud();
             if (measurePerformance)
             {
@@ -954,7 +979,7 @@ namespace Gugarhythm
                     latestSimLinesMilliseconds, Time.unscaledDeltaTime);
                 hotPathTimingSamples.AddFrame(latestHotPathFrameSnapshot, Time.unscaledDeltaTime);
             }
-            if (songTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
+            if (authoritativeSongTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
             finally
@@ -993,6 +1018,7 @@ namespace Gugarhythm
                 loading = false;
                 yield break;
             }
+            presentationClock.Invalidate();
             chart = result.Chart;
             if (chart.BgmBytes != null)
             {
@@ -1361,6 +1387,7 @@ namespace Gugarhythm
         {
             if (loading || chart == null || music.clip == null) return;
             CancelResumeCountdown();
+            presentationClock.Invalidate();
             ResetRuntime();
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
@@ -1387,7 +1414,10 @@ namespace Gugarhythm
             resumeNeedsAudioReschedule = false;
             effects.UnPause();
             holdEffects.UnPause();
-            var playbackReadyDsp = AudioSettings.dspTime + .25d;
+            var rawDspTime = AudioSettings.dspTime;
+            var realtime = Time.realtimeSinceStartupAsDouble;
+            RefreshPresentationClockHardResetThreshold();
+            var playbackReadyDsp = rawDspTime + .25d;
             var firstWaterfallSongTime = FirstWaterfallSongTimeForApproachDuration(chart, ApproachDuration);
             var earliestAudioSafeStart = GameplayTiming.EarliestAudioSafeChartTime(chart.BgmOffset, audioOffsetSeconds);
             var initialSongTime = Math.Min(0d, Math.Min(firstWaterfallSongTime, earliestAudioSafeStart));
@@ -1397,7 +1427,10 @@ namespace Gugarhythm
             // position before the scheduled audio begins. Only objects near
             // the visible waterfall are kept active; the pool absorbs the
             // first activation without rendering the whole chart at once.
-            lastObservedSongTime = CurrentSongTime();
+            lastObservedSongTime = GameplayTiming.ChartTimeAtDsp(
+                rawDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+            presentationClock.Reset(rawDspTime, realtime);
+            ResetFramePacingDiagnostics(rawDspTime, rawDspTime);
             SetGameplayStageVisible(true);
             UpdateVisuals(lastObservedSongTime + visualOffsetSeconds);
             SetGameplayLoadingVisible(false);
@@ -1411,6 +1444,7 @@ namespace Gugarhythm
             if (!running || paused) return;
             paused = true;
             pauseDsp = AudioSettings.dspTime;
+            presentationClock.Invalidate();
             music.Pause();
             effects.Pause();
             holdEffects.Pause();
@@ -1438,6 +1472,8 @@ namespace Gugarhythm
             interruptedSongTime = lastObservedSongTime;
             resumeNeedsAudioReschedule = true;
             paused = true;
+            presentationClock.Invalidate();
+            RefreshPresentationClockHardResetThreshold();
             music.Stop();
             effects.Stop();
             ClearHoldSound();
@@ -1481,10 +1517,17 @@ namespace Gugarhythm
                 accumulatedPause = 0;
                 music.PlayScheduled(playbackDsp);
                 resumeNeedsAudioReschedule = false;
+                // Hold presentation at the recovered chart anchor while DSP
+                // catches the newly scheduled start instead of snapping back.
+                presentationClock.Reset(nextDsp, Time.realtimeSinceStartupAsDouble);
+                ResetFramePacingDiagnostics(nextDsp - .25d, nextDsp);
             }
             else
             {
-                accumulatedPause += AudioSettings.dspTime - pauseDsp;
+                var resumeDsp = AudioSettings.dspTime;
+                accumulatedPause += resumeDsp - pauseDsp;
+                presentationClock.Reset(resumeDsp, Time.realtimeSinceStartupAsDouble);
+                ResetFramePacingDiagnostics(resumeDsp, resumeDsp);
                 music.UnPause();
             }
             effects.UnPause();
@@ -1499,6 +1542,7 @@ namespace Gugarhythm
         {
             if (!running) return;
             CancelResumeCountdown();
+            presentationClock.Invalidate();
             music.Stop();
             effects.Stop();
             ClearHoldSound();
@@ -1508,6 +1552,7 @@ namespace Gugarhythm
         void ExitToMenu()
         {
             CancelResumeCountdown();
+            presentationClock.Invalidate();
             running = false;
             paused = false;
             Interlocked.Exchange(ref audioDeviceChangePending, 0);
@@ -1625,6 +1670,18 @@ namespace Gugarhythm
 
         double CurrentSongTime() => GameplayTiming.ChartTimeAtDsp(
             AudioSettings.dspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+
+        void RefreshPresentationClockHardResetThreshold()
+        {
+            AudioSettings.GetDSPBufferSize(out var bufferLength, out _);
+            var sampleRate = AudioSettings.outputSampleRate;
+            var threshold = bufferLength > 0 && sampleRate > 0
+                ? 2d * bufferLength / sampleRate
+                : PresentationClockFallbackHardResetThreshold;
+            presentationClockHardResetThreshold = double.IsFinite(threshold) && threshold > 0
+                ? threshold
+                : PresentationClockFallbackHardResetThreshold;
+        }
 
         void CollectInput()
         {
@@ -2129,6 +2186,8 @@ namespace Gugarhythm
             {
                 chartRenderIndex.QueryHoldRuns(visualFrameContext, 0, ApproachDuration, visibleHoldRuns);
                 foreach (var run in visibleHoldRuns) RenderGpuPersistentHoldHead(run, visualTime);
+                foreach (var connector in chart.FallbackConnectors)
+                    RenderGpuPersistentHoldHead(connector, visualTime);
             }
             else
             {
@@ -2202,6 +2261,19 @@ namespace Gugarhythm
             var nearTime = range.NearTime;
             if (nearTime < run.Start.Time - 1e-9 || nearTime > run.End.Time + 1e-9) return;
             RenderPersistentHoldHead(root, path.Evaluator.Evaluate(nearTime));
+        }
+
+        void RenderGpuPersistentHoldHead(RuntimeConnector connector, double visualTime)
+        {
+            if (!CanRenderLegacyConnector(connector)) return;
+            var rootIndex = connector.Start.HoldRootIndex;
+            if (rootIndex < 0 || !holdRoots.TryGetValue(rootIndex, out var root) ||
+                !ShouldRenderPersistentHoldHead(root)) return;
+            var startApproach = ApproachProgress(connector.Start, visualTime);
+            var endApproach = ApproachProgress(connector.End, visualTime);
+            if (startApproach < 1f || endApproach > 1f) return;
+            var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
+            RenderPersistentHoldHead(root, connector, headT);
         }
 
         bool RenderHoldRun(HoldRenderRun run, double visualTime)
@@ -2780,6 +2852,7 @@ namespace Gugarhythm
         void FinishGame()
         {
             CancelResumeCountdown();
+            presentationClock.Invalidate();
             running = false;
             paused = false;
             music.Stop();
@@ -2954,7 +3027,7 @@ namespace Gugarhythm
         void BuildPerformanceHud(RectTransform root)
         {
             performanceHudPanel = Panel("Performance HUD", root, new Color(.015f, .03f, .08f, .88f),
-                new Vector2(570, 422), Vector2.zero);
+                new Vector2(570, 462), Vector2.zero);
             PinToAnchor(performanceHudPanel, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -112));
             Outline(performanceHudPanel.gameObject, new Color(.25f, .85f, 1f, .82f), 2);
             performanceHudPanel.GetComponent<Image>().raycastTarget = false;
@@ -2999,6 +3072,7 @@ namespace Gugarhythm
 
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
+            ResetFramePacingDiagnostics();
             hotPathTimingSamples.Reset();
             frameBudgetCounter.Reset();
             latestHotPathFrameSnapshot = default;
@@ -3027,6 +3101,10 @@ namespace Gugarhythm
             var snapshot = performanceSamples.Snapshot();
             if (snapshot.SampleCount == 0) return;
             var timings = gameplayTimingSamples.Snapshot();
+            var rawDspDelta = rawDspDeltaSamples.Snapshot();
+            var presentationDelta = presentationDeltaSamples.Snapshot();
+            var phaseError = presentationPhaseErrorSamples.Snapshot();
+            var judgmentDuration = judgmentDurationSamples.Snapshot();
             var hotPathTimings = hotPathTimingSamples.Snapshot();
             var guideFrame = latestGuideFrameSnapshot;
             var hotPathFrame = latestHotPathFrameSnapshot;
@@ -3034,7 +3112,8 @@ namespace Gugarhythm
             var refreshRate = Screen.currentResolution.refreshRateRatio.value;
             var gcBytes = gcAllocationRecorder.Valid ? gcAllocationRecorder.LastValue : -1;
             var ribbonStatus = gpuRibbonRenderer != null
-                ? $"GPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount} + CPU HOLD " +
+                ? $"{(gpuRibbonRenderer.RendersGuides ? $"GPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount}" : "CPU GUIDE")} + " +
+                  $"{(gpuRibbonRenderer.RendersHolds ? $"GPU HOLD {gpuRibbonRenderer.HoldPathCount}" : "CPU HOLD")} " +
                   $"C {gpuRibbonRenderer.ChunkCount} V {gpuRibbonRenderer.VertexCount} " +
                   $"B {gpuRibbonRenderer.StaticBuildCount} CACHE {(gpuRibbonRenderer.CacheHit ? "HIT" : "MISS")}"
                 : $"CPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount} + HOLD {gpuRibbonFallbackReason}";
@@ -3045,6 +3124,8 @@ namespace Gugarhythm
                 "10S MAX/P95/P99 ms\n" +
                 $"NOTE  {FormatTimingTriplet(timings.Notes)}   HOLD  {FormatTimingTriplet(timings.Holds)}\n" +
                 $"GUIDE {FormatTimingTriplet(timings.Guides)}   SIM   {FormatTimingTriplet(timings.SimLines)}\n" +
+                $"DSP Δ {FormatTimingTriplet(rawDspDelta)}   PRESENT Δ {FormatTimingTriplet(presentationDelta)}\n" +
+                $"PHASE {FormatTimingTriplet(phaseError)}   JUDGE {FormatTimingTriplet(judgmentDuration)}\n" +
                 ribbonStatus + "\n" +
                 $"G {guideFrame.CandidateCount}/{guideFrame.VisibleCount}  S {guideFrame.SampleCount}  " +
                 $"V {guideFrame.VertexCount}  T {guideFrame.TriangleCount}  D {guideFrame.DirtyCount}  M {guideFrame.MeshBuildMilliseconds:0.00}\n" +
@@ -3072,6 +3153,34 @@ namespace Gugarhythm
 
         static string FormatHotPathTiming(HotPathStageSnapshot current, TimingSnapshot timing) =>
             $"{current.Calls}:{current.ElapsedMilliseconds:0.00}/{timing.P95Milliseconds:0.00}/{timing.P99Milliseconds:0.00}";
+
+        void ResetFramePacingDiagnostics(double rawDspTime = double.NaN,
+            double presentationDspTime = double.NaN)
+        {
+            rawDspDeltaSamples.Reset();
+            presentationDeltaSamples.Reset();
+            presentationPhaseErrorSamples.Reset();
+            judgmentDurationSamples.Reset();
+            previousDiagnosticsRawDspTime = rawDspTime;
+            previousDiagnosticsPresentationDspTime = presentationDspTime;
+        }
+
+        void RecordFramePacingDiagnostics(double rawDspTime, double presentationDspTime,
+            float judgmentMilliseconds, float elapsedSeconds)
+        {
+            if (!performanceDiagnosticsEnabled) return;
+            if (double.IsFinite(previousDiagnosticsRawDspTime))
+                rawDspDeltaSamples.AddSample(
+                    (float)(Math.Abs(rawDspTime - previousDiagnosticsRawDspTime) * 1000d), elapsedSeconds);
+            if (double.IsFinite(previousDiagnosticsPresentationDspTime))
+                presentationDeltaSamples.AddSample(
+                    (float)(Math.Abs(presentationDspTime - previousDiagnosticsPresentationDspTime) * 1000d), elapsedSeconds);
+            presentationPhaseErrorSamples.AddSample(
+                (float)(Math.Abs(rawDspTime - presentationDspTime) * 1000d), elapsedSeconds);
+            judgmentDurationSamples.AddSample(judgmentMilliseconds, elapsedSeconds);
+            previousDiagnosticsRawDspTime = rawDspTime;
+            previousDiagnosticsPresentationDspTime = presentationDspTime;
+        }
 
         long PerformanceTimestamp() => performanceDiagnosticsEnabled
             ? System.Diagnostics.Stopwatch.GetTimestamp()
@@ -3775,6 +3884,7 @@ namespace Gugarhythm
             yield return null;
             var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
             if (!result.Success) { SetStatus("譜面載入失敗：" + result.Error); loading = false; yield break; }
+            presentationClock.Invalidate();
             chart = result.Chart;
             musicLoadSucceeded = false;
             if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);

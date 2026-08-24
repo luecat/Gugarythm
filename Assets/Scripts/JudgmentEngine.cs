@@ -118,6 +118,24 @@ namespace Gugarhythm
         readonly ScoreState score;
         readonly Dictionary<int, TapProtectionPair[]> tapProtectionPairs;
         readonly List<ContactPathSegment> recentContactPaths = new();
+        readonly RuntimeNote[][] notesByKind;
+        readonly RuntimeNote[] contactNotes;
+        readonly RuntimeNote[] discreteMissNotes;
+        readonly List<Edge> edgeWorkspace = new();
+        readonly List<List<Edge>> candidateWorkspace = new();
+        readonly Dictionary<(int NoteIndex, int FingerId), Edge> authoredBestWorkspace = new();
+        readonly List<int> inputOrderWorkspace = new();
+        readonly Dictionary<int, Edge> matchedByNoteWorkspace = new();
+        readonly List<Edge> matchedByInputWorkspace = new();
+        readonly List<bool> hasMatchedInputWorkspace = new();
+        readonly List<int> seenInputStamps = new();
+        readonly HashSet<int> seenNoteIndexes = new();
+        readonly List<Edge> registrationWorkspace = new();
+        readonly List<RuntimeNote> dueMissWorkspace = new();
+        int seenInputStamp;
+        int discreteMissCursor;
+        int contactMissCursor;
+        int autoPlayCursor;
 
         enum ProtectionBand
         {
@@ -152,6 +170,30 @@ namespace Gugarhythm
             this.notes = notes.Where(note => note.Judged).OrderBy(note => note.Time).ThenBy(note => note.Index).ToList();
             this.score = score;
             tapProtectionPairs = BuildTapProtectionPairs(this.notes);
+
+            var kindLists = new[]
+            {
+                new List<RuntimeNote>(),
+                new List<RuntimeNote>(),
+                new List<RuntimeNote>(),
+                new List<RuntimeNote>(),
+            };
+            var contactList = new List<RuntimeNote>();
+            var discreteMissList = new List<RuntimeNote>();
+            for (var index = 0; index < this.notes.Count; index++)
+            {
+                var note = this.notes[index];
+                var kindIndex = (int)note.Kind;
+                if ((uint)kindIndex < (uint)kindLists.Length) kindLists[kindIndex].Add(note);
+                if (IsContactNote(note)) contactList.Add(note);
+                else discreteMissList.Add(note);
+            }
+
+            notesByKind = new RuntimeNote[kindLists.Length][];
+            for (var kindIndex = 0; kindIndex < kindLists.Length; kindIndex++)
+                notesByKind[kindIndex] = kindLists[kindIndex].ToArray();
+            contactNotes = contactList.ToArray();
+            discreteMissNotes = discreteMissList.ToArray();
         }
 
         public IReadOnlyList<JudgmentEvent> Process(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts)
@@ -195,20 +237,37 @@ namespace Gugarhythm
 
         void ResolveAutoPlay(double songTime, List<JudgmentEvent> output)
         {
-            foreach (var note in notes)
-                if (note.Grade == JudgmentGrade.Pending && note.Time <= songTime)
-                    Register(note, JudgmentGrade.Perfect, 0, output);
+            if (double.IsNaN(songTime)) return;
+            while (autoPlayCursor < notes.Count)
+            {
+                var note = notes[autoPlayCursor];
+                if (double.IsNaN(note.Time))
+                {
+                    autoPlayCursor++;
+                    continue;
+                }
+                if (note.Time > songTime) break;
+                autoPlayCursor++;
+                if (note.Grade == JudgmentGrade.Pending) Register(note, JudgmentGrade.Perfect, 0, output);
+            }
         }
 
         void MatchDiscreteInputs(IReadOnlyList<InputToken> inputs, List<JudgmentEvent> output)
         {
             if (inputs == null || inputs.Count == 0) return;
-            var edges = new List<Edge>();
+            PrepareInputWorkspaces(inputs.Count);
             for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
             {
                 var input = inputs[inputIndex];
-                foreach (var note in notes)
+                var kindIndex = (int)input.Kind;
+                if ((uint)kindIndex >= (uint)notesByKind.Length) continue;
+                var indexedNotes = notesByKind[kindIndex];
+                CandidateTimeRange(input, out var earliestNoteTime, out var latestNoteTime);
+                var first = LowerBoundTime(indexedNotes, earliestNoteTime);
+                var end = UpperBoundTime(indexedNotes, latestNoteTime);
+                for (var noteIndex = first; noteIndex < end; noteIndex++)
                 {
+                    var note = indexedNotes[noteIndex];
                     if (note.Grade != JudgmentGrade.Pending || IsContactNote(note) || note.Kind != input.Kind) continue;
                     if (input.Kind != RuntimeNoteKind.Flick && !LaneMatches(note, input.Lane)) continue;
                     var protectionLane = input.Lane;
@@ -221,59 +280,275 @@ namespace Gugarhythm
                     if (JudgmentProtectionEnabled &&
                         IsProtectedCandidate(note, eventTime.Value, protectionLane)) continue;
                     var spatial = Math.Abs(input.Lane - note.Lane);
-                    edges.Add(new Edge(inputIndex, note, eventTime.Value, grade, Math.Abs(eventTime.Value - note.Time), spatial));
+                    edgeWorkspace.Add(new Edge(inputIndex, note, eventTime.Value, grade, Math.Abs(eventTime.Value - note.Time), spatial));
                 }
             }
 
             // A rub can emit several neighbouring cell activations in one
             // batch. If one of them is inside a note's authored span, do not
             // let an earlier forgiveness-only edge reserve that note first.
-            var bestAuthoredMatches = edges
-                .Where(edge => inputs[edge.InputIndex].Kind != RuntimeNoteKind.Flick &&
-                               LaneInAuthoredSpan(edge.Note, inputs[edge.InputIndex].Lane))
-                .GroupBy(edge => (edge.Note.Index, inputs[edge.InputIndex].FingerId))
-                .ToDictionary(group => group.Key, group => group.Aggregate((best, candidate) =>
-                    CompareEdges(candidate, best) < 0 ? candidate : best));
-            edges.RemoveAll(edge => bestAuthoredMatches.TryGetValue(
-                    (edge.Note.Index, inputs[edge.InputIndex].FingerId), out var authored) &&
-                inputs[edge.InputIndex].Kind != RuntimeNoteKind.Flick &&
-                !LaneInAuthoredSpan(edge.Note, inputs[edge.InputIndex].Lane) &&
-                CompareEdges(authored, edge) <= 0);
+            for (var edgeIndex = 0; edgeIndex < edgeWorkspace.Count; edgeIndex++)
+            {
+                var edge = edgeWorkspace[edgeIndex];
+                var input = inputs[edge.InputIndex];
+                if (input.Kind == RuntimeNoteKind.Flick || !LaneInAuthoredSpan(edge.Note, input.Lane)) continue;
+                var key = (edge.Note.Index, input.FingerId);
+                if (!authoredBestWorkspace.TryGetValue(key, out var best) || CompareEdges(edge, best) < 0)
+                    authoredBestWorkspace[key] = edge;
+            }
 
-            var candidates = edges.GroupBy(edge => edge.InputIndex).ToDictionary(group => group.Key, group => group.OrderBy(edge => GradeRank(edge.Grade))
-                .ThenBy(edge => edge.TimeError).ThenBy(edge => edge.SpaceError).ThenBy(edge => edge.Note.Index).ToList());
-            var inputOrder = Enumerable.Range(0, inputs.Count).Where(candidates.ContainsKey)
-                .OrderBy(index => candidates[index].Count)
-                .ThenBy(index => candidates[index][0], Comparer<Edge>.Create(CompareEdges))
-                .ToArray();
-            var matchedByNote = new Dictionary<int, Edge>();
-            var matchedByInput = new Dictionary<int, Edge>();
-            foreach (var inputIndex in inputOrder)
-                TryAugment(inputIndex, candidates, matchedByNote, matchedByInput, new HashSet<int>(), new HashSet<int>());
+            var retainedCount = 0;
+            for (var edgeIndex = 0; edgeIndex < edgeWorkspace.Count; edgeIndex++)
+            {
+                var edge = edgeWorkspace[edgeIndex];
+                var input = inputs[edge.InputIndex];
+                var remove = input.Kind != RuntimeNoteKind.Flick &&
+                    !LaneInAuthoredSpan(edge.Note, input.Lane) &&
+                    authoredBestWorkspace.TryGetValue((edge.Note.Index, input.FingerId), out var authored) &&
+                    CompareEdges(authored, edge) <= 0;
+                if (!remove) edgeWorkspace[retainedCount++] = edge;
+            }
+            if (retainedCount < edgeWorkspace.Count)
+                edgeWorkspace.RemoveRange(retainedCount, edgeWorkspace.Count - retainedCount);
 
-            foreach (var edge in matchedByInput.Values.OrderBy(edge => edge.EventTime).ThenBy(edge => edge.Note.Index))
+            for (var edgeIndex = 0; edgeIndex < edgeWorkspace.Count; edgeIndex++)
+            {
+                var edge = edgeWorkspace[edgeIndex];
+                candidateWorkspace[edge.InputIndex].Add(edge);
+            }
+            for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
+            {
+                var candidates = candidateWorkspace[inputIndex];
+                if (candidates.Count == 0) continue;
+                StableSortEdges(candidates);
+                inputOrderWorkspace.Add(inputIndex);
+            }
+            StableSortInputOrder(inputOrderWorkspace, candidateWorkspace);
+
+            for (var orderIndex = 0; orderIndex < inputOrderWorkspace.Count; orderIndex++)
+            {
+                BeginAugmentSearch();
+                TryAugment(inputOrderWorkspace[orderIndex]);
+            }
+
+            for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
+                if (hasMatchedInputWorkspace[inputIndex]) registrationWorkspace.Add(matchedByInputWorkspace[inputIndex]);
+            StableSortRegistrationEdges(registrationWorkspace);
+            for (var edgeIndex = 0; edgeIndex < registrationWorkspace.Count; edgeIndex++)
+            {
+                var edge = registrationWorkspace[edgeIndex];
                 Register(edge.Note, edge.Grade, edge.EventTime - edge.Note.Time, output);
+            }
         }
 
-        static bool TryAugment(int inputIndex, IReadOnlyDictionary<int, List<Edge>> candidates, Dictionary<int, Edge> matchedByNote,
-            Dictionary<int, Edge> matchedByInput, HashSet<int> seenInputs, HashSet<int> seenNotes)
+        bool TryAugment(int inputIndex)
         {
-            if (!seenInputs.Add(inputIndex) || !candidates.TryGetValue(inputIndex, out var choices)) return false;
-            foreach (var edge in choices)
+            if (seenInputStamps[inputIndex] == seenInputStamp) return false;
+            seenInputStamps[inputIndex] = seenInputStamp;
+            var choices = candidateWorkspace[inputIndex];
+            if (choices.Count == 0) return false;
+            for (var choiceIndex = 0; choiceIndex < choices.Count; choiceIndex++)
             {
-                if (!seenNotes.Add(edge.Note.Index)) continue;
-                if (!matchedByNote.TryGetValue(edge.Note.Index, out var occupied))
+                var edge = choices[choiceIndex];
+                if (!seenNoteIndexes.Add(edge.Note.Index)) continue;
+                if (!matchedByNoteWorkspace.TryGetValue(edge.Note.Index, out var occupied))
                 {
-                    matchedByNote[edge.Note.Index] = edge;
-                    matchedByInput[edge.InputIndex] = edge;
+                    matchedByNoteWorkspace[edge.Note.Index] = edge;
+                    matchedByInputWorkspace[edge.InputIndex] = edge;
+                    hasMatchedInputWorkspace[edge.InputIndex] = true;
                     return true;
                 }
-                if (!TryAugment(occupied.InputIndex, candidates, matchedByNote, matchedByInput, seenInputs, seenNotes)) continue;
-                matchedByNote[edge.Note.Index] = edge;
-                matchedByInput[edge.InputIndex] = edge;
+                if (!TryAugment(occupied.InputIndex)) continue;
+                matchedByNoteWorkspace[edge.Note.Index] = edge;
+                matchedByInputWorkspace[edge.InputIndex] = edge;
+                hasMatchedInputWorkspace[edge.InputIndex] = true;
                 return true;
             }
             return false;
+        }
+
+        void PrepareInputWorkspaces(int inputCount)
+        {
+            edgeWorkspace.Clear();
+            authoredBestWorkspace.Clear();
+            inputOrderWorkspace.Clear();
+            matchedByNoteWorkspace.Clear();
+            seenNoteIndexes.Clear();
+            registrationWorkspace.Clear();
+
+            while (candidateWorkspace.Count < inputCount)
+            {
+                candidateWorkspace.Add(new List<Edge>());
+                matchedByInputWorkspace.Add(default);
+                hasMatchedInputWorkspace.Add(false);
+                seenInputStamps.Add(0);
+            }
+            for (var inputIndex = 0; inputIndex < candidateWorkspace.Count; inputIndex++)
+                candidateWorkspace[inputIndex].Clear();
+            for (var inputIndex = 0; inputIndex < inputCount; inputIndex++)
+                hasMatchedInputWorkspace[inputIndex] = false;
+        }
+
+        void BeginAugmentSearch()
+        {
+            seenNoteIndexes.Clear();
+            if (seenInputStamp == int.MaxValue)
+            {
+                for (var index = 0; index < seenInputStamps.Count; index++) seenInputStamps[index] = 0;
+                seenInputStamp = 1;
+                return;
+            }
+            seenInputStamp++;
+        }
+
+        static void CandidateTimeRange(InputToken input, out double earliest, out double latest)
+        {
+            if (input.Kind == RuntimeNoteKind.Flick)
+            {
+                earliest = Math.Min(input.PreviousTime, input.Time) - AttackWindow;
+                latest = Math.Max(input.PreviousTime, input.Time) + AttackWindow;
+            }
+            else
+            {
+                earliest = input.Time - AttackWindow;
+                latest = input.Time + AttackWindow;
+            }
+
+            if (double.IsNaN(earliest) || double.IsNaN(latest))
+            {
+                earliest = double.NegativeInfinity;
+                latest = double.PositiveInfinity;
+                return;
+            }
+            WidenTimeRange(ref earliest, ref latest);
+        }
+
+        static void WidenTimeRange(ref double earliest, ref double latest)
+        {
+            earliest = PreviousDouble(earliest);
+            latest = NextDouble(latest);
+        }
+
+        static double PreviousDouble(double value)
+        {
+            if (double.IsNaN(value) || double.IsNegativeInfinity(value)) return value;
+            if (value == 0) return -double.Epsilon;
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            return BitConverter.Int64BitsToDouble(value > 0 ? bits - 1 : bits + 1);
+        }
+
+        static double NextDouble(double value)
+        {
+            if (double.IsNaN(value) || double.IsPositiveInfinity(value)) return value;
+            if (value == 0) return double.Epsilon;
+            var bits = BitConverter.DoubleToInt64Bits(value);
+            return BitConverter.Int64BitsToDouble(value > 0 ? bits + 1 : bits - 1);
+        }
+
+        static int LowerBoundTime(RuntimeNote[] indexedNotes, double time)
+        {
+            var low = 0;
+            var high = indexedNotes.Length;
+            while (low < high)
+            {
+                var middle = low + (high - low) / 2;
+                if (indexedNotes[middle].Time.CompareTo(time) < 0) low = middle + 1;
+                else high = middle;
+            }
+            return low;
+        }
+
+        static int UpperBoundTime(RuntimeNote[] indexedNotes, double time)
+        {
+            var low = 0;
+            var high = indexedNotes.Length;
+            while (low < high)
+            {
+                var middle = low + (high - low) / 2;
+                if (indexedNotes[middle].Time.CompareTo(time) <= 0) low = middle + 1;
+                else high = middle;
+            }
+            return low;
+        }
+
+        static void StableSortEdges(List<Edge> edges)
+        {
+            for (var index = 1; index < edges.Count; index++)
+            {
+                var value = edges[index];
+                var destination = index;
+                while (destination > 0 && CompareEdges(value, edges[destination - 1]) < 0)
+                {
+                    edges[destination] = edges[destination - 1];
+                    destination--;
+                }
+                edges[destination] = value;
+            }
+        }
+
+        static void StableSortInputOrder(List<int> inputOrder, List<List<Edge>> candidates)
+        {
+            for (var index = 1; index < inputOrder.Count; index++)
+            {
+                var value = inputOrder[index];
+                var destination = index;
+                while (destination > 0 && CompareInputOrder(value, inputOrder[destination - 1], candidates) < 0)
+                {
+                    inputOrder[destination] = inputOrder[destination - 1];
+                    destination--;
+                }
+                inputOrder[destination] = value;
+            }
+        }
+
+        static int CompareInputOrder(int a, int b, List<List<Edge>> candidates)
+        {
+            var count = candidates[a].Count.CompareTo(candidates[b].Count);
+            if (count != 0) return count;
+            var first = CompareEdges(candidates[a][0], candidates[b][0]);
+            return first != 0 ? first : a.CompareTo(b);
+        }
+
+        static void StableSortRegistrationEdges(List<Edge> edges)
+        {
+            for (var index = 1; index < edges.Count; index++)
+            {
+                var value = edges[index];
+                var destination = index;
+                while (destination > 0 && CompareRegistrationEdges(value, edges[destination - 1]) < 0)
+                {
+                    edges[destination] = edges[destination - 1];
+                    destination--;
+                }
+                edges[destination] = value;
+            }
+        }
+
+        static int CompareRegistrationEdges(Edge a, Edge b)
+        {
+            var time = a.EventTime.CompareTo(b.EventTime);
+            return time != 0 ? time : a.Note.Index.CompareTo(b.Note.Index);
+        }
+
+        static void StableSortNotes(List<RuntimeNote> sortedNotes)
+        {
+            for (var index = 1; index < sortedNotes.Count; index++)
+            {
+                var value = sortedNotes[index];
+                var destination = index;
+                while (destination > 0 && CompareNotes(value, sortedNotes[destination - 1]) < 0)
+                {
+                    sortedNotes[destination] = sortedNotes[destination - 1];
+                    destination--;
+                }
+                sortedNotes[destination] = value;
+            }
+        }
+
+        static int CompareNotes(RuntimeNote a, RuntimeNote b)
+        {
+            var time = a.Time.CompareTo(b.Time);
+            return time != 0 ? time : a.Index.CompareTo(b.Index);
         }
 
         static int CompareEdges(Edge a, Edge b)
@@ -290,8 +565,14 @@ namespace Gugarhythm
         void ResolveContactNotes(double songTime, IReadOnlyList<ActiveContact> contacts, IReadOnlyList<ContactPathSegment> contactPaths,
             List<JudgmentEvent> output)
         {
-            foreach (var note in notes)
+            if (double.IsNaN(songTime)) return;
+            var earliestNoteTime = PreviousDouble(songTime - SustainLateWindow);
+            var latestNoteTime = NextDouble(songTime);
+            var first = LowerBoundTime(contactNotes, earliestNoteTime);
+            var end = UpperBoundTime(contactNotes, latestNoteTime);
+            for (var noteIndex = first; noteIndex < end; noteIndex++)
             {
+                var note = contactNotes[noteIndex];
                 if (note.Grade != JudgmentGrade.Pending || !IsContactNote(note) || songTime < note.Time) continue;
                 var coverageTime = LatestCoverageTime(note, songTime, contacts);
                 if (coverageTime.HasValue && songTime - note.Time <= SustainLateWindow)
@@ -335,12 +616,30 @@ namespace Gugarhythm
 
         void CommitMisses(double songTime, List<JudgmentEvent> output)
         {
-            foreach (var note in notes)
+            dueMissWorkspace.Clear();
+            CollectDueMisses(discreteMissNotes, ref discreteMissCursor, songTime, AttackWindow);
+            CollectDueMisses(contactNotes, ref contactMissCursor, songTime, SustainLateWindow);
+            StableSortNotes(dueMissWorkspace);
+            for (var noteIndex = 0; noteIndex < dueMissWorkspace.Count; noteIndex++)
             {
-                if (note.Grade != JudgmentGrade.Pending) continue;
-                var late = IsContactNote(note) ? SustainLateWindow : OuterLateWindow(note);
-                if (songTime - note.Time > late + CommitGrace)
-                    Register(note, JudgmentGrade.Miss, songTime - note.Time, output);
+                var note = dueMissWorkspace[noteIndex];
+                Register(note, JudgmentGrade.Miss, songTime - note.Time, output);
+            }
+        }
+
+        void CollectDueMisses(RuntimeNote[] indexedNotes, ref int cursor, double songTime, double lateWindow)
+        {
+            while (cursor < indexedNotes.Length)
+            {
+                var note = indexedNotes[cursor];
+                if (double.IsNaN(note.Time))
+                {
+                    cursor++;
+                    continue;
+                }
+                if (!(songTime - note.Time > lateWindow + CommitGrace)) break;
+                cursor++;
+                if (note.Grade == JudgmentGrade.Pending) dueMissWorkspace.Add(note);
             }
         }
 

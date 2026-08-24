@@ -14,8 +14,8 @@ namespace Gugarhythm
     public static class GpuRibbonCache
     {
         const int Magic = 0x47525055; // UPRG
-        const int FormatVersion = 4;
-        const int BuildKeyVersion = 3;
+        const int FormatVersion = 5;
+        const int BuildKeyVersion = 4;
         const int MaximumChunkCount = 4096;
         const int MaximumVertexCount = 8_000_000;
         const int MaximumIndexCount = 24_000_000;
@@ -181,6 +181,8 @@ namespace Gugarhythm
                     writer.Write(vertex.color.a);
                     writer.Write(vertex.uv0.x);
                     writer.Write(vertex.uv0.y);
+                    writer.Write(vertex.uv0.z);
+                    writer.Write(vertex.uv0.w);
                 }
                 writer.Write(chunk.Indices.Length);
                 foreach (var index in chunk.Indices) writer.Write(index);
@@ -224,7 +226,8 @@ namespace Gugarhythm
                         var vertex = UIVertex.simpleVert;
                         vertex.position = new Vector3(reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle());
                         vertex.color = new Color32(reader.ReadByte(), reader.ReadByte(), reader.ReadByte(), reader.ReadByte());
-                        vertex.uv0 = new Vector4(reader.ReadSingle(), reader.ReadSingle(), 0, 0);
+                        vertex.uv0 = new Vector4(reader.ReadSingle(), reader.ReadSingle(),
+                            reader.ReadSingle(), reader.ReadSingle());
                         vertex.uv1 = vertex.uv2 = vertex.uv3 = Vector4.zero;
                         vertices[vertexIndex] = vertex;
                     }

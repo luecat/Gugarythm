@@ -63,7 +63,7 @@ Shader "Gugarhythm/GPU Ribbon UI"
             {
                 float4 vertex : POSITION;
                 float4 color : COLOR;
-                float2 texcoord : TEXCOORD0;
+                float4 texcoord : TEXCOORD0;
             };
 
             struct v2f
@@ -144,7 +144,8 @@ Shader "Gugarhythm/GPU Ribbon UI"
                 float size = input.vertex.y;
                 float targetPosition = input.vertex.z;
                 float side = input.texcoord.x * 2.0 - 1.0;
-                float groupIndex = round(input.color.r * 255.0) + round(input.color.g * 255.0) * 256.0;
+                float groupIndex = round(input.texcoord.z);
+                float auxiliaryIndex = round(input.texcoord.w);
                 int currentGroup = (int)clamp(groupIndex, 0.0, min(255.0, _GroupCount - 1.0));
                 float currentPosition = _GroupPositions[currentGroup];
                 float approach = 1.0 - (targetPosition - currentPosition) / max(0.0001, _ApproachDuration);
@@ -155,15 +156,12 @@ Shader "Gugarhythm/GPU Ribbon UI"
                 output.worldPosition = input.vertex;
                 output.vertex = UnityObjectToClipPos(input.vertex);
                 output.texcoord = float2(lerp(_UvInset, 1.0 - _UvInset, input.texcoord.x), input.texcoord.y);
-                float auxiliaryLow = round(input.color.b * 255.0);
-                float auxiliaryHigh = round(input.color.a * 255.0);
                 output.color = _IsHold > .5
-                    ? fixed4(1, 1, 1, _RibbonOpacity)
-                    : GuideColor(auxiliaryLow) * fixed4(1, 1, 1, input.color.a);
+                    ? fixed4(1, 1, 1, _RibbonOpacity * input.color.a)
+                    : GuideColor(auxiliaryIndex) * fixed4(1, 1, 1, input.color.a);
                 output.clipState = float3(approach, 0, 1);
-                float stateIndex = auxiliaryLow + auxiliaryHigh * 256.0;
-                output.worldPosition.w = _IsHold > .5 && stateIndex < _HoldStateCount
-                    ? (stateIndex + .5) / max(1.0, _HoldStateCount)
+                output.worldPosition.w = _IsHold > .5 && auxiliaryIndex < _HoldStateCount
+                    ? (auxiliaryIndex + .5) / max(1.0, _HoldStateCount)
                     : -1;
                 return output;
             }

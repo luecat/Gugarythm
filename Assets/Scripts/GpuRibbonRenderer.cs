@@ -159,15 +159,14 @@ namespace Gugarhythm
                 fallbackReason = "GPU ribbon initialization is missing chart or Canvas state.";
                 return false;
             }
-            // Guide geometry is safe to keep immutable on the GPU. Hold bodies
-            // still need the CPU renderer's runtime clipping/tessellation for
-            // complete paths, so use a hybrid renderer instead of disabling
-            // GPU Guides whenever the chart contains a Hold.
+            // Guide and Hold body geometry is immutable after chart load. The CPU
+            // keeps judgment and persistent Hold heads; the shader owns per-frame
+            // projection, clipping, and missed-state presentation for the bodies.
             var renderGuides = chart.Guides.Count > 0;
-            const bool renderHolds = false;
-            if (!renderGuides)
+            var renderHolds = chart.HoldPaths.Count > 0 || chart.FallbackConnectors.Count > 0;
+            if (!renderGuides && !renderHolds)
             {
-                fallbackReason = "GPU Guide renderer has no decoration paths; using the CPU Hold renderer.";
+                fallbackReason = "GPU ribbon renderer has no Guide or Hold paths.";
                 return false;
             }
             var shader = Resources.Load<Shader>("Shaders/GpuRibbonUI");
@@ -179,9 +178,19 @@ namespace Gugarhythm
             try
             {
                 var build = GpuRibbonCache.LoadOrBuild(chart, guideCaches, out var cacheHit);
+                if (renderHolds && !TryValidateCompleteHoldBuild(chart, build, out var holdReason))
+                {
+                    renderHolds = false;
+                    Debug.LogWarning("GPU Hold ribbon disabled; using the CPU Hold renderer: " + holdReason);
+                }
+                if (!renderGuides && !renderHolds)
+                {
+                    fallbackReason = "GPU Hold ribbon data is incomplete; using the CPU Hold renderer.";
+                    return false;
+                }
                 if (!SupportsGroupPositionCount(build.GroupNames.Count))
                 {
-                    fallbackReason = $"GPU Guide renderer supports 1-{MaximumGroupPositionCount} time-scale groups; " +
+                    fallbackReason = $"GPU ribbon renderer supports 1-{MaximumGroupPositionCount} time-scale groups; " +
                                      $"chart contains {build.GroupNames.Count}.";
                     return false;
                 }
@@ -225,6 +234,88 @@ namespace Gugarhythm
 
         public static bool SupportsGroupPositionCount(int count) =>
             count > 0 && count <= MaximumGroupPositionCount;
+
+        static bool TryValidateCompleteHoldBuild(RuntimeChart sourceChart, GpuRibbonBuildResult build,
+            out string reason)
+        {
+            var expectedPathCount = 0;
+            foreach (var path in sourceChart.HoldPaths)
+                expectedPathCount += path == null ? 1 : Mathf.Max(1, path.RenderRuns.Count);
+            expectedPathCount += sourceChart.FallbackConnectors.Count;
+
+            if (build.HoldPathCount != expectedPathCount)
+            {
+                reason = $"Built {build.HoldPathCount} of {expectedPathCount} requested Hold paths.";
+                return false;
+            }
+
+            var holdChunkCount = 0;
+            foreach (var chunk in build.Chunks)
+            {
+                if (chunk == null || chunk.Kind == GpuRibbonKind.Guide) continue;
+                holdChunkCount++;
+                if (!TryNormalizeChunk(chunk, out var vertices, out var indices, out var warning) || warning != null)
+                {
+                    reason = warning ?? "Hold chunk normalization failed.";
+                    return false;
+                }
+                if (indices.Length % 6 != 0)
+                {
+                    reason = $"Hold chunk has incomplete quad indices: {indices.Length}.";
+                    return false;
+                }
+                foreach (var vertex in vertices)
+                {
+                    if (!float.IsFinite(vertex.uv0.z) || !float.IsFinite(vertex.uv0.w))
+                    {
+                        reason = "Hold chunk has non-finite UV0 metadata.";
+                        return false;
+                    }
+                    var groupIndex = Mathf.RoundToInt(vertex.uv0.z);
+                    var stateIndex = Mathf.RoundToInt(vertex.uv0.w);
+                    if (groupIndex < 0 || groupIndex >= build.GroupNames.Count ||
+                        (stateIndex != 0xffff && (stateIndex < 0 || stateIndex >= build.HoldRootStates.Count)))
+                    {
+                        reason = "Hold chunk references an unavailable group or state slot.";
+                        return false;
+                    }
+                }
+                for (var index = 0; index < indices.Length; index += 3)
+                {
+                    var firstGroup = Mathf.RoundToInt(vertices[indices[index]].uv0.z);
+                    var secondGroup = Mathf.RoundToInt(vertices[indices[index + 1]].uv0.z);
+                    var thirdGroup = Mathf.RoundToInt(vertices[indices[index + 2]].uv0.z);
+                    if (firstGroup == secondGroup && firstGroup == thirdGroup) continue;
+                    reason = "Hold triangle crosses time-scale group slots.";
+                    return false;
+                }
+            }
+
+            if (expectedPathCount > 0 && holdChunkCount == 0)
+            {
+                reason = "No Hold chunks were built.";
+                return false;
+            }
+
+            foreach (var path in sourceChart.HoldPaths)
+            {
+                if (path?.RootIndex >= 0 && !build.HoldRootStates.ContainsKey(path.RootIndex))
+                {
+                    reason = $"Hold root {path.RootIndex} has no state-texture slot.";
+                    return false;
+                }
+            }
+            foreach (var connector in sourceChart.FallbackConnectors)
+            {
+                var rootIndex = connector?.Start?.HoldRootIndex ?? -1;
+                if (rootIndex < 0 || build.HoldRootStates.ContainsKey(rootIndex)) continue;
+                reason = $"Fallback Hold root {rootIndex} has no state-texture slot.";
+                return false;
+            }
+
+            reason = null;
+            return true;
+        }
 
         public void SetHoldMissed(int rootIndex, bool missed)
         {

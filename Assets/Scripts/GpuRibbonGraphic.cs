@@ -76,6 +76,7 @@ namespace Gugarhythm
         {
             base.OnEnable();
             useLegacyMeshGeneration = false;
+            canvasRenderer.cullTransparentMesh = false;
         }
 
         protected override void OnPopulateMesh(VertexHelper helper)

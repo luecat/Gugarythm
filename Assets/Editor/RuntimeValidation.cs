@@ -20,6 +20,15 @@ public static class RuntimeValidation
         Debug.Log("GUGARHYTHM_RENDERING_PERFORMANCE_VALIDATION_OK");
     }
 
+    [MenuItem("Gugarhythm/Validate Frame Pacing Fixes")]
+    public static void ValidateFramePacingFixes()
+    {
+        ValidateGpuRibbonRendering();
+        ValidateGameplayPresentationClock();
+        ValidateJudgmentIndexedEquivalence();
+        Debug.Log("GUGARHYTHM_FRAME_PACING_FIXES_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Start Loaded Chart _F8", true)]
     static bool CanStartLoadedChart() => EditorApplication.isPlaying;
 
@@ -40,6 +49,7 @@ public static class RuntimeValidation
         ValidateInitialWaterfallTiming();
         ValidatePerformanceSampleWindow();
         ValidateTimingSampleWindow();
+        ValidateGameplayPresentationClock();
         ValidateVisualFrameContext();
         ValidateGameplayTimingSampleSet();
         ValidateTimingAndHotPathReuse();
@@ -176,6 +186,7 @@ public static class RuntimeValidation
 
         ValidateJudgedVisualMasking();
         ValidateJudgmentRules();
+        ValidateJudgmentIndexedEquivalence();
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         ValidateLatencyCalibrationMath();
@@ -261,6 +272,60 @@ public static class RuntimeValidation
         hotPathSamples.AddFrame(hotPathSnapshot, 1f / 120f);
         Require(Math.Abs(hotPathSamples.Snapshot().GuideTessellation.P95Milliseconds - 1.5f) < .001f,
             "Hot-path timing windows must expose independent P95 values from immutable frame snapshots");
+    }
+
+    static void ValidateGameplayPresentationClock()
+    {
+        const double renderDelta = 1d / 120d;
+        const double dspQuantum = 1024d / 48000d;
+        const double hardResetThreshold = dspQuantum * 2d;
+        const double startDsp = 100d;
+        var clock = new GameplayPresentationClock();
+        clock.Reset(startDsp, 0);
+        var previous = startDsp;
+        for (var frame = 1; frame <= 240; frame++)
+        {
+            var realtime = frame * renderDelta;
+            var rawDsp = startDsp + Math.Floor(realtime / dspQuantum) * dspQuantum;
+            var presented = clock.Sample(rawDsp, realtime, hardResetThreshold);
+            Require(double.IsFinite(presented) && presented > previous,
+                $"Presentation time must remain finite and advance on normal frame {frame}");
+            Require(Math.Abs(rawDsp - presented) <= hardResetThreshold + 1e-9,
+                $"Presentation phase error exceeded the two-buffer contract on frame {frame}");
+            var correction = presented - previous - renderDelta;
+            Require(Math.Abs(correction) <= Math.Min(.002d, renderDelta * .125d) + 1e-9,
+                $"Presentation slew exceeded its per-frame correction contract on frame {frame}");
+            previous = presented;
+        }
+
+        clock.Invalidate();
+        clock.Reset(10, 20);
+        Require(Math.Abs(clock.Sample(10, 20 + renderDelta, hardResetThreshold) - (10 + renderDelta)) < 1e-9,
+            "Starting gameplay must extrapolate from the reset DSP/realtime anchor");
+        clock.Invalidate();
+        Require(Math.Abs(clock.Sample(12, 30, hardResetThreshold) - 12) < 1e-9,
+            "A paused invalidated clock must reanchor without retaining the prior epoch");
+        clock.Invalidate();
+        clock.Reset(8, 40);
+        Require(Math.Abs(clock.Sample(8, 40 + renderDelta, hardResetThreshold) - (8 + renderDelta)) < 1e-9,
+            "Ordinary resume must start a new presentation epoch at its supplied anchor");
+        clock.Invalidate();
+        clock.Reset(25, 50);
+        Require(Math.Abs(clock.Sample(25, 50 + renderDelta, hardResetThreshold) - (25 + renderDelta)) < 1e-9,
+            "Audio-device reschedule must restart presentation at the recovered DSP anchor");
+
+        clock.Reset(30, 60);
+        var beforeDiscontinuity = clock.Sample(30, 60 + renderDelta, hardResetThreshold);
+        var backwardDsp = clock.Sample(29, 60 + renderDelta * 2, hardResetThreshold);
+        Require(double.IsFinite(backwardDsp) && backwardDsp >= beforeDiscontinuity,
+            "A backward DSP discontinuity must reanchor without moving backward inside an epoch");
+        var hardReset = clock.Sample(40, 60 + renderDelta * 3, hardResetThreshold);
+        Require(double.IsFinite(hardReset) && hardReset >= backwardDsp && Math.Abs(hardReset - 40) < 1e-9,
+            "A phase discontinuity beyond the hard-reset threshold must reanchor to raw DSP");
+        clock.Invalidate();
+        clock.Reset(5, 70);
+        Require(Math.Abs(clock.Sample(5, 70, hardResetThreshold) - 5) < 1e-9,
+            "Explicit invalidation must permit a new lifecycle epoch to restart at an earlier chart anchor");
     }
 
     static void ValidateVisualFrameContext()
@@ -1868,12 +1933,25 @@ public static class RuntimeValidation
         var tail = new RuntimeNote
         {
             Index = 11, Time = 3, Beat = 3, Lane = 2, Size = 2, Kind = RuntimeNoteKind.Release,
-            HoldRootIndex = 10, TimeScaleGroup = "main", Visible = true, Judged = true,
+            HoldRootIndex = 10, TimeScaleGroup = "alt", Visible = true, Judged = true,
+        };
+        var seam = new RuntimeNote
+        {
+            Index = 12, Time = 1.5, Beat = 1.5, Lane = .5f, Size = 1.5f, Kind = RuntimeNoteKind.Sustain,
+            HoldRootIndex = 10, TimeScaleGroup = "alt", Visible = true, Judged = true,
         };
         chart.Notes.Add(head);
+        chart.Notes.Add(seam);
         chart.Notes.Add(tail);
-        chart.Connectors.Add(new RuntimeConnector { Start = head, End = tail, Ease = 3, Critical = false });
+        chart.Connectors.Add(new RuntimeConnector { Start = head, End = seam, Ease = 3, Critical = false });
+        chart.Connectors.Add(new RuntimeConnector { Start = seam, End = tail, Ease = 3, Critical = false });
         var paths = HoldPathBuilder.Build(chart);
+        Require(paths.Paths.Count == 0,
+            $"Cross-TimeScaleGroup Hold fixture must use fallback rendering: expected 0 built paths, " +
+            $"actual {paths.Paths.Count}");
+        Require(paths.FallbackConnectors.Count == 2,
+            $"Cross-TimeScaleGroup Hold fixture must preserve both source connectors as fallbacks: " +
+            $"expected 2, actual {paths.FallbackConnectors.Count}");
         chart.HoldPaths.AddRange(paths.Paths);
         chart.FallbackConnectors.AddRange(paths.FallbackConnectors);
         RuntimeNote FallbackPoint(int index, double time, float lane, int root) => new()
@@ -1900,12 +1978,42 @@ public static class RuntimeValidation
         };
         var first = GpuRibbonMeshBuilder.Build(chart, caches);
         var second = GpuRibbonMeshBuilder.Build(chart, caches);
-        Require(first.GuidePathCount == 2 && first.HoldPathCount == 3 && first.Chunks.Count == 3,
-            "GPU ribbon mesh build must retain independent Guide and Hold paths");
-        Require(first.Chunks.Count(chunk => chunk.Kind == GpuRibbonKind.Guide) == 1,
-            "GPU ribbon preload must merge Guide paths across time-scale groups into one immutable batch");
-        Require(first.Chunks.GroupBy(chunk => chunk.Kind).All(group => group.Count() == 1),
-            "GPU ribbon preload must merge interleaved Hold styles into one immutable batch per material");
+        var expectedGuidePathCount = chart.Guides.Count(candidate =>
+            candidate != null && caches.ContainsKey(candidate));
+        var expectedHoldPathCount = chart.HoldPaths.Where(path => path != null)
+            .Sum(path => path.RenderRuns.Count) +
+            chart.FallbackConnectors.Count(connector => connector?.Start != null && connector.End != null);
+        var expectedChunkKinds = new HashSet<GpuRibbonKind>();
+        if (expectedGuidePathCount > 0) expectedChunkKinds.Add(GpuRibbonKind.Guide);
+        foreach (var path in chart.HoldPaths.Where(path => path != null))
+            foreach (var run in path.RenderRuns)
+                expectedChunkKinds.Add(run.Critical ? GpuRibbonKind.HoldCritical : GpuRibbonKind.HoldNormal);
+        foreach (var connector in chart.FallbackConnectors.Where(connector =>
+                     connector?.Start != null && connector.End != null))
+            expectedChunkKinds.Add(connector.Critical ? GpuRibbonKind.HoldCritical : GpuRibbonKind.HoldNormal);
+        var actualChunkKindCounts = first.Chunks.GroupBy(chunk => chunk.Kind)
+            .ToDictionary(group => group.Key, group => group.Count());
+        Require(first.GuidePathCount == expectedGuidePathCount,
+            $"GPU ribbon Guide ownership count drifted: expected {expectedGuidePathCount} requested paths, " +
+            $"actual {first.GuidePathCount}");
+        Require(first.HoldPathCount == expectedHoldPathCount,
+            $"GPU ribbon Hold ownership count drifted: expected {expectedHoldPathCount} requested " +
+            $"render runs/fallback connectors, actual {first.HoldPathCount}");
+        Require(first.Chunks.Count == expectedChunkKinds.Count,
+            $"GPU ribbon immutable batch count drifted: expected {expectedChunkKinds.Count} material kinds " +
+            $"[{string.Join(", ", expectedChunkKinds.OrderBy(kind => kind))}], actual {first.Chunks.Count} chunks " +
+            $"[{string.Join(", ", first.Chunks.Select(chunk => chunk.Kind))}]");
+        foreach (var kind in expectedChunkKinds)
+        {
+            actualChunkKindCounts.TryGetValue(kind, out var actualKindCount);
+            Require(actualKindCount == 1,
+                $"GPU ribbon material kind {kind} must use one immutable batch: expected 1, " +
+                $"actual {actualKindCount}");
+        }
+        Require(actualChunkKindCounts.Keys.All(expectedChunkKinds.Contains),
+            $"GPU ribbon produced an unrequested material kind: expected " +
+            $"[{string.Join(", ", expectedChunkKinds.OrderBy(kind => kind))}], actual " +
+            $"[{string.Join(", ", actualChunkKindCounts.Keys.OrderBy(kind => kind))}]");
         Require(first.HoldRootStates.ContainsKey(10),
             "GPU ribbon mesh build must allocate an event-driven state texel for every Hold root");
         Require(first.VertexCount > 0 && first.Chunks.All(chunk => chunk.Vertices.Length % 2 == 0 &&
@@ -1918,6 +2026,22 @@ public static class RuntimeValidation
                     vertex.position != Vector3.zero && vertex.uv1 == Vector4.zero &&
                     vertex.uv2 == Vector4.zero && vertex.uv3 == Vector4.zero),
             "GPU ribbon metadata must use only standard Canvas POSITION, COLOR, and UV0 channels");
+        var holdChunks = first.Chunks.Where(chunk => chunk.Kind != GpuRibbonKind.Guide).ToArray();
+        Require(holdChunks.SelectMany(chunk => chunk.Vertices).All(vertex => vertex.color.a == 255),
+            "GPU Hold source vertices must retain fully opaque source alpha before material opacity");
+        Require(holdChunks.SelectMany(chunk => chunk.Vertices)
+                .Where(vertex => Mathf.RoundToInt(vertex.uv0.w) == first.HoldRootStates[10])
+                .Select(vertex => Mathf.RoundToInt(vertex.uv0.z)).Distinct().Count() == 2,
+            "A multi-group Hold fallback must retain both discrete TimeScaleGroup slots in UV0 metadata");
+        foreach (var chunk in holdChunks)
+            for (var index = 0; index < chunk.Indices.Length; index += 3)
+            {
+                var firstGroup = Mathf.RoundToInt(chunk.Vertices[chunk.Indices[index]].uv0.z);
+                var secondGroup = Mathf.RoundToInt(chunk.Vertices[chunk.Indices[index + 1]].uv0.z);
+                var thirdGroup = Mathf.RoundToInt(chunk.Vertices[chunk.Indices[index + 2]].uv0.z);
+                Require(firstGroup == secondGroup && firstGroup == thirdGroup,
+                    "No GPU Hold triangle may span different discrete TimeScaleGroup slots");
+            }
 
         var cacheKey = GpuRibbonCache.ComputeKey(chart);
         Require(cacheKey.Length == 64 && cacheKey == GpuRibbonCache.ComputeKey(chart),
@@ -1934,7 +2058,9 @@ public static class RuntimeValidation
                         .SequenceEqual(first.HoldRootStates.OrderBy(pair => pair.Key)) &&
                     restored.Chunks.Select(chunk => (chunk.Kind, chunk.Vertices.Length, chunk.Indices.Length))
                         .SequenceEqual(first.Chunks.Select(chunk =>
-                            (chunk.Kind, chunk.Vertices.Length, chunk.Indices.Length))),
+                            (chunk.Kind, chunk.Vertices.Length, chunk.Indices.Length))) &&
+                    restored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)),
                 "GPU ribbon disk cache must round-trip immutable display geometry exactly");
             Require(!GpuRibbonCache.TryRead(cachePath, new string('0', 64), out _),
                 "GPU ribbon disk cache must reject a stale chart fingerprint without throwing");
@@ -1943,6 +2069,64 @@ public static class RuntimeValidation
         {
             if (File.Exists(cachePath)) File.Delete(cachePath);
         }
+
+        var runtimeCacheDirectory = Path.Combine(Application.persistentDataPath, "GpuRibbonCache");
+        var runtimeCachePath = Path.Combine(runtimeCacheDirectory, cacheKey + ".bin");
+        var hadRuntimeCache = File.Exists(runtimeCachePath);
+        var priorRuntimeCache = hadRuntimeCache ? File.ReadAllBytes(runtimeCachePath) : null;
+        try
+        {
+            Directory.CreateDirectory(runtimeCacheDirectory);
+            GpuRibbonCache.Write(runtimeCachePath, cacheKey, first);
+            using (var stream = new FileStream(runtimeCachePath, FileMode.Open, FileAccess.Write, FileShare.None))
+            using (var writer = new BinaryWriter(stream))
+            {
+                stream.Position = sizeof(int);
+                writer.Write(4);
+            }
+            ForgetGpuRibbonMemoryEntry(cacheKey);
+            var rebuilt = GpuRibbonCache.LoadOrBuild(chart, caches, out var rebuiltCacheHit);
+            Require(!rebuiltCacheHit && rebuilt != null &&
+                    rebuilt.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)) &&
+                    GpuRibbonCache.TryRead(runtimeCachePath, cacheKey, out _),
+                "LoadOrBuild must reject a version-4 runtime cache and replace it with exact version-5 geometry");
+            ForgetGpuRibbonMemoryEntry(cacheKey);
+            var diskRestored = GpuRibbonCache.LoadOrBuild(chart, caches, out var diskCacheHit);
+            Require(diskCacheHit && diskRestored != null &&
+                    diskRestored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)),
+                "LoadOrBuild must read the rebuilt version-5 geometry through its real disk-cache path");
+        }
+        finally
+        {
+            ForgetGpuRibbonMemoryEntry(cacheKey);
+            if (hadRuntimeCache) File.WriteAllBytes(runtimeCachePath, priorRuntimeCache);
+            else if (File.Exists(runtimeCachePath)) File.Delete(runtimeCachePath);
+        }
+
+        var stateChart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        stateChart.TimeScaleGroups["main"] = new RuntimeTimeScaleGroup("main", new[] { (0d, 1d) });
+        for (var stateIndex = 0; stateIndex <= 256; stateIndex++)
+        {
+            var rootIndex = 1000 + stateIndex;
+            stateChart.FallbackConnectors.Add(new RuntimeConnector
+            {
+                Start = FallbackPoint(rootIndex, 0, stateIndex % 12 - 6, rootIndex),
+                End = FallbackPoint(rootIndex + 10000, 1, stateIndex % 12 - 5, rootIndex),
+            });
+        }
+        var stateBuild = GpuRibbonMeshBuilder.Build(stateChart,
+            new Dictionary<RuntimeGuide, GuideRenderCache>());
+        Require(stateBuild.HoldRootStates[1000] == 0 && stateBuild.HoldRootStates[1248] == 248 &&
+                stateBuild.HoldRootStates[1256] == 256,
+            "GPU Hold state slots 0, 248, and 256 must remain independently addressable");
+        var addressedStates = stateBuild.Chunks.Where(chunk => chunk.Kind != GpuRibbonKind.Guide)
+            .SelectMany(chunk => chunk.Vertices).Select(vertex => Mathf.RoundToInt(vertex.uv0.w)).ToHashSet();
+        Require(addressedStates.Contains(0) && addressedStates.Contains(248) && addressedStates.Contains(256),
+            "GPU Hold vertex metadata must preserve state indices beyond the former color-byte boundary");
+
+        ValidateGpuHoldOwnershipFallback();
 
         var canvasHeight = 1920f * Screen.height / Math.Max(1, Screen.width);
         foreach (var lane in new[] { -8f, -6f, -1f, 0f, 1f, 6f, 8f })
@@ -1982,6 +2166,88 @@ public static class RuntimeValidation
         }
         Debug.Log($"GUGARHYTHM_GPU_RIBBON_VALIDATION_OK chunks={first.Chunks.Count} " +
                   $"vertices={first.VertexCount} guides={first.GuidePathCount} holds={first.HoldPathCount}");
+    }
+
+    static void ValidateGpuHoldOwnershipFallback()
+    {
+        var chart = new RuntimeChart { DefaultTimeScaleGroup = "main" };
+        chart.TimeScaleGroups["main"] = new RuntimeTimeScaleGroup("main", new[] { (0d, 1d) });
+        var guide = new RuntimeGuide
+        {
+            Start = new RuntimeGuidePoint { Time = 0, Lane = -1, Size = 1, TimeScaleGroup = "main" },
+            Head = new RuntimeGuidePoint { Time = 0, Lane = -1, Size = 1, TimeScaleGroup = "main" },
+            Tail = new RuntimeGuidePoint { Time = 1, Lane = 1, Size = 1, TimeScaleGroup = "main" },
+            End = new RuntimeGuidePoint { Time = 1, Lane = 1, Size = 1, TimeScaleGroup = "main" },
+            HeadOpacity = 1,
+            TailOpacity = 1,
+        };
+        chart.Guides.Add(guide);
+        var start = new RuntimeNote
+        {
+            Index = 30000, Time = 0, Beat = 0, Lane = -1, Size = 1, Kind = RuntimeNoteKind.Sustain,
+            HoldRootIndex = 30000, TimeScaleGroup = "main",
+        };
+        var end = new RuntimeNote
+        {
+            Index = 30001, Time = 1, Beat = 1, Lane = 1, Size = 1, Kind = RuntimeNoteKind.Sustain,
+            HoldRootIndex = 30000, TimeScaleGroup = "main",
+        };
+        chart.Connectors.Add(new RuntimeConnector { Start = start, End = end });
+        var paths = HoldPathBuilder.Build(chart);
+        Require(paths.Paths.Count == 1 && paths.FallbackConnectors.Count == 0,
+            "GPU ownership fallback fixture must begin with one complete Hold path");
+        chart.HoldPaths.AddRange(paths.Paths);
+        end.Time = double.NaN;
+
+        var guideCache = new GuideRenderCache(guide);
+        guideCache.BuildVisualSpans(chart);
+        var caches = new Dictionary<RuntimeGuide, GuideRenderCache> { [guide] = guideCache };
+        var key = GpuRibbonCache.ComputeKey(chart);
+        var cacheDirectory = Path.Combine(Application.persistentDataPath, "GpuRibbonCache");
+        var cachePath = Path.Combine(cacheDirectory, key + ".bin");
+        var hadCache = File.Exists(cachePath);
+        var priorCache = hadCache ? File.ReadAllBytes(cachePath) : null;
+        GameObject root = null;
+        GpuRibbonRenderer renderer = null;
+        try
+        {
+            root = new GameObject("GPU ownership fallback validation", typeof(RectTransform), typeof(Canvas));
+            var guideLayer = new GameObject("Guide Layer", typeof(RectTransform)).GetComponent<RectTransform>();
+            var holdLayer = new GameObject("Hold Layer", typeof(RectTransform)).GetComponent<RectTransform>();
+            guideLayer.SetParent(root.transform, false);
+            holdLayer.SetParent(root.transform, false);
+            ForgetGpuRibbonMemoryEntry(key);
+            if (File.Exists(cachePath)) File.Delete(cachePath);
+            var created = GpuRibbonRenderer.TryCreate(chart, caches, guideLayer, holdLayer,
+                root.GetComponent<Canvas>(), Texture2D.whiteTexture, Texture2D.whiteTexture,
+                out renderer, out var fallbackReason);
+            var cpuHoldsEnabled = renderer?.RendersHolds != true;
+            Require(created && renderer != null && renderer.RendersGuides && !renderer.RendersHolds &&
+                    cpuHoldsEnabled && string.IsNullOrEmpty(fallbackReason),
+                "TryCreate must keep a valid GPU Guide renderer but decline incomplete Hold ownership so CPU routing stays enabled");
+        }
+        finally
+        {
+            renderer?.Dispose();
+            if (root != null) UnityEngine.Object.DestroyImmediate(root);
+            ForgetGpuRibbonMemoryEntry(key);
+            if (hadCache)
+            {
+                Directory.CreateDirectory(cacheDirectory);
+                File.WriteAllBytes(cachePath, priorCache);
+            }
+            else if (File.Exists(cachePath)) File.Delete(cachePath);
+        }
+    }
+
+    static void ForgetGpuRibbonMemoryEntry(string key)
+    {
+        var memoryField = typeof(GpuRibbonCache).GetField("Memory",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        var memory = memoryField?.GetValue(null) as System.Collections.IDictionary;
+        Require(memory != null,
+            "GPU ribbon validation must access the runtime memory-cache dictionary");
+        memory.Remove(key);
     }
 
     static void ValidateNoteSurfaceProjection()
@@ -2669,6 +2935,279 @@ public static class RuntimeValidation
 
         ValidateVirtualSlider();
         ValidateJudgmentDebugGrid();
+    }
+
+    static void ValidateJudgmentIndexedEquivalence()
+    {
+        const double attackWindow = 6d / 60d;
+        var earlyBoundary = Note(200, 0, 0);
+        var engine = new JudgmentEngine(new[] { earlyBoundary }, new ScoreState());
+        var events = engine.Process(-attackWindow,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, -attackWindow, 0) },
+            Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events, (200, JudgmentGrade.Good, -attackWindow));
+
+        var lateBoundary = Note(201, 0, 0);
+        engine = new JudgmentEngine(new[] { lateBoundary }, new ScoreState());
+        events = engine.Process(attackWindow,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, attackWindow, 0) },
+            Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events, (201, JudgmentGrade.Good, attackWindow));
+
+        const double ulpInputTime = 0.000007629394531256939;
+        const double ulpNoteTime = 0.10000762939453127;
+        var exactUlpTap = Note(205, ulpNoteTime, 0);
+        engine = new JudgmentEngine(new[] { exactUlpTap }, new ScoreState());
+        events = engine.Process(ulpInputTime,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, ulpInputTime, 0) },
+            Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (205, JudgmentGrade.Good, ulpInputTime - ulpNoteTime));
+        var insideUlpTap = Note(206, PreviousRepresentable(ulpNoteTime), 0);
+        engine = new JudgmentEngine(new[] { insideUlpTap }, new ScoreState());
+        events = engine.Process(ulpInputTime,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, ulpInputTime, 0) },
+            Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (206, JudgmentGrade.Good, ulpInputTime - insideUlpTap.Time));
+        var outsideUlpTap = Note(207, NextRepresentable(ulpNoteTime), 0);
+        engine = new JudgmentEngine(new[] { outsideUlpTap }, new ScoreState());
+        events = engine.Process(ulpInputTime,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, ulpInputTime, 0) },
+            Array.Empty<ActiveContact>());
+        Require(events.Count == 0 && outsideUlpTap.Grade == JudgmentGrade.Pending,
+            "A Tap one representable value outside the nonzero Attack boundary must remain pending");
+
+        var exactUlpFlick = Note(208, ulpNoteTime, 0); exactUlpFlick.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { exactUlpFlick }, new ScoreState());
+        events = engine.Process(ulpInputTime, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Flick, ulpInputTime, 1, -1, ulpInputTime),
+        }, Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (208, JudgmentGrade.Perfect, ulpInputTime - ulpNoteTime));
+        var insideUlpFlick = Note(209, PreviousRepresentable(ulpNoteTime), 0);
+        insideUlpFlick.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { insideUlpFlick }, new ScoreState());
+        events = engine.Process(ulpInputTime, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Flick, ulpInputTime, 1, -1, ulpInputTime),
+        }, Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (209, JudgmentGrade.Perfect, ulpInputTime - insideUlpFlick.Time));
+        var outsideUlpFlick = Note(218, NextRepresentable(ulpNoteTime), 0);
+        outsideUlpFlick.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { outsideUlpFlick }, new ScoreState());
+        events = engine.Process(ulpInputTime, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Flick, ulpInputTime, 1, -1, ulpInputTime),
+        }, Array.Empty<ActiveContact>());
+        Require(events.Count == 0 && outsideUlpFlick.Grade == JudgmentGrade.Pending,
+            "A Flick one representable value outside the nonzero Attack boundary must remain pending");
+
+        const double ulpContactSongTime = .0625;
+        const double ulpContactNoteTime = -.020833333333333332;
+        var exactUlpContact = Note(219, ulpContactNoteTime, 0); exactUlpContact.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { exactUlpContact }, new ScoreState());
+        events = engine.Process(ulpContactSongTime, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, 0, ulpContactNoteTime) });
+        RequireJudgmentEvents(events,
+            (219, JudgmentGrade.Perfect, ulpContactSongTime - ulpContactNoteTime));
+        var insideUlpContact = Note(224, NextRepresentable(ulpContactNoteTime), 0);
+        insideUlpContact.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { insideUlpContact }, new ScoreState());
+        events = engine.Process(ulpContactSongTime, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, 0, insideUlpContact.Time) });
+        RequireJudgmentEvents(events,
+            (224, JudgmentGrade.Perfect, ulpContactSongTime - insideUlpContact.Time));
+        var outsideUlpContact = Note(225, PreviousRepresentable(ulpContactNoteTime), 0);
+        outsideUlpContact.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { outsideUlpContact }, new ScoreState());
+        events = engine.Process(ulpContactSongTime, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, 0, outsideUlpContact.Time) });
+        Require(events.Count == 0 && outsideUlpContact.Grade == JudgmentGrade.Pending,
+            "A contact one representable value outside the nonzero Sustain boundary must remain pending");
+
+        var exactTapMiss = Note(202, 0, 0);
+        engine = new JudgmentEngine(new[] { exactTapMiss }, new ScoreState());
+        events = engine.Process(attackWindow + JudgmentEngine.CommitGrace,
+            Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        Require(events.Count == 0 && exactTapMiss.Grade == JudgmentGrade.Pending,
+            "A Tap must remain pending at the exact strict miss boundary");
+        events = engine.Process(attackWindow + JudgmentEngine.CommitGrace + 1e-9,
+            Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (202, JudgmentGrade.Miss, attackWindow + JudgmentEngine.CommitGrace + 1e-9));
+
+        var exactContact = Note(203, 0, 0);
+        exactContact.Kind = RuntimeNoteKind.Sustain;
+        engine = new JudgmentEngine(new[] { exactContact }, new ScoreState());
+        events = engine.Process(JudgmentEngine.SustainLateWindow, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, 0, 0) });
+        RequireJudgmentEvents(events,
+            (203, JudgmentGrade.Perfect, JudgmentEngine.SustainLateWindow));
+
+        var exactContactMiss = Note(204, 0, 0);
+        exactContactMiss.Kind = RuntimeNoteKind.Release;
+        engine = new JudgmentEngine(new[] { exactContactMiss }, new ScoreState());
+        var contactMissBoundary = JudgmentEngine.SustainLateWindow + JudgmentEngine.CommitGrace;
+        events = engine.Process(contactMissBoundary, Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        Require(events.Count == 0 && exactContactMiss.Grade == JudgmentGrade.Pending,
+            "A Sustain/Release note must remain pending at the exact strict miss boundary");
+        events = engine.Process(contactMissBoundary + 1e-9,
+            Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events, (204, JudgmentGrade.Miss, contactMissBoundary + 1e-9));
+
+        var denseNotes = new[]
+        {
+            Note(210, 5, 0), Note(211, 5, 0), Note(212, 5, 0), Note(213, 5, 0),
+            Note(214, 5, 0), Note(215, 5, 0), Note(216, 5, 0), Note(217, 5, 0),
+        };
+        var denseInputs = new[]
+        {
+            new InputToken(8, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(7, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(6, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(5, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(4, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(3, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(2, RuntimeNoteKind.Tap, 5, 0),
+            new InputToken(1, RuntimeNoteKind.Tap, 5, 0),
+        };
+        var denseScore = new ScoreState();
+        engine = new JudgmentEngine(denseNotes, denseScore) { JudgmentProtectionEnabled = false };
+        events = engine.Process(5, denseInputs, Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (210, JudgmentGrade.Perfect, 0), (211, JudgmentGrade.Perfect, 0),
+            (212, JudgmentGrade.Perfect, 0), (213, JudgmentGrade.Perfect, 0),
+            (214, JudgmentGrade.Perfect, 0), (215, JudgmentGrade.Perfect, 0),
+            (216, JudgmentGrade.Perfect, 0), (217, JudgmentGrade.Perfect, 0));
+        Require(denseScore.Perfect == 8 && denseScore.Combo == 8 && denseScore.MaxCombo == 8,
+            "Dense multi-input matching must preserve score, combo, and max combo");
+
+        var gradedNotes = new[]
+        {
+            Note(220, 10.00, -6), Note(221, 10.02, -2), Note(222, 10.04, 2), Note(223, 10.06, 6),
+        };
+        var gradedScore = new ScoreState();
+        engine = new JudgmentEngine(gradedNotes, gradedScore);
+        events = engine.Process(10.15, new[]
+        {
+            new InputToken(4, RuntimeNoteKind.Tap, 10.15, 6),
+            new InputToken(3, RuntimeNoteKind.Tap, 10.10, 2),
+            new InputToken(2, RuntimeNoteKind.Tap, 10.05, -2),
+            new InputToken(1, RuntimeNoteKind.Tap, 10.00, -6),
+        }, Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (220, JudgmentGrade.Perfect, 0), (221, JudgmentGrade.Perfect, .03),
+            (222, JudgmentGrade.Great, .06), (223, JudgmentGrade.Good, .09));
+        Require(gradedScore.Perfect == 2 && gradedScore.Great == 1 && gradedScore.Good == 1 &&
+                gradedScore.Combo == 4 && gradedScore.MaxCombo == 4,
+            "Indexed registration must preserve mixed grades and combo accounting");
+
+        var authored = Note(240, 20, 0);
+        var forgivenessOnly = Note(241, 20, -1);
+        var authoredScore = new ScoreState();
+        engine = new JudgmentEngine(new[] { authored, forgivenessOnly }, authoredScore);
+        events = engine.Process(20, new[]
+        {
+            new InputToken(7, RuntimeNoteKind.Tap, 20, 1),
+            new InputToken(7, RuntimeNoteKind.Tap, 20, 0),
+        }, Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events, (240, JudgmentGrade.Perfect, 0));
+        Require(forgivenessOnly.Grade == JudgmentGrade.Pending && authoredScore.Combo == 1 &&
+                authoredScore.MaxCombo == 1,
+            "An authored-span input must outrank the same finger's forgiveness-only activation");
+
+        var flick = Note(250, 30, 0);
+        flick.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { flick }, new ScoreState());
+        events = engine.Process(30.1, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Flick, 30.1, 1, -1, 29.9),
+        }, Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events, (250, JudgmentGrade.Perfect, 0));
+
+        var sustain = Note(260, 40, 0); sustain.Kind = RuntimeNoteKind.Sustain;
+        var release = Note(261, 40, 0); release.Kind = RuntimeNoteKind.Release;
+        var contactScore = new ScoreState();
+        engine = new JudgmentEngine(new[] { release, sustain }, contactScore);
+        // This fixture isolates stable event ordering; exact inclusive boundary behavior is
+        // covered above with the nonzero ULP-sensitive 0.0625 fixture.
+        const double contactOrderingDelta = .05d;
+        events = engine.Process(40 + contactOrderingDelta, Array.Empty<InputToken>(),
+            new[] { new ActiveContact(1, 0, 39) });
+        RequireJudgmentEvents(events,
+            (260, JudgmentGrade.Perfect, contactOrderingDelta),
+            (261, JudgmentGrade.Perfect, contactOrderingDelta));
+        Require(contactScore.Combo == 2 && contactScore.MaxCombo == 2,
+            "Sustain and Release contact ordering must preserve combo state");
+
+        var hitA = Note(270, 50, -2);
+        var hitB = Note(271, 50, 2);
+        var missTap = Note(272, 51, -2);
+        var missSustain = Note(273, 51, 2); missSustain.Kind = RuntimeNoteKind.Sustain;
+        var missScore = new ScoreState();
+        engine = new JudgmentEngine(new[] { missSustain, missTap, hitB, hitA }, missScore);
+        engine.Process(50, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Tap, 50, -2),
+            new InputToken(2, RuntimeNoteKind.Tap, 50, 2),
+        }, Array.Empty<ActiveContact>());
+        events = engine.Process(51.2, Array.Empty<InputToken>(), Array.Empty<ActiveContact>());
+        RequireJudgmentEvents(events,
+            (272, JudgmentGrade.Miss, .2), (273, JudgmentGrade.Miss, .2));
+        Require(missScore.Perfect == 2 && missScore.Miss == 2 && missScore.Combo == 0 && missScore.MaxCombo == 2,
+            "Simultaneous misses must retain canonical event order while preserving prior max combo");
+
+        var autoScore = new ScoreState();
+        var autoNotes = new[]
+        {
+            Note(280, 60, 0), Note(281, 60, 1), Note(282, 60, 2), Note(283, 60, 3), Note(284, 61, 0),
+        };
+        autoNotes[1].Kind = RuntimeNoteKind.Flick;
+        autoNotes[2].Kind = RuntimeNoteKind.Sustain;
+        autoNotes[3].Kind = RuntimeNoteKind.Release;
+        engine = new JudgmentEngine(autoNotes.Reverse(), autoScore);
+        events = engine.Process(60, new[] { new InputToken(9, RuntimeNoteKind.Tap, 60, 99) },
+            Array.Empty<ActiveContact>(), Array.Empty<ContactPathSegment>(), true);
+        RequireJudgmentEvents(events,
+            (280, JudgmentGrade.Perfect, 0), (281, JudgmentGrade.Perfect, 0),
+            (282, JudgmentGrade.Perfect, 0), (283, JudgmentGrade.Perfect, 0));
+        events = engine.Process(61, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(),
+            Array.Empty<ContactPathSegment>(), true);
+        RequireJudgmentEvents(events, (284, JudgmentGrade.Perfect, 0));
+        Require(autoScore.Perfect == 5 && autoScore.Combo == 5 && autoScore.MaxCombo == 5,
+            "AutoPlay cursor progression must preserve canonical events and score state");
+    }
+
+    static void RequireJudgmentEvents(IReadOnlyList<JudgmentEvent> actual,
+        params (int Index, JudgmentGrade Grade, double Delta)[] expected)
+    {
+        Require(actual.Count == expected.Length,
+            $"Judgment event count drifted: expected {expected.Length}, got {actual.Count}");
+        for (var index = 0; index < expected.Length; index++)
+            Require(actual[index].Note.Index == expected[index].Index && actual[index].Grade == expected[index].Grade &&
+                    Math.Abs(actual[index].Delta - expected[index].Delta) <= 1e-8,
+                $"Judgment event {index} drifted: expected note {expected[index].Index} " +
+                $"{expected[index].Grade} delta {expected[index].Delta:R}, got note {actual[index].Note.Index} " +
+                $"{actual[index].Grade} delta {actual[index].Delta:R}");
+    }
+
+    static double PreviousRepresentable(double value)
+    {
+        if (double.IsNaN(value) || double.IsNegativeInfinity(value)) return value;
+        if (value == 0) return -double.Epsilon;
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        return BitConverter.Int64BitsToDouble(value > 0 ? bits - 1 : bits + 1);
+    }
+
+    static double NextRepresentable(double value)
+    {
+        if (double.IsNaN(value) || double.IsPositiveInfinity(value)) return value;
+        if (value == 0) return double.Epsilon;
+        var bits = BitConverter.DoubleToInt64Bits(value);
+        return BitConverter.Int64BitsToDouble(value > 0 ? bits + 1 : bits - 1);
     }
 
     static void ValidateChunithmJudgmentWindows()

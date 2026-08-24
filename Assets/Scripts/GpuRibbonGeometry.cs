@@ -87,19 +87,13 @@ namespace Gugarhythm
         }
 
         public static UIVertex Vertex(float lane, float size, double visualPosition, float side,
-            float textureV, int groupIndex, int auxiliaryIndex, float alpha, bool alphaInHighByte)
+            float textureV, int groupIndex, int auxiliaryIndex, float alpha)
         {
             var vertex = UIVertex.simpleVert;
             vertex.position = new Vector3(lane, size, (float)visualPosition);
-            vertex.color = new Color32(
-                (byte)(groupIndex & 0xff),
-                (byte)((groupIndex >> 8) & 0xff),
-                (byte)(auxiliaryIndex & 0xff),
-                (byte)((auxiliaryIndex >> 8) & 0xff));
-            if (alphaInHighByte)
-                vertex.color = new Color32(vertex.color.r, vertex.color.g, vertex.color.b,
-                    (byte)Mathf.RoundToInt(Mathf.Clamp01(alpha) * 255));
-            vertex.uv0 = new Vector4(side < 0 ? 0 : 1, textureV, 0, 0);
+            vertex.color = new Color32(255, 255, 255,
+                (byte)Mathf.RoundToInt(Mathf.Clamp01(alpha) * 255));
+            vertex.uv0 = new Vector4(side < 0 ? 0 : 1, textureV, groupIndex, auxiliaryIndex);
             vertex.uv1 = Vector4.zero;
             vertex.uv2 = Vector4.zero;
             vertex.uv3 = Vector4.zero;
