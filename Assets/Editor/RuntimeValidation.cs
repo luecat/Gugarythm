@@ -12,6 +12,14 @@ using UnityEngine.UI;
 
 public static class RuntimeValidation
 {
+    [MenuItem("Gugarhythm/Validate Rendering Performance")]
+    public static void ValidateRenderingPerformance()
+    {
+        ValidateGpuRibbonRendering();
+        ValidateChartRenderIndex();
+        Debug.Log("GUGARHYTHM_RENDERING_PERFORMANCE_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Start Loaded Chart _F8", true)]
     static bool CanStartLoadedChart() => EditorApplication.isPlaying;
 
@@ -982,8 +990,29 @@ public static class RuntimeValidation
         var reverse = NoteAt(4, 1.5, "reverse");
         chart.Notes.AddRange(new[] { late, fastOutside, reverse, early });
 
-        var holdA = NoteAt(10, .25, "main");
-        var holdB = NoteAt(11, 2, "main");
+        var indexedSimLine = new RuntimeSimLine
+        {
+            A = NoteAt(5, .25, "main"),
+            B = NoteAt(6, 2, "main"),
+        };
+        var crossGroupSimLine = new RuntimeSimLine
+        {
+            A = NoteAt(7, .25, "main"),
+            B = NoteAt(8, 2, "fast"),
+        };
+        var simLineAhead = SonolusLandscapePrototype.SimLineIndexAhead(
+            SonolusLandscapePrototype.NoteApproachDurationSeconds, 732f);
+        var farPlaneSimLine = new RuntimeSimLine
+        {
+            A = NoteAt(9, simLineAhead - .001, "main"),
+            B = NoteAt(10, simLineAhead - .001, "main"),
+        };
+        chart.SimLines.Add(indexedSimLine);
+        chart.SimLines.Add(crossGroupSimLine);
+        chart.SimLines.Add(farPlaneSimLine);
+
+        var holdA = NoteAt(11, .25, "main");
+        var holdB = NoteAt(12, 2, "main");
         chart.Connectors.Add(new RuntimeConnector { Start = holdA, End = holdB });
         HoldCheckpointBuilder.Apply(chart, beat => beat);
         var index = new ChartRenderIndex(chart);
@@ -1005,10 +1034,22 @@ public static class RuntimeValidation
         index.QueryHoldRuns(4, 0, .25, runs);
         Require(runs.Count == 0, "ChartRenderIndex must exclude Hold runs outside the visual window");
 
+        var simLines = new List<RuntimeSimLine>();
+        index.QuerySimLines(1, 0, .25, simLines);
+        Require(simLines.Contains(indexedSimLine) && simLines.Contains(crossGroupSimLine),
+            "ChartRenderIndex must return overlapping same-group SimLines and preserve cross-group fallback visibility");
+        index.QuerySimLines(4, 0, .25, simLines);
+        Require(!simLines.Contains(indexedSimLine) && simLines.Contains(crossGroupSimLine),
+            "ChartRenderIndex must cull same-group SimLines outside the visual window without dropping cross-group lines");
+        index.QuerySimLines(0, 0, simLineAhead, simLines);
+        Require(simLines.Contains(farPlaneSimLine) && simLineAhead > SonolusLandscapePrototype.NoteApproachDurationSeconds,
+            "SimLine indexed visibility must preserve the original 8-pixel far-plane allowance");
+
         var emptyIndex = new ChartRenderIndex(new RuntimeChart());
         emptyIndex.QueryNotes(0, 1, 1, notes);
         emptyIndex.QueryHoldRuns(0, 1, 1, runs);
-        Require(notes.Count == 0 && runs.Count == 0,
+        emptyIndex.QuerySimLines(0, 1, 1, simLines);
+        Require(notes.Count == 0 && runs.Count == 0 && simLines.Count == 0,
             "ChartRenderIndex must return empty reusable buffers for an empty chart");
     }
 
@@ -1913,6 +1954,11 @@ public static class RuntimeValidation
                 $"GPU ribbon perspective must remain finite at approach {approach}");
         Require(Resources.Load<Shader>("Shaders/GpuRibbonUI") != null,
             "GPU ribbon UI shader must be included through Resources");
+        Require(GpuRibbonRenderer.SupportsGroupPositionCount(1) &&
+                GpuRibbonRenderer.SupportsGroupPositionCount(GpuRibbonRenderer.MaximumGroupPositionCount) &&
+                !GpuRibbonRenderer.SupportsGroupPositionCount(0) &&
+                !GpuRibbonRenderer.SupportsGroupPositionCount(GpuRibbonRenderer.MaximumGroupPositionCount + 1),
+            "GPU ribbon shader-uniform group limits must reject only counts outside the declared shader array");
 
         var gameObject = new GameObject("GPU Ribbon Geometry Test", typeof(RectTransform),
             typeof(CanvasRenderer), typeof(GpuRibbonGraphic));

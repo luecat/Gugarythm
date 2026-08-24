@@ -19,7 +19,6 @@ Shader "Gugarhythm/GPU Ribbon UI"
         _RibbonOpacity ("Ribbon Opacity", Float) = 1
         _GroupCount ("Time Scale Group Count", Float) = 1
         _HoldStateCount ("Hold State Count", Float) = 1
-        _GroupPositionTex ("Time Scale Group Positions", 2D) = "black" {}
         _HoldStateTex ("Hold State", 2D) = "black" {}
     }
 
@@ -77,7 +76,6 @@ Shader "Gugarhythm/GPU Ribbon UI"
             };
 
             sampler2D _MainTex;
-            sampler2D _GroupPositionTex;
             sampler2D _HoldStateTex;
             float4 _ClipRect;
             float _ApproachDuration;
@@ -88,6 +86,7 @@ Shader "Gugarhythm/GPU Ribbon UI"
             float _RibbonOpacity;
             float _GroupCount;
             float _HoldStateCount;
+            float _GroupPositions[256];
 
             static const float Intercepts[13] =
             {
@@ -146,8 +145,8 @@ Shader "Gugarhythm/GPU Ribbon UI"
                 float targetPosition = input.vertex.z;
                 float side = input.texcoord.x * 2.0 - 1.0;
                 float groupIndex = round(input.color.r * 255.0) + round(input.color.g * 255.0) * 256.0;
-                float groupU = (groupIndex + .5) / max(1.0, _GroupCount);
-                float currentPosition = tex2Dlod(_GroupPositionTex, float4(groupU, .5, 0, 0)).r;
+                int currentGroup = (int)clamp(groupIndex, 0.0, min(255.0, _GroupCount - 1.0));
+                float currentPosition = _GroupPositions[currentGroup];
                 float approach = 1.0 - (targetPosition - currentPosition) / max(0.0001, _ApproachDuration);
                 float progress = clamp(Perspective(approach), 0.0, _NearTrackProgress);
                 float centerX = LaneX(lane, progress);

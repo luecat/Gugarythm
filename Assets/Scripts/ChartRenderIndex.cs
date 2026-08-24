@@ -9,6 +9,7 @@ namespace Gugarhythm
         readonly Dictionary<string, Bucket<RuntimeNote>> notes = new(StringComparer.Ordinal);
         readonly Dictionary<string, Bucket<HoldRenderRun>> holdRuns = new(StringComparer.Ordinal);
         readonly Dictionary<string, Bucket<RuntimeSimLine>> simLines = new(StringComparer.Ordinal);
+        readonly List<RuntimeSimLine> crossGroupSimLines = new();
         readonly Dictionary<string, Bucket<RuntimeGuide>> guides = new(StringComparer.Ordinal);
         readonly Dictionary<RuntimeGuide, int> guideOrder = new();
         readonly Comparison<RuntimeGuide> guideOrderComparison;
@@ -45,6 +46,15 @@ namespace Gugarhythm
             foreach (var simLine in chart.SimLines)
             {
                 var group = Group(simLine.A?.TimeScaleGroup);
+                var endGroup = Group(simLine.B?.TimeScaleGroup);
+                if (!string.Equals(group, endGroup, StringComparison.Ordinal))
+                {
+                    // A cross-group SimLine has no single monotonic visual interval.
+                    // Keep it in the small fallback set so the runtime visibility
+                    // test remains authoritative instead of risking a false cull.
+                    crossGroupSimLines.Add(simLine);
+                    continue;
+                }
                 var first = chart.VisualPosition(simLine.A?.Time ?? 0, group);
                 var last = chart.VisualPosition(simLine.B?.Time ?? 0, group);
                 Add(simLines, group, new Entry<RuntimeSimLine>(Math.Min(first, last), Math.Max(first, last), simLine));
@@ -89,11 +99,17 @@ namespace Gugarhythm
             output.Sort(HoldOrder);
         }
 
-        public void QuerySimLines(double visualTime, double behind, double ahead, List<RuntimeSimLine> output) =>
+        public void QuerySimLines(double visualTime, double behind, double ahead, List<RuntimeSimLine> output)
+        {
             Query(simLines, visualTime, behind, ahead, true, output);
+            output.AddRange(crossGroupSimLines);
+        }
 
-        public void QuerySimLines(VisualFrameContext frame, double behind, double ahead, List<RuntimeSimLine> output) =>
+        public void QuerySimLines(VisualFrameContext frame, double behind, double ahead, List<RuntimeSimLine> output)
+        {
             Query(simLines, frame, behind, ahead, true, output);
+            output.AddRange(crossGroupSimLines);
+        }
 
         public void QueryGuides(double visualTime, double behind, double ahead, List<RuntimeGuide> output)
         {

@@ -7,6 +7,13 @@ namespace Gugarhythm
 {
     public sealed class GpuRibbonRenderer : IDisposable
     {
+        public const int MaximumGroupPositionCount = 256;
+
+        static readonly int GroupPositionsProperty = Shader.PropertyToID("_GroupPositions");
+        static readonly int ApproachDurationProperty = Shader.PropertyToID("_ApproachDuration");
+        static readonly int CanvasHeightProperty = Shader.PropertyToID("_CanvasHeight");
+        static readonly int NearTrackProgressProperty = Shader.PropertyToID("_NearTrackProgress");
+
         sealed class Entry
         {
             public GpuRibbonGraphic Graphic;
@@ -18,9 +25,11 @@ namespace Gugarhythm
         readonly Color32[] statePixels;
         readonly Texture2D stateTexture;
         readonly string[] groupNames;
-        readonly Color[] groupPositionPixels;
-        readonly Texture2D groupPositionTexture;
+        readonly float[] groupPositions;
         readonly RuntimeChart chart;
+        float appliedApproachDuration = float.NaN;
+        float appliedCanvasHeight = float.NaN;
+        float appliedNearTrackProgress = float.NaN;
         bool disposed;
 
         public RuntimeChart Chart => chart;
@@ -53,15 +62,7 @@ namespace Gugarhythm
             GuidePathCount = renderGuides ? build.GuidePathCount : 0;
             HoldPathCount = renderHolds ? build.HoldPathCount : 0;
             groupNames = build.GroupNames.ToArray();
-            groupPositionPixels = new Color[Mathf.Max(1, groupNames.Length)];
-            groupPositionTexture = new Texture2D(groupPositionPixels.Length, 1, TextureFormat.RGBAFloat, false, true)
-            {
-                name = "GPU Ribbon Group Positions",
-                filterMode = FilterMode.Point,
-                wrapMode = TextureWrapMode.Clamp,
-            };
-            groupPositionTexture.SetPixels(groupPositionPixels);
-            groupPositionTexture.Apply(false, false);
+            groupPositions = new float[Mathf.Max(1, groupNames.Length)];
 
             var textureWidth = Mathf.Max(1, rootStates.Count);
             statePixels = new Color32[textureWidth];
@@ -117,7 +118,7 @@ namespace Gugarhythm
                     material.SetFloat("_UvInset", isHold ? (306f - 240f) / 306f * .5f : 0);
                     material.SetFloat("_GroupCount", Mathf.Max(1, groupNames.Length));
                     material.SetFloat("_HoldStateCount", Mathf.Max(1, rootStates.Count));
-                    material.SetTexture("_GroupPositionTex", groupPositionTexture);
+                    material.SetFloatArray(GroupPositionsProperty, groupPositions);
                     material.SetTexture("_HoldStateTex", stateTexture);
                     materialByKind.Add(chunk.Kind, material);
                     materials.Add(material);
@@ -169,11 +170,6 @@ namespace Gugarhythm
                 fallbackReason = "GPU Guide renderer has no decoration paths; using the CPU Hold renderer.";
                 return false;
             }
-            if (!SystemInfo.SupportsTextureFormat(TextureFormat.RGBAFloat))
-            {
-                fallbackReason = "RGBAFloat group-position textures are unsupported.";
-                return false;
-            }
             var shader = Resources.Load<Shader>("Shaders/GpuRibbonUI");
             if (shader == null || !shader.isSupported)
             {
@@ -183,6 +179,12 @@ namespace Gugarhythm
             try
             {
                 var build = GpuRibbonCache.LoadOrBuild(chart, guideCaches, out var cacheHit);
+                if (!SupportsGroupPositionCount(build.GroupNames.Count))
+                {
+                    fallbackReason = $"GPU Guide renderer supports 1-{MaximumGroupPositionCount} time-scale groups; " +
+                                     $"chart contains {build.GroupNames.Count}.";
+                    return false;
+                }
                 renderer = new GpuRibbonRenderer(chart, build, cacheHit, shader, guideLayer, holdLayer, stageCanvas,
                     holdGreen, holdYellow, renderGuides, renderHolds);
                 return true;
@@ -201,19 +203,28 @@ namespace Gugarhythm
         {
             if (disposed || frame == null) return;
             for (var index = 0; index < groupNames.Length; index++)
-            {
-                var current = (float)frame.CurrentPosition(groupNames[index]);
-                groupPositionPixels[index] = new Color(current, 0, 0, 0);
-            }
-            groupPositionTexture.SetPixels(groupPositionPixels);
-            groupPositionTexture.Apply(false, false);
+                groupPositions[index] = (float)frame.CurrentPosition(groupNames[index]);
+
+            var nextApproachDuration = Mathf.Max(.0001f, approachDuration);
+            var nextCanvasHeight = Mathf.Max(1, canvasHeight);
+            var nextNearTrackProgress = Mathf.Max(1, nearTrackProgress);
             foreach (var material in materials)
             {
-                material.SetFloat("_ApproachDuration", Mathf.Max(.0001f, approachDuration));
-                material.SetFloat("_CanvasHeight", Mathf.Max(1, canvasHeight));
-                material.SetFloat("_NearTrackProgress", Mathf.Max(1, nearTrackProgress));
+                material.SetFloatArray(GroupPositionsProperty, groupPositions);
+                if (!appliedApproachDuration.Equals(nextApproachDuration))
+                    material.SetFloat(ApproachDurationProperty, nextApproachDuration);
+                if (!appliedCanvasHeight.Equals(nextCanvasHeight))
+                    material.SetFloat(CanvasHeightProperty, nextCanvasHeight);
+                if (!appliedNearTrackProgress.Equals(nextNearTrackProgress))
+                    material.SetFloat(NearTrackProgressProperty, nextNearTrackProgress);
             }
+            appliedApproachDuration = nextApproachDuration;
+            appliedCanvasHeight = nextCanvasHeight;
+            appliedNearTrackProgress = nextNearTrackProgress;
         }
+
+        public static bool SupportsGroupPositionCount(int count) =>
+            count > 0 && count <= MaximumGroupPositionCount;
 
         public void SetHoldMissed(int rootIndex, bool missed)
         {
@@ -252,7 +263,6 @@ namespace Gugarhythm
             foreach (var material in materials)
                 if (material != null) UnityEngine.Object.Destroy(material);
             materials.Clear();
-            if (groupPositionTexture != null) UnityEngine.Object.Destroy(groupPositionTexture);
             if (stateTexture != null) UnityEngine.Object.Destroy(stateTexture);
         }
 

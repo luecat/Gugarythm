@@ -368,6 +368,7 @@ namespace Gugarhythm
         readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
         readonly HashSet<int> renderedPersistentHoldHeads = new();
         readonly HashSet<int> renderedNoteIds = new();
+        readonly HashSet<RuntimeSimLine> renderedSimLines = new();
         readonly Dictionary<HoldRenderRun, TaperedConnectorGraphic> holdRunViews = new();
         readonly Dictionary<RuntimeConnector, TaperedConnectorGraphic> connectorViews = new();
         readonly Dictionary<RuntimeSimLine, SimLineGraphic> simLineViews = new();
@@ -397,6 +398,7 @@ namespace Gugarhythm
         readonly List<GuideVisualSpan> visibleGuideSpans = new();
         readonly List<RuntimeNote> visibleNotes = new();
         readonly List<HoldRenderRun> visibleHoldRuns = new();
+        readonly List<RuntimeSimLine> visibleSimLines = new();
         readonly List<RuntimeGuide> visibleGuides = new();
         readonly Dictionary<RuntimeGuide, GuideRenderCache> guideRenderCaches = new();
         readonly Dictionary<RuntimeHoldPath, HoldRenderCache> holdRenderCaches = new();
@@ -1980,7 +1982,10 @@ namespace Gugarhythm
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled) SimLinesProfiler.Begin();
 #endif
-            foreach (var simLine in chart.SimLines)
+            renderedSimLines.Clear();
+            chartRenderIndex.QuerySimLines(visualFrameContext, 0,
+                SimLineIndexAhead(ApproachDuration, CanvasHeight), visibleSimLines);
+            foreach (var simLine in visibleSimLines)
             {
                 var aApproach = ApproachProgress(simLine.A, visualTime);
                 var bApproach = ApproachProgress(simLine.B, visualTime);
@@ -1993,9 +1998,9 @@ namespace Gugarhythm
                 var visible = Mathf.Min(aY, bY) <= TopY + 8 && HasVisibleDecorationSegment(leadingApproach, trailingApproach);
                 if (!visible)
                 {
-                    if (simLineViews.TryGetValue(simLine, out var oldLine)) ReleaseSimLine(simLine, oldLine);
                     continue;
                 }
+                renderedSimLines.Add(simLine);
                 if (!simLineViews.TryGetValue(simLine, out var line))
                 {
                     line = AcquireSimLine();
@@ -2021,6 +2026,12 @@ namespace Gugarhythm
                     new Vector2(X(simLine.B.Lane, bScreen), bY),
                     Mathf.Lerp(.65f, 2.25f, depth));
             }
+
+            simLineReleaseKeys.Clear();
+            foreach (var pair in simLineViews)
+                if (!renderedSimLines.Contains(pair.Key)) simLineReleaseKeys.Add(pair.Key);
+            foreach (var simLine in simLineReleaseKeys)
+                if (simLineViews.TryGetValue(simLine, out var line)) ReleaseSimLine(simLine, line);
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled) SimLinesProfiler.End();
@@ -2540,6 +2551,13 @@ namespace Gugarhythm
 
         static float ScreenY(float screenProgress) => Mathf.LerpUnclamped(TopY, HitY, screenProgress);
 
+        public static double SimLineIndexAhead(double approachDuration, float canvasHeight)
+        {
+            var visualDepth = HitSourceY / LaneTextureHeight * Mathf.Max(1f, canvasHeight);
+            var farPlaneApproachMargin = 8f * PerspectiveDepthRatio / Mathf.Max(1f, visualDepth);
+            return Math.Max(0, approachDuration) * (1d + farPlaneApproachMargin);
+        }
+
         public static bool IsInNoteRenderWindow(float screenY, float topY, float exitY) =>
             screenY <= topY + 8f && screenY >= exitY;
 
@@ -2890,6 +2908,9 @@ namespace Gugarhythm
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
             BuildInputLaneFeedback(stage);
             guideLayer = Layer("Decoration Guides", stage);
+            // GPU ribbon geometry is static after chart load. A child Canvas keeps
+            // unrelated note and input changes from rebuilding the Guide batches.
+            guideLayer.gameObject.AddComponent<Canvas>();
             var guideBatchObject = new GameObject("Decoration Guide Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(GuideBatchGraphic));
             var guideBatchRect = guideBatchObject.GetComponent<RectTransform>(); guideBatchRect.SetParent(guideLayer, false); Fill(guideBatchRect);
             guideBatch = guideBatchObject.GetComponent<GuideBatchGraphic>(); guideBatch.raycastTarget = false; guideBatch.color = Color.white;
@@ -3077,6 +3098,9 @@ namespace Gugarhythm
         void BuildInputLaneFeedback(RectTransform root)
         {
             var layer = Layer("Input Lane Feedback", root);
+            // Input flashes toggle active state for only a few frames. Keep their
+            // rebatching local instead of dirtying the much larger gameplay Canvas.
+            layer.gameObject.AddComponent<Canvas>();
             for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
             {
                 var flash = new GameObject($"Input Lane Flash {cell + 1:00}", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic))
