@@ -1,4 +1,4 @@
-package com.gugarythm.player;
+package com.gugarhythm.player;
 
 import android.app.Fragment;
 import android.content.Intent;

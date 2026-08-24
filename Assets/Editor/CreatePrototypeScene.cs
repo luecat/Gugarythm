@@ -104,7 +104,7 @@ public static class CreatePrototypeScene
         WriteBuildIdentity();
         ConfigureApplicationIcon();
         ConfigureSplashScreen();
-        PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarythm");
+        PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.Android, "com.luecat.gugarhythm");
         PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
         PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
         PlayerSettings.productName = "GUGArhythm";
@@ -134,7 +134,7 @@ public static class CreatePrototypeScene
         WriteBuildIdentity();
         ConfigureApplicationIcon();
         ConfigureSplashScreen();
-        PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.iOS, "com.luecat.gugarythm");
+        PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.iOS, "com.luecat.gugarhythm");
         PlayerSettings.SetScriptingBackend(NamedBuildTarget.iOS, ScriptingImplementation.IL2CPP);
         PlayerSettings.productName = "GUGArhythm";
         PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;

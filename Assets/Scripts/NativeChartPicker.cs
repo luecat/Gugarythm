@@ -6,7 +6,7 @@ namespace Gugarhythm
 {
     public static class NativeChartPicker
     {
-        const string JavaClass = "com.gugarythm.player.GugaFilePicker";
+        const string JavaClass = "com.gugarhythm.player.GugaFilePicker";
 
         public static void OpenFile()
         {

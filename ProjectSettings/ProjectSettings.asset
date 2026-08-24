@@ -170,8 +170,8 @@ PlayerSettings:
   androidMaxAspectRatio: 2.4
   androidMinAspectRatio: 1
   applicationIdentifier:
-    Android: com.luecat.gugarythm
-    iPhone: com.luecat.gugarythm
+    Android: com.luecat.gugarhythm
+    iPhone: com.luecat.gugarhythm
   buildNumber:
     Standalone: 0
     VisionOS: 0
