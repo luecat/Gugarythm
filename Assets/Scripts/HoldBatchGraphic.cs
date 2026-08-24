@@ -13,6 +13,7 @@ namespace Gugarhythm
         {
             public Vector2[] Centers = Array.Empty<Vector2>();
             public float[] Widths = Array.Empty<float>();
+            public float[] Lengths = Array.Empty<float>();
             public int Count;
 
             public void Prepare(int capacity)
@@ -20,6 +21,7 @@ namespace Gugarhythm
                 if (Centers.Length >= capacity) return;
                 Centers = new Vector2[capacity];
                 Widths = new float[capacity];
+                Lengths = new float[capacity];
             }
         }
 
@@ -71,6 +73,12 @@ namespace Gugarhythm
             var path = paths[activePath];
             path.Centers[index] = center;
             path.Widths[index] = Mathf.Max(.001f, width);
+            // Callers submit points in path order. Cache cumulative length here
+            // so the deferred Canvas rebuild does not traverse every Hold twice
+            // and repeat the same square-root work for UV generation.
+            path.Lengths[index] = index == 0
+                ? 0
+                : path.Lengths[index - 1] + Vector2.Distance(path.Centers[index - 1], center);
             AddHash(center.x); AddHash(center.y); AddHash(path.Widths[index]);
         }
 
@@ -94,21 +102,20 @@ namespace Gugarhythm
             {
                 var path = paths[pathIndex];
                 if (path.Count < 2) continue;
-                var totalLength = 0f;
-                for (var index = 1; index < path.Count; index++) totalLength += Vector2.Distance(path.Centers[index - 1], path.Centers[index]);
-                var length = 0f;
+                var totalLength = path.Lengths[path.Count - 1];
                 var first = helper.currentVertCount;
                 for (var index = 0; index < path.Count; index++)
                 {
-                    if (index > 0) length += Vector2.Distance(path.Centers[index - 1], path.Centers[index]);
                     var half = path.Widths[index] * .5f;
                     var vertex = UIVertex.simpleVert;
                     vertex.color = color;
                     vertex.position = path.Centers[index] + Vector2.left * half;
-                    vertex.uv0 = new Vector2(uvMin, totalLength > 1e-5f ? length / totalLength : index / (float)(path.Count - 1));
+                    vertex.uv0 = new Vector2(uvMin, totalLength > 1e-5f
+                        ? path.Lengths[index] / totalLength
+                        : index / (float)(path.Count - 1));
                     helper.AddVert(vertex);
                     vertex.position = path.Centers[index] + Vector2.right * half;
-                    vertex.uv0 = new Vector2(uvMax, totalLength > 1e-5f ? length / totalLength : index / (float)(path.Count - 1));
+                    vertex.uv0.x = uvMax;
                     helper.AddVert(vertex);
                     if (index == 0) continue;
                     var previous = first + (index - 1) * 2;

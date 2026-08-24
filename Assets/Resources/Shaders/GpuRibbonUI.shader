@@ -129,13 +129,13 @@ Shader "Gugarhythm/GPU Ribbon UI"
 
             fixed4 GuideColor(float index)
             {
-                if (index > 5.5) return fixed4(28.0 / 255.0, 34.0 / 255.0, 48.0 / 255.0, .32);
-                if (index > 4.5) return fixed4(115.0 / 255.0, 214.0 / 255.0, 205.0 / 255.0, .32);
-                if (index > 3.5) return fixed4(214.0 / 255.0, 179.0 / 255.0, 98.0 / 255.0, .32);
-                if (index > 2.5) return fixed4(214.0 / 255.0, 115.0 / 255.0, 123.0 / 255.0, .32);
-                if (index > 1.5) return fixed4(115.0 / 255.0, 165.0 / 255.0, 214.0 / 255.0, .32);
-                if (index > .5) return fixed4(214.0 / 255.0, 115.0 / 255.0, 205.0 / 255.0, .32);
-                return fixed4(115.0 / 255.0, 214.0 / 255.0, 157.0 / 255.0, .32);
+                if (index > 5.5) return fixed4(28.0 / 255.0, 34.0 / 255.0, 48.0 / 255.0, 1);
+                if (index > 4.5) return fixed4(115.0 / 255.0, 214.0 / 255.0, 205.0 / 255.0, 1);
+                if (index > 3.5) return fixed4(214.0 / 255.0, 179.0 / 255.0, 98.0 / 255.0, 1);
+                if (index > 2.5) return fixed4(214.0 / 255.0, 115.0 / 255.0, 123.0 / 255.0, 1);
+                if (index > 1.5) return fixed4(115.0 / 255.0, 165.0 / 255.0, 214.0 / 255.0, 1);
+                if (index > .5) return fixed4(214.0 / 255.0, 115.0 / 255.0, 205.0 / 255.0, 1);
+                return fixed4(115.0 / 255.0, 214.0 / 255.0, 157.0 / 255.0, 1);
             }
 
             v2f vert(appdata_t input)

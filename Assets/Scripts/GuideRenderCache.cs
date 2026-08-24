@@ -4,6 +4,140 @@ using UnityEngine;
 
 namespace Gugarhythm
 {
+    public readonly struct GuideStackSummary
+    {
+        public readonly int SourcePathCount;
+        public readonly int RenderPathCount;
+
+        public GuideStackSummary(int sourcePathCount, int renderPathCount)
+        {
+            SourcePathCount = Math.Max(0, sourcePathCount);
+            RenderPathCount = Math.Max(0, renderPathCount);
+        }
+    }
+
+    // Presentation-only normalization for authored brightness stacks. Exact
+    // duplicate Guides are equivalent to one Guide with source-over alpha
+    // compositing, provided no differently styled Guide overlaps between them
+    // in source order. The chart's judged notes and Hold paths are untouched.
+    public static class GuideStackOptimizer
+    {
+        public const float BaseLayerAlpha = .32f;
+
+        sealed class Representative
+        {
+            public RuntimeGuide Guide;
+            public int SourceIndex;
+        }
+
+        readonly struct GuideKey : IEquatable<GuideKey>
+        {
+            readonly RuntimeGuide guide;
+
+            public GuideKey(RuntimeGuide guide) => this.guide = guide;
+
+            public bool Equals(GuideKey other) => SameGuide(guide, other.guide);
+            public override bool Equals(object obj) => obj is GuideKey other && Equals(other);
+
+            public override int GetHashCode()
+            {
+                var hash = new HashCode();
+                AddPoint(ref hash, guide.Start);
+                AddPoint(ref hash, guide.Head);
+                AddPoint(ref hash, guide.Tail);
+                AddPoint(ref hash, guide.End);
+                hash.Add(guide.Color);
+                hash.Add(guide.Fade);
+                hash.Add(guide.Ease);
+                hash.Add(guide.FadeOut);
+                hash.Add(guide.HeadOpacity);
+                hash.Add(guide.TailOpacity);
+                return hash.ToHashCode();
+            }
+
+            static void AddPoint(ref HashCode hash, RuntimeGuidePoint point)
+            {
+                hash.Add(point.Time);
+                hash.Add(point.Beat);
+                hash.Add(point.Lane);
+                hash.Add(point.Size);
+                hash.Add(point.TimeScaleGroup, StringComparer.Ordinal);
+            }
+        }
+
+        public static GuideStackSummary CollapseExactDuplicates(List<RuntimeGuide> guides)
+        {
+            if (guides == null || guides.Count == 0) return default;
+
+            var sourcePathCount = 0;
+            foreach (var guide in guides)
+                if (guide != null) sourcePathCount += Math.Max(1, guide.StackCount);
+
+            var output = new List<RuntimeGuide>(guides.Count);
+            var latestByKey = new Dictionary<GuideKey, Representative>();
+            for (var sourceIndex = 0; sourceIndex < guides.Count; sourceIndex++)
+            {
+                var guide = guides[sourceIndex];
+                if (guide == null) continue;
+                guide.StackCount = Math.Max(1, guide.StackCount);
+                var key = new GuideKey(guide);
+                if (latestByKey.TryGetValue(key, out var representative) &&
+                    !HasOrderSensitiveOverlap(guides, representative.SourceIndex, sourceIndex, guide))
+                {
+                    representative.Guide.StackCount += guide.StackCount;
+                    continue;
+                }
+
+                output.Add(guide);
+                latestByKey[key] = new Representative { Guide = guide, SourceIndex = sourceIndex };
+            }
+
+            if (output.Count != guides.Count)
+            {
+                guides.Clear();
+                guides.AddRange(output);
+            }
+            return new GuideStackSummary(sourcePathCount, output.Count);
+        }
+
+        public static float CompositeAlpha(float authoredOpacity, int stackCount)
+        {
+            var layerAlpha = BaseLayerAlpha * Mathf.Clamp01(authoredOpacity);
+            return 1f - Mathf.Pow(1f - layerAlpha, Math.Max(1, stackCount));
+        }
+
+        static bool HasOrderSensitiveOverlap(IReadOnlyList<RuntimeGuide> guides, int firstIndex, int nextIndex,
+            RuntimeGuide target)
+        {
+            var targetMinimum = Math.Min(target.Head.Time, target.Tail.Time);
+            var targetMaximum = Math.Max(target.Head.Time, target.Tail.Time);
+            for (var index = firstIndex + 1; index < nextIndex; index++)
+            {
+                var candidate = guides[index];
+                if (candidate == null || SameGuide(target, candidate)) continue;
+                var candidateMinimum = Math.Min(candidate.Head.Time, candidate.Tail.Time);
+                var candidateMaximum = Math.Max(candidate.Head.Time, candidate.Tail.Time);
+                if (Math.Min(targetMaximum, candidateMaximum) >
+                    Math.Max(targetMinimum, candidateMinimum) + 1e-9)
+                    return true;
+            }
+            return false;
+        }
+
+        static bool SameGuide(RuntimeGuide left, RuntimeGuide right) =>
+            left != null && right != null &&
+            SamePoint(left.Start, right.Start) && SamePoint(left.Head, right.Head) &&
+            SamePoint(left.Tail, right.Tail) && SamePoint(left.End, right.End) &&
+            left.Color == right.Color && left.Fade == right.Fade && left.Ease == right.Ease &&
+            left.FadeOut == right.FadeOut && left.HeadOpacity.Equals(right.HeadOpacity) &&
+            left.TailOpacity.Equals(right.TailOpacity);
+
+        static bool SamePoint(RuntimeGuidePoint left, RuntimeGuidePoint right) =>
+            left.Time.Equals(right.Time) && left.Beat.Equals(right.Beat) &&
+            left.Lane.Equals(right.Lane) && left.Size.Equals(right.Size) &&
+            string.Equals(left.TimeScaleGroup, right.TimeScaleGroup, StringComparison.Ordinal);
+    }
+
     public readonly struct GuideRenderSample
     {
         public readonly float Progress;
@@ -90,6 +224,7 @@ namespace Gugarhythm
         public double HeadTime { get; }
         public double TailTime { get; }
         public int Color { get; }
+        public int StackCount { get; }
         public int VisualSpanCount => visualSpans.Count;
 
         public GuideRenderCache(RuntimeGuide guide)
@@ -108,6 +243,7 @@ namespace Gugarhythm
             TimeScaleGroup = string.IsNullOrEmpty(guide.Head.TimeScaleGroup)
                 ? guide.Tail.TimeScaleGroup : guide.Head.TimeScaleGroup;
             Color = guide.Color;
+            StackCount = Math.Max(1, guide.StackCount);
         }
 
         public GuideRenderSample Evaluate(float progress, double visualPosition = double.NaN)

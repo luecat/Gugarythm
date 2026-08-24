@@ -225,6 +225,7 @@ namespace Gugarhythm
         public bool FadeOut;
         public float HeadOpacity = 1;
         public float TailOpacity = 1;
+        public int StackCount = 1;
     }
 
     [Serializable]

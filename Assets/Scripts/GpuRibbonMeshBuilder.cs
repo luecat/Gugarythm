@@ -146,7 +146,8 @@ namespace Gugarhythm
                 {
                     var sample = cache.Evaluate(progress);
                     points.Add(new RibbonPoint(sample.Lane, sample.Size,
-                        chart.VisualPosition(sample.Time, group), sample.Alpha));
+                        chart.VisualPosition(sample.Time, group),
+                        GuideStackOptimizer.CompositeAlpha(sample.Alpha, cache.StackCount)));
                 }
                 guideAccumulator.AddPath(GpuRibbonKind.Guide, groupIndex, Mathf.Clamp(cache.Color, 0, 255), points);
                 result.GuidePathCount++;

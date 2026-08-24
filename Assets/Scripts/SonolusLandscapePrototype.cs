@@ -427,6 +427,8 @@ namespace Gugarhythm
         GuideRenderCache projectingGuideCache;
         RuntimeChart cachedGuideChart;
         ChartRenderIndex chartRenderIndex;
+        int sourceGuidePathCount;
+        int renderedGuidePathCount;
         Texture2D laneTexture;
         Texture2D damageTexture;
         readonly Texture2D[] flickNormalCenterTextures = new Texture2D[6];
@@ -479,6 +481,7 @@ namespace Gugarhythm
         RectTransform menuPanel;
         RectTransform gameplayLoadingOverlay;
         RectTransform performanceHudPanel;
+        Button performanceHudToggleButton;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
         RectTransform settingsAudioPanel;
@@ -498,6 +501,7 @@ namespace Gugarhythm
         Text loadStatus;
         Text gameplayLoadingLabel;
         Text performanceHudLabel;
+        Text performanceHudToggleLabel;
         Text libraryCountLabel;
         Text librarySortLabel;
         Text librarySortModeLabel;
@@ -584,6 +588,8 @@ namespace Gugarhythm
         float scrollSpeed = DefaultScrollSpeed;
         float judgmentHideAt = -1f;
         float nextPerformanceHudRefresh;
+        bool gameplayStageVisible;
+        bool performanceDiagnosticsEnabled;
         double latestCpuFrameTimeMs = double.NaN;
         double latestGpuFrameTimeMs = double.NaN;
         float latestNotesMilliseconds;
@@ -749,7 +755,7 @@ namespace Gugarhythm
             EnhancedTouchSupport.Enable();
             LoadArtwork();
             BuildInterface();
-            gcAllocationRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Allocated In Frame", 1);
+            SetPerformanceDiagnosticsEnabled(false);
             SetStatus("請匯入 GGR 封包。");
         }
 
@@ -813,9 +819,11 @@ namespace Gugarhythm
 
         void SetGameplayStageVisible(bool visible)
         {
+            gameplayStageVisible = visible;
             if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(visible);
             if (stage != null) stage.gameObject.SetActive(visible);
-            if (performanceHudPanel != null) performanceHudPanel.gameObject.SetActive(visible);
+            if (performanceHudPanel != null) performanceHudPanel.gameObject.SetActive(visible && performanceDiagnosticsEnabled);
+            if (performanceHudToggleButton != null) performanceHudToggleButton.gameObject.SetActive(visible);
         }
 
         void SetGameplayLoadingVisible(bool visible, string message = null)
@@ -896,10 +904,11 @@ namespace Gugarhythm
 
         void Update()
         {
-            var gameplayTimingStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var measurePerformance = performanceDiagnosticsEnabled;
+            var gameplayTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             UpdatePerformanceHud();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            GameplayFrameProfiler.Begin();
+            if (measurePerformance) GameplayFrameProfiler.Begin();
             try
             {
 #endif
@@ -935,17 +944,20 @@ namespace Gugarhythm
             for (var index = 0; index < judgmentEvents.Count; index++) OnJudgment(judgmentEvents[index]);
             UpdateVisuals(songTime + visualOffsetSeconds);
             RefreshHud();
-            gameplayTimingSamples.AddFrame(
-                MillisecondsBetween(gameplayTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
-                latestNotesMilliseconds, latestHoldsMilliseconds, latestGuidesMilliseconds,
-                latestSimLinesMilliseconds, Time.unscaledDeltaTime);
-            hotPathTimingSamples.AddFrame(latestHotPathFrameSnapshot, Time.unscaledDeltaTime);
+            if (measurePerformance)
+            {
+                gameplayTimingSamples.AddFrame(
+                    MillisecondsBetween(gameplayTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
+                    latestNotesMilliseconds, latestHoldsMilliseconds, latestGuidesMilliseconds,
+                    latestSimLinesMilliseconds, Time.unscaledDeltaTime);
+                hotPathTimingSamples.AddFrame(latestHotPathFrameSnapshot, Time.unscaledDeltaTime);
+            }
             if (songTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
             finally
             {
-                GameplayFrameProfiler.End();
+                if (measurePerformance) GameplayFrameProfiler.End();
             }
 #endif
         }
@@ -1557,6 +1569,9 @@ namespace Gugarhythm
             }
             foreach (var checkpoints in holdCheckpoints.Values)
                 checkpoints.Sort((left, right) => left.Time.CompareTo(right.Time));
+            var guideStackSummary = GuideStackOptimizer.CollapseExactDuplicates(chart.Guides);
+            sourceGuidePathCount = guideStackSummary.SourcePathCount;
+            renderedGuidePathCount = guideStackSummary.RenderPathCount;
             chartRenderIndex = new ChartRenderIndex(chart);
             BuildGuideRenderCaches();
         }
@@ -1597,12 +1612,13 @@ namespace Gugarhythm
                     Debug.LogWarning(gpuRibbonFallbackReason);
                 }
             }
-            var cpuFallback = gpuRibbonRenderer == null;
-            if (guideBatch != null) guideBatch.gameObject.SetActive(cpuFallback);
-            if (holdGreenBatch != null) holdGreenBatch.gameObject.SetActive(cpuFallback);
-            if (holdYellowBatch != null) holdYellowBatch.gameObject.SetActive(cpuFallback);
-            if (missedHoldGreenBatch != null) missedHoldGreenBatch.gameObject.SetActive(cpuFallback);
-            if (missedHoldYellowBatch != null) missedHoldYellowBatch.gameObject.SetActive(cpuFallback);
+            var cpuGuides = gpuRibbonRenderer?.RendersGuides != true;
+            var cpuHolds = gpuRibbonRenderer?.RendersHolds != true;
+            if (guideBatch != null) guideBatch.gameObject.SetActive(cpuGuides);
+            if (holdGreenBatch != null) holdGreenBatch.gameObject.SetActive(cpuHolds);
+            if (holdYellowBatch != null) holdYellowBatch.gameObject.SetActive(cpuHolds);
+            if (missedHoldGreenBatch != null) missedHoldGreenBatch.gameObject.SetActive(cpuHolds);
+            if (missedHoldYellowBatch != null) missedHoldYellowBatch.gameObject.SetActive(cpuHolds);
         }
 
         double CurrentSongTime() => GameplayTiming.ChartTimeAtDsp(
@@ -1915,16 +1931,19 @@ namespace Gugarhythm
         void UpdateVisuals(double visualTime)
         {
             hotPathFrameMetrics.Reset();
-            visualFrameContext.BeginFrame(chart, visualTime);
-            var sectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            visualFrameContext.BeginFrame(chart, visualTime, performanceDiagnosticsEnabled);
+            var sectionStart = PerformanceTimestamp();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            UpdateVisualsProfiler.Begin();
-            GuidesProfiler.Begin();
+            if (performanceDiagnosticsEnabled)
+            {
+                UpdateVisualsProfiler.Begin();
+                GuidesProfiler.Begin();
+            }
 #endif
             renderedPersistentHoldHeads.Clear();
-            if (gpuRibbonRenderer != null)
+            gpuRibbonRenderer?.UpdateFrame(visualFrameContext, ApproachDuration, CanvasHeight, NearTrackProgress);
+            if (gpuRibbonRenderer?.RendersGuides == true)
             {
-                gpuRibbonRenderer.UpdateFrame(visualFrameContext, ApproachDuration, CanvasHeight, NearTrackProgress);
                 latestGuideFrameSnapshot = default;
             }
             else
@@ -1935,11 +1954,10 @@ namespace Gugarhythm
                 guideRenderMetrics.SetCandidateCount(visibleGuides.Count);
                 foreach (var guide in visibleGuides)
                 {
-                    var clippingStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                    var clippingStart = PerformanceTimestamp();
                     var cache = guideRenderCaches[guide];
                     cache.QueryVisibleSpans(visualFrameContext, ApproachDuration, visibleGuideSpans);
-                    hotPathFrameMetrics.Record(HotPathStage.GuideClipping,
-                        MillisecondsBetween(clippingStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+                    RecordHotPathSample(HotPathStage.GuideClipping, clippingStart);
                     var sampleCount = 0;
                     foreach (var span in visibleGuideSpans)
                         sampleCount += SetGuidePath(guideBatch, cache, span);
@@ -1954,13 +1972,13 @@ namespace Gugarhythm
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            GuidesProfiler.End();
+            if (performanceDiagnosticsEnabled) GuidesProfiler.End();
 #endif
-            var sectionEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            var sectionEnd = PerformanceTimestamp();
             latestGuidesMilliseconds = MillisecondsBetween(sectionStart, sectionEnd);
             sectionStart = sectionEnd;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            SimLinesProfiler.Begin();
+            if (performanceDiagnosticsEnabled) SimLinesProfiler.Begin();
 #endif
             foreach (var simLine in chart.SimLines)
             {
@@ -2005,13 +2023,13 @@ namespace Gugarhythm
             }
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            SimLinesProfiler.End();
+            if (performanceDiagnosticsEnabled) SimLinesProfiler.End();
 #endif
-            sectionEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            sectionEnd = PerformanceTimestamp();
             latestSimLinesMilliseconds = MillisecondsBetween(sectionStart, sectionEnd);
             sectionStart = sectionEnd;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            NotesProfiler.Begin();
+            if (performanceDiagnosticsEnabled) NotesProfiler.Begin();
 #endif
             renderedNoteIds.Clear();
             chartRenderIndex.QueryNotes(visualFrameContext, ApproachDuration, ApproachDuration * 2, visibleNotes);
@@ -2087,16 +2105,16 @@ namespace Gugarhythm
                 if (noteViews.TryGetValue(key, out var oldView)) ReleaseNoteView(key, oldView);
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            NotesProfiler.End();
+            if (performanceDiagnosticsEnabled) NotesProfiler.End();
 #endif
-            sectionEnd = System.Diagnostics.Stopwatch.GetTimestamp();
+            sectionEnd = PerformanceTimestamp();
             latestNotesMilliseconds = MillisecondsBetween(sectionStart, sectionEnd);
             sectionStart = sectionEnd;
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            HoldsProfiler.Begin();
+            if (performanceDiagnosticsEnabled) HoldsProfiler.Begin();
 #endif
             holdVisualRanges.Clear();
-            if (gpuRibbonRenderer != null)
+            if (gpuRibbonRenderer?.RendersHolds == true)
             {
                 chartRenderIndex.QueryHoldRuns(visualFrameContext, 0, ApproachDuration, visibleHoldRuns);
                 foreach (var run in visibleHoldRuns) RenderGpuPersistentHoldHead(run, visualTime);
@@ -2145,14 +2163,21 @@ namespace Gugarhythm
             foreach (var key in persistentHeadReleaseKeys)
                 if (persistentHoldHeadViews.TryGetValue(key, out var oldHead)) ReleasePersistentHoldHead(key, oldHead);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            HoldsProfiler.End();
-            UpdateVisualsProfiler.End();
+            if (performanceDiagnosticsEnabled)
+            {
+                HoldsProfiler.End();
+                UpdateVisualsProfiler.End();
+            }
 #endif
-            latestHoldsMilliseconds = MillisecondsBetween(sectionStart, System.Diagnostics.Stopwatch.GetTimestamp());
-            hotPathFrameMetrics.Record(HotPathStage.TimeScalePositionAt,
-                visualFrameContext.PositionAtMilliseconds, visualFrameContext.PositionAtCallCount);
-            hotPathFrameMetrics.SetTimeScaleSearchSteps(visualFrameContext.PositionAtSearchStepCount);
-            latestHotPathFrameSnapshot = hotPathFrameMetrics.Snapshot();
+            latestHoldsMilliseconds = MillisecondsBetween(sectionStart, PerformanceTimestamp());
+            if (performanceDiagnosticsEnabled)
+            {
+                hotPathFrameMetrics.Record(HotPathStage.TimeScalePositionAt,
+                    visualFrameContext.PositionAtMilliseconds, visualFrameContext.PositionAtCallCount);
+                hotPathFrameMetrics.SetTimeScaleSearchSteps(visualFrameContext.PositionAtSearchStepCount);
+                latestHotPathFrameSnapshot = hotPathFrameMetrics.Snapshot();
+            }
+            else latestHotPathFrameSnapshot = default;
         }
 
         void RenderGpuPersistentHoldHead(HoldRenderRun run, double visualTime)
@@ -2181,17 +2206,16 @@ namespace Gugarhythm
             projectingHoldPath = path;
             projectingHoldCache = holdRenderCaches[path];
             projectingHoldVisualTime = visualTime;
-            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var tessellationStart = PerformanceTimestamp();
             holdTessellator.BuildProjected(run, firstVisibleTime, lastVisibleTime, holdPointProjector, holdTessellationPoints);
-            hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
-                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            RecordHotPathSample(HotPathStage.HoldTessellation, tessellationStart);
             if (holdTessellationPoints.Count < 2)
                 return false;
             var line = HoldRunBatch(run);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            HoldMeshSubmissionProfiler.Begin();
+            if (performanceDiagnosticsEnabled) HoldMeshSubmissionProfiler.Begin();
 #endif
-            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var meshWriteStart = PerformanceTimestamp();
             line.BeginPath(holdTessellationPoints.Count);
             for (var index = 0; index < holdTessellationPoints.Count; index++)
             {
@@ -2199,10 +2223,9 @@ namespace Gugarhythm
                 line.SetPathPoint(index, point.Position, point.Width);
             }
             line.EndPath();
-            hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
-                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), holdTessellationPoints.Count);
+            RecordHotPathSample(HotPathStage.HoldMeshWrite, meshWriteStart, holdTessellationPoints.Count);
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
-            HoldMeshSubmissionProfiler.End();
+            if (performanceDiagnosticsEnabled) HoldMeshSubmissionProfiler.End();
 #endif
 
             if (firstVisibleTime <= range.NearTime + 1e-9 && range.NearTime <= lastVisibleTime + 1e-9 &&
@@ -2224,7 +2247,7 @@ namespace Gugarhythm
 
         HoldProjectedPoint ProjectHoldPoint(HoldTessellationPoint point)
         {
-            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var projectionStart = PerformanceTimestamp();
             var segment = projectingHoldPath.Segments[point.Sample.SegmentIndex];
             var group = string.IsNullOrEmpty(segment.Start.TimeScaleGroup)
                 ? segment.End.TimeScaleGroup : segment.Start.TimeScaleGroup;
@@ -2234,8 +2257,7 @@ namespace Gugarhythm
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
             var projected = new Vector2(X(point.Sample.Lane, screenProgress), ScreenY(screenProgress));
             var width = HoldConnectorLaneWidth(LaneWidth(point.Sample.Lane, point.Sample.Size, screenProgress));
-            hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
-                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            RecordHotPathSample(HotPathStage.HoldProjection, projectionStart);
             return new HoldProjectedPoint(point, projected, width);
         }
 
@@ -2316,26 +2338,27 @@ namespace Gugarhythm
         int SetGuidePath(GuideBatchGraphic batch, GuideRenderCache cache, GuideVisualSpan span)
         {
             projectingGuideCache = cache;
-            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var tessellationStart = PerformanceTimestamp();
             guideTessellator.BuildProjected(cache, span, guideSampleProjector, guideTessellationPoints);
-            hotPathFrameMetrics.Record(HotPathStage.GuideTessellation,
-                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()));
-            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
-            batch.BeginPath(GuideColor(cache.Color), guideTessellationPoints.Count);
+            RecordHotPathSample(HotPathStage.GuideTessellation, tessellationStart);
+            var meshWriteStart = PerformanceTimestamp();
+            var guideColor = GuideColor(cache.Color);
+            guideColor.a = 1;
+            batch.BeginPath(guideColor, guideTessellationPoints.Count);
             for (var index = 0; index < guideTessellationPoints.Count; index++)
             {
                 var projected = guideTessellationPoints[index];
-                batch.SetPathPoint(index, projected.Center, projected.Width, projected.Alpha);
+                batch.SetPathPoint(index, projected.Center, projected.Width,
+                    GuideStackOptimizer.CompositeAlpha(projected.Alpha, cache.StackCount));
             }
             batch.EndPath();
-            hotPathFrameMetrics.Record(HotPathStage.GuideMeshWrite,
-                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), guideTessellationPoints.Count);
+            RecordHotPathSample(HotPathStage.GuideMeshWrite, meshWriteStart, guideTessellationPoints.Count);
             return guideTessellationPoints.Count;
         }
 
         GuideProjectedPoint ProjectGuideSample(GuideRenderSample sample)
         {
-            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var projectionStart = PerformanceTimestamp();
             var visualPosition = sample.HasVisualPosition ? sample.VisualPosition :
                 visualFrameContext.PositionAt(sample.Time, projectingGuideCache.TimeScaleGroup);
             var approach = visualFrameContext.Approach(visualPosition, projectingGuideCache.TimeScaleGroup, ApproachDuration);
@@ -2343,8 +2366,7 @@ namespace Gugarhythm
             var center = new Vector2(X(sample.Lane, screenProgress), ScreenY(screenProgress));
             var projected = new GuideProjectedPoint(sample.Progress, center,
                 LaneWidth(sample.Lane, sample.Size, screenProgress), sample.Alpha);
-            hotPathFrameMetrics.Record(HotPathStage.GuideProjection,
-                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            RecordHotPathSample(HotPathStage.GuideProjection, projectionStart);
             return projected;
         }
 
@@ -2365,27 +2387,24 @@ namespace Gugarhythm
             var approachSpan = startApproach - endApproach;
             if (approachSpan <= 1e-5f)
             {
-                var degenerateTessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
-                hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
-                    MillisecondsBetween(degenerateTessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()), 2);
-                var degenerateMeshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
+                var degenerateTessellationStart = PerformanceTimestamp();
+                RecordHotPathSample(HotPathStage.HoldTessellation, degenerateTessellationStart, 2);
+                var degenerateMeshWriteStart = PerformanceTimestamp();
                 line.BeginPath(2);
                 SetConnectorPoint(line, 0, connector, 0, startApproach);
                 SetConnectorPoint(line, 1, connector, 1, endApproach);
                 line.EndPath();
-                hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
-                    MillisecondsBetween(degenerateMeshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), 2);
+                RecordHotPathSample(HotPathStage.HoldMeshWrite, degenerateMeshWriteStart, 2);
                 return;
             }
 
-            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var tessellationStart = PerformanceTimestamp();
             var nearApproach = holdMode == HoldConnectorRenderMode.AnchorClipped ? 1f : NearTrackApproach;
             var nearT = FindConnectorProgress(connector, visualTime, nearApproach, startApproach, endApproach);
             var farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             var sampleCount = BuildStablePathSamples(nearT, farT);
-            hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
-                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
-            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            RecordHotPathSample(HotPathStage.HoldTessellation, tessellationStart, sampleCount);
+            var meshWriteStart = PerformanceTimestamp();
             line.BeginPath(sampleCount);
             for (var index = 0; index < sampleCount; index++)
             {
@@ -2393,8 +2412,7 @@ namespace Gugarhythm
                 SetConnectorPoint(line, index, connector, t, ConnectorApproach(connector, visualTime, t));
             }
             line.EndPath();
-            hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
-                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
+            RecordHotPathSample(HotPathStage.HoldMeshWrite, meshWriteStart, sampleCount);
         }
 
         void SetConnectorPath(HoldBatchGraphic batch, RuntimeConnector connector, double visualTime, float startApproach,
@@ -2403,7 +2421,7 @@ namespace Gugarhythm
             var approachSpan = startApproach - endApproach;
             var nearT = 0f;
             var farT = 1f;
-            var tessellationStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var tessellationStart = PerformanceTimestamp();
             if (approachSpan > 1e-5f)
             {
                 var nearApproach = holdMode == HoldConnectorRenderMode.AnchorClipped ? 1f : NearTrackApproach;
@@ -2411,9 +2429,8 @@ namespace Gugarhythm
                 farT = FindConnectorProgress(connector, visualTime, 0f, startApproach, endApproach);
             }
             var sampleCount = approachSpan <= 1e-5f ? 2 : BuildStablePathSamples(nearT, farT);
-            hotPathFrameMetrics.Record(HotPathStage.HoldTessellation,
-                MillisecondsBetween(tessellationStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
-            var meshWriteStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            RecordHotPathSample(HotPathStage.HoldTessellation, tessellationStart, sampleCount);
+            var meshWriteStart = PerformanceTimestamp();
             batch.BeginPath(sampleCount);
             for (var index = 0; index < sampleCount; index++)
             {
@@ -2423,8 +2440,7 @@ namespace Gugarhythm
                 SetConnectorPoint(batch, index, connector, progress, approach);
             }
             batch.EndPath();
-            hotPathFrameMetrics.Record(HotPathStage.HoldMeshWrite,
-                MillisecondsBetween(meshWriteStart, System.Diagnostics.Stopwatch.GetTimestamp()), sampleCount);
+            RecordHotPathSample(HotPathStage.HoldMeshWrite, meshWriteStart, sampleCount);
         }
 
         float FindConnectorProgress(RuntimeConnector connector, double visualTime, float target, float startApproach, float endApproach)
@@ -2468,7 +2484,7 @@ namespace Gugarhythm
 
         void SetConnectorPoint(TaperedConnectorGraphic line, int index, RuntimeConnector connector, float timeProgress, float approachProgress)
         {
-            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var projectionStart = PerformanceTimestamp();
             var laneProgress = EaseConnector(timeProgress, connector.Ease);
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
@@ -2476,23 +2492,21 @@ namespace Gugarhythm
             var bodyWidth = LaneWidth(lane, size, screenProgress);
             var position = new Vector2(X(lane, screenProgress), ScreenY(screenProgress));
             var width = HoldConnectorLaneWidth(bodyWidth);
-            hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
-                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            RecordHotPathSample(HotPathStage.HoldProjection, projectionStart);
             line.SetPathPoint(index, position, width);
         }
 
         void SetConnectorPoint(HoldBatchGraphic batch, int index, RuntimeConnector connector, float timeProgress,
             float approachProgress)
         {
-            var projectionStart = System.Diagnostics.Stopwatch.GetTimestamp();
+            var projectionStart = PerformanceTimestamp();
             var laneProgress = EaseConnector(timeProgress, connector.Ease);
             var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, laneProgress);
             var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, laneProgress);
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
             var position = new Vector2(X(lane, screenProgress), ScreenY(screenProgress));
             var width = HoldConnectorLaneWidth(LaneWidth(lane, size, screenProgress));
-            hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
-                MillisecondsBetween(projectionStart, System.Diagnostics.Stopwatch.GetTimestamp()));
+            RecordHotPathSample(HotPathStage.HoldProjection, projectionStart);
             batch.SetPathPoint(index, position, width);
         }
 
@@ -2931,10 +2945,51 @@ namespace Gugarhythm
             performanceHudLabel.rectTransform.anchorMax = Vector2.one;
             performanceHudLabel.rectTransform.offsetMin = new Vector2(14, 10);
             performanceHudLabel.rectTransform.offsetMax = new Vector2(-12, -10);
+
+            performanceHudToggleButton = MakeFlatButton("效能", root, Vector2.zero,
+                TogglePerformanceDiagnostics, new Vector2(128, 48), new Color(.04f, .28f, .42f, .92f));
+            PinToAnchor(performanceHudToggleButton.GetComponent<RectTransform>(), new Vector2(0, 1),
+                new Vector2(0, 1), new Vector2(608, -112));
+            performanceHudToggleLabel = performanceHudToggleButton.GetComponentInChildren<Text>();
+        }
+
+        void TogglePerformanceDiagnostics() =>
+            SetPerformanceDiagnosticsEnabled(!performanceDiagnosticsEnabled);
+
+        void SetPerformanceDiagnosticsEnabled(bool enabled)
+        {
+            if (performanceDiagnosticsEnabled == enabled &&
+                (enabled ? gcAllocationRecorder.Valid : !gcAllocationRecorder.Valid))
+            {
+                if (performanceHudPanel != null)
+                    performanceHudPanel.gameObject.SetActive(gameplayStageVisible && enabled);
+                return;
+            }
+
+            performanceDiagnosticsEnabled = enabled;
+            if (performanceHudPanel != null)
+                performanceHudPanel.gameObject.SetActive(gameplayStageVisible && enabled);
+            if (performanceHudToggleLabel != null)
+                performanceHudToggleLabel.text = enabled ? "關閉效能" : "效能";
+
+            if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
+            if (enabled)
+                gcAllocationRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Allocated In Frame", 1);
+
+            performanceSamples.Reset();
+            gameplayTimingSamples.Reset();
+            hotPathTimingSamples.Reset();
+            frameBudgetCounter.Reset();
+            latestHotPathFrameSnapshot = default;
+            latestGuideFrameSnapshot = default;
+            latestCpuFrameTimeMs = double.NaN;
+            latestGpuFrameTimeMs = double.NaN;
+            nextPerformanceHudRefresh = 0;
         }
 
         void UpdatePerformanceHud()
         {
+            if (!performanceDiagnosticsEnabled) return;
             if (performanceHudPanel == null || !performanceHudPanel.gameObject.activeInHierarchy) return;
             if (!running || paused || chart == null || judgmentEngine == null) return;
 
@@ -2958,9 +3013,10 @@ namespace Gugarhythm
             var refreshRate = Screen.currentResolution.refreshRateRatio.value;
             var gcBytes = gcAllocationRecorder.Valid ? gcAllocationRecorder.LastValue : -1;
             var ribbonStatus = gpuRibbonRenderer != null
-                ? $"GPU RIBBON C {gpuRibbonRenderer.ChunkCount} V {gpuRibbonRenderer.VertexCount} " +
+                ? $"GPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount} + CPU HOLD " +
+                  $"C {gpuRibbonRenderer.ChunkCount} V {gpuRibbonRenderer.VertexCount} " +
                   $"B {gpuRibbonRenderer.StaticBuildCount} CACHE {(gpuRibbonRenderer.CacheHit ? "HIT" : "MISS")}"
-                : $"CPU RIBBON {gpuRibbonFallbackReason}";
+                : $"CPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount} + HOLD {gpuRibbonFallbackReason}";
             performanceHudLabel.text =
                 $"FPS  {snapshot.CurrentFps:0.0}   AVG  {snapshot.AverageFps:0.0}   MIN  {snapshot.MinimumFps:0.0}\n" +
                 $"FRAME  {1000f / snapshot.CurrentFps:0.00} ms   CPU  {FormatMilliseconds(latestCpuFrameTimeMs)}\n" +
@@ -2995,6 +3051,17 @@ namespace Gugarhythm
 
         static string FormatHotPathTiming(HotPathStageSnapshot current, TimingSnapshot timing) =>
             $"{current.Calls}:{current.ElapsedMilliseconds:0.00}/{timing.P95Milliseconds:0.00}/{timing.P99Milliseconds:0.00}";
+
+        long PerformanceTimestamp() => performanceDiagnosticsEnabled
+            ? System.Diagnostics.Stopwatch.GetTimestamp()
+            : 0;
+
+        void RecordHotPathSample(HotPathStage stage, long startTimestamp, int callCount = 1)
+        {
+            if (!performanceDiagnosticsEnabled) return;
+            hotPathFrameMetrics.Record(stage,
+                MillisecondsBetween(startTimestamp, System.Diagnostics.Stopwatch.GetTimestamp()), callCount);
+        }
 
         static float MillisecondsBetween(long startTimestamp, long endTimestamp) =>
             (float)((endTimestamp - startTimestamp) * 1000d / System.Diagnostics.Stopwatch.Frequency);

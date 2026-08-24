@@ -28,6 +28,8 @@ namespace Gugarhythm
         public int VertexCount { get; }
         public int GuidePathCount { get; }
         public int HoldPathCount { get; }
+        public bool RendersGuides { get; }
+        public bool RendersHolds { get; }
         public bool CacheHit { get; }
         public int StaticBuildCount
         {
@@ -41,14 +43,15 @@ namespace Gugarhythm
 
         GpuRibbonRenderer(RuntimeChart chart, GpuRibbonBuildResult build, bool cacheHit, Shader shader,
             RectTransform guideLayer, RectTransform holdLayer, Canvas stageCanvas,
-            Texture2D holdGreen, Texture2D holdYellow)
+            Texture2D holdGreen, Texture2D holdYellow, bool renderGuides, bool renderHolds)
         {
             this.chart = chart;
             CacheHit = cacheHit;
-            rootStates = build.HoldRootStates;
-            VertexCount = build.VertexCount;
-            GuidePathCount = build.GuidePathCount;
-            HoldPathCount = build.HoldPathCount;
+            RendersGuides = renderGuides;
+            RendersHolds = renderHolds;
+            rootStates = renderHolds ? build.HoldRootStates : new Dictionary<int, int>();
+            GuidePathCount = renderGuides ? build.GuidePathCount : 0;
+            HoldPathCount = renderHolds ? build.HoldPathCount : 0;
             groupNames = build.GroupNames.ToArray();
             groupPositionPixels = new Color[Mathf.Max(1, groupNames.Length)];
             groupPositionTexture = new Texture2D(groupPositionPixels.Length, 1, TextureFormat.RGBAFloat, false, true)
@@ -74,6 +77,7 @@ namespace Gugarhythm
 
             var materialByKind = new Dictionary<GpuRibbonKind, Material>();
             var validChunkCount = 0;
+            var visibleVertexCount = 0;
 
             foreach (var chunk in build.Chunks)
             {
@@ -82,6 +86,9 @@ namespace Gugarhythm
                     Debug.LogWarning("GPU ribbon chunk is missing.");
                     continue;
                 }
+
+                var isGuide = chunk.Kind == GpuRibbonKind.Guide;
+                if ((isGuide && !renderGuides) || (!isGuide && !renderHolds)) continue;
 
                 if (!TryNormalizeChunk(chunk, out var vertices, out var indices, out var warning))
                 {
@@ -128,12 +135,14 @@ namespace Gugarhythm
                     Graphic = graphic,
                 });
                 validChunkCount++;
+                visibleVertexCount += vertices.Length;
             }
 
             if (validChunkCount == 0)
             {
                 throw new InvalidOperationException("GPU ribbon data has no usable chunks.");
             }
+            VertexCount = visibleVertexCount;
         }
 
         public static bool TryCreate(RuntimeChart chart,
@@ -149,14 +158,15 @@ namespace Gugarhythm
                 fallbackReason = "GPU ribbon initialization is missing chart or Canvas state.";
                 return false;
             }
-            // The precomputed GPU mesh is safe for decoration-only ribbons,
-            // but the Hold body still needs the runtime clipping and
-            // tessellation used by HoldBatchGraphic.  Keep that path as the
-            // authoritative renderer until GPU Hold clipping can match it for
-            // every time-scale/segment combination.
-            if (chart.HoldPaths.Count > 0 || chart.FallbackConnectors.Count > 0)
+            // Guide geometry is safe to keep immutable on the GPU. Hold bodies
+            // still need the CPU renderer's runtime clipping/tessellation for
+            // complete paths, so use a hybrid renderer instead of disabling
+            // GPU Guides whenever the chart contains a Hold.
+            var renderGuides = chart.Guides.Count > 0;
+            const bool renderHolds = false;
+            if (!renderGuides)
             {
-                fallbackReason = "GPU Hold ribbon disabled; using the CPU Hold renderer for complete paths.";
+                fallbackReason = "GPU Guide renderer has no decoration paths; using the CPU Hold renderer.";
                 return false;
             }
             if (!SystemInfo.SupportsTextureFormat(TextureFormat.RGBAFloat))
@@ -174,7 +184,7 @@ namespace Gugarhythm
             {
                 var build = GpuRibbonCache.LoadOrBuild(chart, guideCaches, out var cacheHit);
                 renderer = new GpuRibbonRenderer(chart, build, cacheHit, shader, guideLayer, holdLayer, stageCanvas,
-                    holdGreen, holdYellow);
+                    holdGreen, holdYellow, renderGuides, renderHolds);
                 return true;
             }
             catch (Exception exception)

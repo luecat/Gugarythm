@@ -26,6 +26,7 @@ namespace Gugarhythm
         readonly List<GroupEntry> groups = new();
         RuntimeChart chart;
         double visualTime;
+        bool measurePerformance;
         long positionAtTicks;
         int positionAtCalls;
         int positionAtSearchSteps;
@@ -35,10 +36,11 @@ namespace Gugarhythm
         public float PositionAtMilliseconds =>
             (float)(positionAtTicks * 1000d / Stopwatch.Frequency);
 
-        public void BeginFrame(RuntimeChart runtimeChart, double currentVisualTime)
+        public void BeginFrame(RuntimeChart runtimeChart, double currentVisualTime, bool measurePositionAtPerformance = true)
         {
             if (!ReferenceEquals(chart, runtimeChart)) Rebuild(runtimeChart);
             visualTime = currentVisualTime;
+            measurePerformance = measurePositionAtPerformance;
             positionAtTicks = 0;
             positionAtCalls = 0;
             positionAtSearchSteps = 0;
@@ -96,6 +98,7 @@ namespace Gugarhythm
 
         double Evaluate(RuntimeTimeScaleGroup map, double time)
         {
+            if (!measurePerformance) return map.PositionAt(time);
             var start = Stopwatch.GetTimestamp();
             var position = map.PositionAt(time, out var searchSteps);
             positionAtTicks += Stopwatch.GetTimestamp() - start;
