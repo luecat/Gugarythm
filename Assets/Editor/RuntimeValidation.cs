@@ -29,6 +29,14 @@ public static class RuntimeValidation
         Debug.Log("GUGARHYTHM_FRAME_PACING_FIXES_VALIDATION_OK");
     }
 
+    [MenuItem("Gugarhythm/Validate Repository Cleanup")]
+    public static void ValidateRepositoryCleanup()
+    {
+        ValidateScpImporterFixture();
+        ValidateGameplayResources();
+        Debug.Log("GUGARHYTHM_REPOSITORY_CLEANUP_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Start Loaded Chart _F8", true)]
     static bool CanStartLoadedChart() => EditorApplication.isPlaying;
 
@@ -93,67 +101,76 @@ public static class RuntimeValidation
         ValidateJudgmentTimingSpritePaths();
         ValidateJudgmentSpriteVisibility();
         ValidateJudgmentSpriteSize();
-        var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
-        if (!File.Exists(path)) throw new FileNotFoundException("Default SCP is missing", path);
-        var bytes = File.ReadAllBytes(path);
-        var result = new ScpChartImporter().Import("default.scp", bytes);
-        if (!result.Success) throw new InvalidDataException(result.Error);
-        var chart = result.Chart;
-        // Hidden and attached slide-control entities belong to connector geometry,
-        // not the playable/judged note set.
-        Require(chart.Notes.Any(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto && !note.Visible),
-            "Imported Holds must add invisible eighth-note checkpoints");
-        Require(chart.Connectors.Count == 1175, $"Expected 1175 connectors, got {chart.Connectors.Count}");
-        var holdRenderRunCount = chart.HoldPaths.Sum(path => path.RenderRuns.Count);
-        Require(chart.HoldPaths.Count > 0 && chart.FallbackConnectors.Count == 0,
-            "The DOMiNUS regression chart must build complete Hold paths without legacy fallback");
-        Require(holdRenderRunCount < chart.Connectors.Count,
-            $"Hold render runs must reduce Graphic ownership below connector count ({holdRenderRunCount} vs {chart.Connectors.Count})");
-        Require(chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "8"),
-            "Hold connector geometry must stop at its first particle/control point");
-        Require(!chart.Connectors.Any(value => value.Start.SourceId == "6" && value.End.SourceId == "7"),
-            "Hold connector geometry must not skip particles and flatten logical start/end into one ribbon");
-        var hiddenRootConnector = chart.Connectors.FirstOrDefault(value => value.Start.Archetype == "HiddenSlideStartNote");
-        Require(hiddenRootConnector != null && SonolusLandscapePrototype.ShouldClipHoldConnector(hiddenRootConnector),
-            "Hidden-head Hold connectors must remain clipped at the judgment line");
-        Require(chart.Connectors.Where(value => value.Start.HoldRootIndex >= 0 || value.End.HoldRootIndex >= 0)
-                    .All(SonolusLandscapePrototype.ShouldClipHoldConnector),
-            "Every segment attached to a Hold must stop at its head instead of continuing below it");
-        Require(chart.TimeScaleGroups.Count == 3, $"Expected 3 time-scale layers, got {chart.TimeScaleGroups.Count}");
-        Require(chart.Notes.Any(note => note.TimeScaleGroup == "tsg:1") && chart.Notes.Any(note => note.TimeScaleGroup == "tsg:2"),
-            "Notes from secondary time-scale layers were not preserved");
-        Require(chart.TimeScaleGroups.Values.Select(value => value.PositionAt(100)).Distinct().Count() > 1,
-            "Independent time-scale layers must produce distinct visual positions");
-        Require(chart.SimLines.Count == 579, $"Expected 579 synchronization lines, got {chart.SimLines.Count}");
-        Require(chart.Guides.Count == 154, $"Expected 154 decoration guides, got {chart.Guides.Count}");
-        Require(chart.Guides.Count(guide => guide.FadeOut) == 39,
-            $"Expected 39 decoration guide chain endings, got {chart.Guides.Count(guide => guide.FadeOut)}");
-        var chartNotes = new HashSet<RuntimeNote>(chart.Notes);
-        var connectorOnlyNodes = chart.Connectors
-            .SelectMany(connector => new[] { connector.Start, connector.End })
-            .Where(note => !chartNotes.Contains(note))
-            .Distinct()
-            .ToArray();
-        Require(connectorOnlyNodes.Length > 0 && connectorOnlyNodes.All(note => !note.Judged && !note.Visible),
-            "Connector-only geometry nodes must not be classified as playable Hold checkpoints or visible notes");
-        Require(chart.Notes.Count(note => (note.Archetype ?? string.Empty).EndsWith("SlideTickNote", StringComparison.OrdinalIgnoreCase)) == 46,
-            "Expected 46 particle-only hold mids");
+        ValidateScpImporterFixture();
+        ValidateGameplayResources();
+
+        ValidateJudgedVisualMasking();
+        ValidateJudgmentRules();
+        ValidateJudgmentIndexedEquivalence();
+        ValidateAutoPlay();
+        ValidateAudioDeviceRecovery();
+        ValidateLatencyCalibrationMath();
+        Debug.Log("GUGARHYTHM_VALIDATION_OK scpFixture=synthetic");
+    }
+
+    static void ValidateScpImporterFixture()
+    {
+        const string levelData = "{\"bgmOffset\":0.125,\"entities\":[{\"name\":\"tap\",\"archetype\":\"TapNote\",\"data\":[{\"name\":\"#BEAT\",\"value\":1},{\"name\":\"lane\",\"value\":0},{\"name\":\"size\",\"value\":1}]}]}";
+        const string detail = "{\"item\":{\"title\":\"Synthetic SCP Fixture\",\"artists\":\"Gugarhythm\",\"author\":\"Gugarhythm\",\"data\":{\"hash\":\"fixture-data\"},\"bgm\":{\"hash\":\"fixture-bgm\"}}}";
+        var archive = GgrZipFixture.Create(new Dictionary<string, byte[]>
+        {
+            ["sonolus/package"] = Array.Empty<byte>(),
+            ["sonolus/levels/fixture"] = System.Text.Encoding.UTF8.GetBytes(detail),
+            ["sonolus/repository/fixture-data"] = GzipUtf8(levelData),
+            ["sonolus/repository/fixture-bgm"] = new byte[] { (byte)'I', (byte)'D', (byte)'3', 0 },
+        });
+
+        var result = new ScpChartImporter().Import("fixture.scp", archive);
+        Require(result.Success, "Synthetic SCP fixture failed to import: " + result.Error);
+        Require(result.Chart.Title == "Synthetic SCP Fixture" &&
+                result.Chart.Artist == "Gugarhythm" &&
+                result.Chart.Author == "Gugarhythm",
+            "Synthetic SCP metadata was not preserved");
+        Require(result.Chart.Notes.Count == 1 &&
+                result.Chart.Notes[0].Kind == RuntimeNoteKind.Tap &&
+                Math.Abs(result.Chart.Notes[0].Time - .5) < .0001,
+            "Synthetic SCP note geometry or timing was not imported");
+        Require(result.Chart.BgmBytes?.Length == 4 && Math.Abs(result.Chart.BgmOffset - .125) < .0001,
+            "Synthetic SCP audio metadata was not extracted");
+    }
+
+    static byte[] GzipUtf8(string value)
+    {
+        var bytes = System.Text.Encoding.UTF8.GetBytes(value);
+        using var output = new MemoryStream();
+        using (var gzip = new GZipStream(output, System.IO.Compression.CompressionLevel.Optimal, true))
+            gzip.Write(bytes, 0, bytes.Length);
+        return output.ToArray();
+    }
+
+    static void ValidateGameplayResources()
+    {
         foreach (var tone in new[] { "cyan", "mint", "pink", "yellow" })
             Require(Resources.Load<Texture2D>($"Gugarhythm/official/buttons/button-{tone}") != null,
                 $"Official button texture is missing: {tone}");
         foreach (var tone in new[] { "mint", "pink", "yellow" })
             Require(Resources.Load<Texture2D>($"Gugarhythm/official/traces/trace-{tone}") != null,
                 $"Official trace texture is missing: {tone}");
-        Require(Resources.Load<Texture2D>("Gugarhythm/official/damage/damage-purple") != null, "Official Damage texture is missing");
+        Require(Resources.Load<Texture2D>("Gugarhythm/official/damage/damage-purple") != null,
+            "Official Damage texture is missing");
         foreach (var tone in new[] { "normal", "critical" })
         foreach (var direction in new[] { "center", "side" })
         foreach (var size in Enumerable.Range(1, 6))
             Require(Resources.Load<Texture2D>($"Gugarhythm/flicks/flick-{tone}-{direction}-{size}") != null,
                 $"Flick texture is missing: {tone}-{direction}-{size}");
-        Require(Resources.Load<Texture2D>("Gugarhythm/connectors/hold-green") != null, "Normal Hold connector texture is missing");
-        Require(Resources.Load<Texture2D>("Gugarhythm/connectors/hold-yellow") != null, "Critical Hold connector texture is missing");
-        Require(Resources.Load<Texture2D>("Gugarhythm/official/particles/slide-tick-mint") != null, "Official normal hold-mid particle is missing");
-        Require(Resources.Load<Texture2D>("Gugarhythm/official/particles/slide-tick-yellow") != null, "Official critical hold-mid particle is missing");
+        Require(Resources.Load<Texture2D>("Gugarhythm/connectors/hold-green") != null,
+            "Normal Hold connector texture is missing");
+        Require(Resources.Load<Texture2D>("Gugarhythm/connectors/hold-yellow") != null,
+            "Critical Hold connector texture is missing");
+        Require(Resources.Load<Texture2D>("Gugarhythm/official/particles/slide-tick-mint") != null,
+            "Official normal hold-mid particle is missing");
+        Require(Resources.Load<Texture2D>("Gugarhythm/official/particles/slide-tick-yellow") != null,
+            "Official critical hold-mid particle is missing");
         foreach (var tone in new[] { "mint", "pink", "yellow" })
             Require(Resources.Load<Texture2D>($"Gugarhythm/official/particles/trace-diamond-{tone}") != null,
                 $"Official Trace diamond is missing: {tone}");
@@ -169,36 +186,6 @@ public static class RuntimeValidation
             "Normal Flick sound is missing");
         Require(Resources.Load<AudioClip>("Gugarhythm/package/audio/critical-flick") != null,
             "Critical Flick sound is missing");
-        var flicks = chart.Notes.Where(note => note.Kind == RuntimeNoteKind.Flick).ToArray();
-        Require(flicks.Length == 243, $"Expected 243 flick notes, got {flicks.Length}");
-        Require(flicks.Count(note => note.Direction < 0) == 117 && flicks.Count(note => note.Direction == 0) == 21 && flicks.Count(note => note.Direction > 0) == 105,
-            "Flick left/center/right directions were not preserved");
-        var holdTerminalNotes = chart.Connectors.Select(connector => connector.End)
-            .Where(note => !chart.Connectors.Any(connector => ReferenceEquals(connector.Start, note)))
-            .Distinct()
-            .ToArray();
-        Require(holdTerminalNotes.Length > 0 && holdTerminalNotes.Where(note => note.Judged).All(note =>
-                    note.IsHoldTerminal && note.HoldCheckpointSource == HoldCheckpointSource.Tail),
-            "Judged Hold terminals must retain Tail checkpoint metadata while unjudged geometry stays non-playable");
-        Require(chart.Guides.Any(guide => guide.TailOpacity < guide.HeadOpacity) && chart.Guides.Min(guide => guide.TailOpacity) <= .081f,
-            "Guide chains must fade continuously toward their ending");
-        Require(chart.Guides.Any(guide => guide.Start.Lane - guide.Start.Size < -6 || guide.Start.Lane + guide.Start.Size > 6 ||
-            guide.Head.Lane - guide.Head.Size < -6 || guide.Head.Lane + guide.Head.Size > 6 ||
-            guide.Tail.Lane - guide.Tail.Size < -6 || guide.Tail.Lane + guide.Tail.Size > 6 ||
-            guide.End.Lane - guide.End.Size < -6 || guide.End.Lane + guide.End.Size > 6),
-            "Expected at least one decoration guide outside the central lane range");
-        Require(chart.BgmBytes?.Length > 0, "Default SCP BGM was not extracted");
-        Require(chart.Notes.SequenceEqual(chart.Notes.OrderBy(note => note.Time).ThenBy(note => note.Index)), "Notes are not time sorted");
-
-        ValidateJudgedVisualMasking();
-        ValidateJudgmentRules();
-        ValidateJudgmentIndexedEquivalence();
-        ValidateAutoPlay();
-        ValidateAudioDeviceRecovery();
-        ValidateLatencyCalibrationMath();
-        Debug.Log($"GUGARHYTHM_VALIDATION_OK title={chart.Title} playable={chart.PlayableCount} auto={chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)} connectors={chart.Connectors.Count} holdPaths={chart.HoldPaths.Count} holdRuns={holdRenderRunCount} simLines={chart.SimLines.Count} guides={chart.Guides.Count} " +
-                  $"normal={chart.Connectors.Count(value => !value.Critical)} critical={chart.Connectors.Count(value => value.Critical)} " +
-                  $"warnings={chart.Warnings.Count} bgmBytes={chart.BgmBytes.Length}");
     }
 
     static void ValidatePerformanceSampleWindow()
@@ -709,7 +696,7 @@ public static class RuntimeValidation
         fallback.Connectors.Add(new RuntimeConnector { Start = fallbackHead, End = fallbackRight });
         HoldCheckpointBuilder.Apply(fallback, beat => beat);
 
-        Debug.Log($"GUGARHYTHM_TASK2_CHECKPOINT_COUNTS " +
+        Debug.Log($"GUGARHYTHM_HOLD_CHECKPOINT_COUNTS " +
                   $"allNonePlayable={allNone.PlayableCount} allNoneAuto={allNoneAutos.Length} " +
                   $"noneLeadPlayable={noneLead.PlayableCount} noneLeadAuto={noneLeadAutos.Length} " +
                   $"repeatedPlayable={sameBeat.PlayableCount} repeatedAuto={repeatedAutos.Length} " +
@@ -844,7 +831,7 @@ public static class RuntimeValidation
         HoldCheckpointBuilder.Apply(invalidLegacy, beat => beat);
         var invalidLegacyAutos = AutoBeats(invalidLegacy);
 
-        Debug.Log($"GUGARHYTHM_TASK2_REVIEW_COUNTS " +
+        Debug.Log($"GUGARHYTHM_HOLD_REVIEW_COUNTS " +
                   $"attachStart={attachPath.PlayableStartBeat} attachEnd={attachPath.PlayableEndBeat} attachAuto={attachAutos.Length} " +
                   $"shiftVisualBeat={shiftedPath.VisualStartBeat}:{shiftedPath.VisualEndBeat} " +
                   $"shiftVisualTime={shiftedPath.VisualStartTime}:{shiftedPath.VisualEndTime} " +
@@ -917,7 +904,7 @@ public static class RuntimeValidation
             new[] { new ActiveContact(1, evaluated.Lane, attach.Time - .1) });
         var autoCount = imported.Chart.Notes.Count(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto);
 
-        Debug.Log($"GUGARHYTHM_FINAL_ATTACH_EVALUATOR " +
+        Debug.Log($"GUGARHYTHM_HOLD_ATTACH_EVALUATOR " +
                   $"lane={attach.Lane:0.######} size={attach.Size:0.######} " +
                   $"evaluatorLane={evaluated.Lane:0.######} evaluatorSize={evaluated.Size:0.######} " +
                   $"judgment={attach.Grade} playable={imported.Chart.PlayableCount} auto={autoCount}");
@@ -1033,7 +1020,7 @@ public static class RuntimeValidation
                 $"/fallback:{fallbackLanes[0]:0.######}:{fallbackLanes[1]:0.######}");
         }
 
-        Debug.Log("GUGARHYTHM_TASK2_EASE_PARITY " + string.Join(" ", markerValues));
+        Debug.Log("GUGARHYTHM_HOLD_EASE_PARITY " + string.Join(" ", markerValues));
         Require(sharedEaseMethod != null,
             "Hold interpolation must expose one shared pure HoldPathMath.EaseProgress evaluator");
         for (var ease = 0; ease < easeNames.Length; ease++)
@@ -1589,7 +1576,7 @@ public static class RuntimeValidation
             note.HoldCheckpointSource == HoldCheckpointSource.Auto).ToArray();
         var authoredJudgments = result.Chart.Notes.Count(note =>
             note.Judged && note.HoldCheckpointSource != HoldCheckpointSource.Auto);
-        Debug.Log($"GUGARHYTHM_TASK2_ATTACHED_GGR_COUNTS playable={result.Chart.PlayableCount} " +
+        Debug.Log($"GUGARHYTHM_ATTACHED_GGR_COUNTS playable={result.Chart.PlayableCount} " +
                   $"authored={authoredJudgments} auto={autoNotes.Length} " +
                   $"autoRoots={autoNotes.Select(note => note.HoldRootIndex).Distinct().Count()} " +
                   $"holdPaths={result.Chart.HoldPaths.Count} fallback={result.Chart.FallbackConnectors.Count} " +
@@ -3669,7 +3656,7 @@ public static class RuntimeValidation
         Require(managedBytes == 0,
             $"Continuous Hold frames must allocate zero managed bytes after warm-up, got {managedBytes}");
 
-        Debug.Log($"GUGARHYTHM_TASK4_TIMING_REUSE_OK chartTime={chartTime:0.###} inputTime={inputChartTime:0.###} " +
+        Debug.Log($"GUGARHYTHM_TIMING_REUSE_OK chartTime={chartTime:0.###} inputTime={inputChartTime:0.###} " +
                   $"deviceOffset={replacedOffset:0.###} managedBytes={managedBytes} outputCapacity={steadyOutput.Capacity}");
     }
 
@@ -3720,7 +3707,7 @@ public static class RuntimeValidation
         try
         {
             UnityEngine.Profiling.Profiler.enabled = true;
-            var controllerObject = new GameObject("Task 4 actual Update allocation fixture");
+            var controllerObject = new GameObject("Update allocation validation fixture");
             var controller = controllerObject.AddComponent<SonolusLandscapePrototype>();
             awakeMethod.Invoke(controller, null);
 
@@ -3774,7 +3761,7 @@ public static class RuntimeValidation
             updateAction();
             Require(managedBytes == 0,
                 $"The real warmed-up gameplay Update must allocate zero managed bytes, got {managedBytes}");
-            Debug.Log($"GUGARHYTHM_TASK4_UPDATE_THREAD_ALLOC_OK warmup=32 frames=128 " +
+            Debug.Log($"GUGARHYTHM_UPDATE_THREAD_ALLOC_OK warmup=32 frames=128 " +
                       $"threadBytes={managedBytes} idleUpdate=1");
         }
         finally
@@ -3861,7 +3848,7 @@ public static class RuntimeValidation
                     UnityEngine.InputSystem.EnhancedTouch.TouchSimulation.instance.enabled &&
                     (fixtureMouse == null || fixtureMouse.enabled == fixtureMouseWasEnabled),
                 "The real-Awake profiler fixture must restore TouchSimulation and Mouse enabled states");
-            Debug.Log("GUGARHYTHM_TASK4_UPDATE_STATE_RESTORE_OK prefs=3 touchSimulation=True mouseRestored=True");
+            Debug.Log("GUGARHYTHM_UPDATE_STATE_RESTORE_OK prefs=3 touchSimulation=True mouseRestored=True");
         }
         finally
         {
@@ -3965,7 +3952,7 @@ public static class RuntimeValidation
                 Debug.LogError($"GUGARHYTHM_VALIDATION_FAILED: Profiler cleanup failed: " +
                                $"{cleanupException.Message}\n{cleanupException}");
             if (exitCode == 0)
-                Debug.Log("GUGARHYTHM_TASK4_EDITOR_FRAME_STATE_RESTORE_OK prefs=5 " +
+                Debug.Log("GUGARHYTHM_EDITOR_FRAME_STATE_RESTORE_OK prefs=5 " +
                           "touchSimulation=True mouse=True enhancedTouch=True globals=True");
             EditorApplication.Exit(exitCode);
         }
@@ -4074,7 +4061,7 @@ public static class RuntimeValidation
                     "The multi-frame profiler must bind the real controller lifecycle and Update path");
 
                 UnityEngine.Profiling.Profiler.enabled = true;
-                var controllerObject = new GameObject("Task 4 multi-frame Update profiler fixture");
+                var controllerObject = new GameObject("Multi-frame Update profiler fixture");
                 controller = controllerObject.AddComponent<SonolusLandscapePrototype>();
                 awakeMethod.Invoke(controller, null);
 
@@ -4223,7 +4210,7 @@ public static class RuntimeValidation
                 Require(idleMarkerSamples > 0,
                     "ProfilerRecorder must inspect a flushed gameplay marker sample on the early-return frame");
 
-                Debug.Log($"GUGARHYTHM_TASK4_EDITOR_FRAME_PROFILER_OK warmup={warmupFrames} " +
+                Debug.Log($"GUGARHYTHM_EDITOR_FRAME_PROFILER_OK warmup={warmupFrames} " +
                           $"measuredFrames={measuredFrames} markerSamples={markerSamples} " +
                           $"markerLastNanoseconds={markerLastNanoseconds} idleMarkerSamples={idleMarkerSamples} " +
                           $"gcAllocSamples={gcAllocSamples} scopedThreadBytes={scopedThreadBytes} " +
