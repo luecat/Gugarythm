@@ -8,9 +8,6 @@ namespace Gugarhythm
     /// </summary>
     public sealed class GameplayPresentationClock
     {
-        const double PhaseCorrectionRate = .125d;
-        const double MaximumPhaseCorrectionSeconds = .002d;
-
         bool initialized;
         bool hasOutput;
         double lastRawDspTime;
@@ -55,12 +52,12 @@ namespace Gugarhythm
             if (Math.Abs(phaseError) > hardResetThreshold)
                 return Reanchor(dspTime, realtime);
 
-            if (dspTime > lastRawDspTime)
-            {
-                var correctionLimit = Math.Min(MaximumPhaseCorrectionSeconds,
-                    realtimeDelta * PhaseCorrectionRate);
-                prediction += Math.Clamp(phaseError, -correctionLimit, correctionLimit);
-            }
+            // AudioSettings.dspTime can advance in buffer-sized blocks. A
+            // per-block phase correction changes the presentation step for a
+            // single frame; extreme or reverse TimeScale multiplies that tiny
+            // correction into a visible position jump. Keep normal frames on
+            // the realtime-derived line and reanchor only for a real clock
+            // discontinuity beyond the existing hard-reset threshold.
 
             lastRawDspTime = dspTime;
             lastRealtime = realtime;

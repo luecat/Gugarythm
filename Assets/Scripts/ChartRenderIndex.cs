@@ -39,9 +39,8 @@ namespace Gugarhythm
             foreach (var run in path.RenderRuns)
             {
                 var group = Group(run.Start.TimeScaleGroup);
-                var first = chart.VisualPosition(run.Start.Time, group);
-                var last = chart.VisualPosition(run.End.Time, group);
-                Add(holdRuns, group, new Entry<HoldRenderRun>(Math.Min(first, last), Math.Max(first, last), run));
+                VisualBounds(run.Start.Time, run.End.Time, group, out var minimum, out var maximum);
+                Add(holdRuns, group, new Entry<HoldRenderRun>(minimum, maximum, run));
             }
             foreach (var simLine in chart.SimLines)
             {
@@ -55,9 +54,9 @@ namespace Gugarhythm
                     crossGroupSimLines.Add(simLine);
                     continue;
                 }
-                var first = chart.VisualPosition(simLine.A?.Time ?? 0, group);
-                var last = chart.VisualPosition(simLine.B?.Time ?? 0, group);
-                Add(simLines, group, new Entry<RuntimeSimLine>(Math.Min(first, last), Math.Max(first, last), simLine));
+                VisualBounds(simLine.A?.Time ?? 0, simLine.B?.Time ?? 0, group,
+                    out var minimum, out var maximum);
+                Add(simLines, group, new Entry<RuntimeSimLine>(minimum, maximum, simLine));
             }
             for (var index = 0; index < chart.Guides.Count; index++)
             {
@@ -65,9 +64,8 @@ namespace Gugarhythm
                 guideOrder[guide] = index;
                 var group = Group(string.IsNullOrEmpty(guide.Head.TimeScaleGroup)
                     ? guide.Tail.TimeScaleGroup : guide.Head.TimeScaleGroup);
-                var first = chart.VisualPosition(guide.Head.Time, group);
-                var last = chart.VisualPosition(guide.Tail.Time, group);
-                Add(guides, group, new Entry<RuntimeGuide>(Math.Min(first, last), Math.Max(first, last), guide));
+                VisualBounds(guide.Head.Time, guide.Tail.Time, group, out var minimum, out var maximum);
+                Add(guides, group, new Entry<RuntimeGuide>(minimum, maximum, guide));
             }
             Seal(notes);
             Seal(holdRuns);
@@ -124,6 +122,24 @@ namespace Gugarhythm
         }
 
         string Group(string group) => string.IsNullOrEmpty(group) ? chart.DefaultTimeScaleGroup ?? string.Empty : group;
+
+        void VisualBounds(double firstTime, double lastTime, string group, out double minimum, out double maximum)
+        {
+            var first = chart.VisualPosition(firstTime, group);
+            var last = chart.VisualPosition(lastTime, group);
+            minimum = Math.Min(first, last);
+            maximum = Math.Max(first, last);
+            if (string.IsNullOrEmpty(group) || !chart.TimeScaleGroups.TryGetValue(group, out var map)) return;
+
+            var boundaries = new List<double>();
+            map.AppendBoundaryTimes(firstTime, lastTime, boundaries);
+            foreach (var boundary in boundaries)
+            {
+                var position = chart.VisualPosition(boundary, group);
+                minimum = Math.Min(minimum, position);
+                maximum = Math.Max(maximum, position);
+            }
+        }
 
         static void Add<T>(Dictionary<string, Bucket<T>> buckets, string group, Entry<T> entry)
         {

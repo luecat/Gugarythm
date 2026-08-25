@@ -8,10 +8,13 @@ namespace Gugarhythm
     {
         public static float EaseProgress(float progress, int ease) => ease switch
         {
-            1 => 1f - (float)Math.Cos(progress * Math.PI * .5),
-            2 => (float)Math.Sin(progress * Math.PI * .5),
+            1 => progress * progress,
+            2 => 1f - (1f - progress) * (1f - progress),
             3 => progress < .5f ? 2 * progress * progress :
                 1 - (float)Math.Pow(-2 * progress + 2, 2) * .5f,
+            4 => progress < .5f
+                ? (1f - (1f - progress * 2) * (1f - progress * 2)) * .5f
+                : .5f + (progress * 2 - 1) * (progress * 2 - 1) * .5f,
             _ => progress,
         };
     }
@@ -142,19 +145,14 @@ namespace Gugarhythm
                     startTime = Math.Min(startTime, node.Time);
                     endTime = Math.Max(endTime, node.Time);
                 }
-                var judgedStructuralStart = semanticNodes
-                    .Where(node => node.Judged && node.SlideNodeRole == SlideNodeRole.Start)
-                    .OrderBy(node => node.Beat)
-                    .ThenBy(node => node.Index)
-                    .FirstOrDefault();
-                if (judgedStructuralStart != null)
+                if (hasJudgedNode)
                 {
-                    // A judged Start opens a playable Hold interval even when
-                    // the authored End is judgeType:none. The End remains
-                    // non-judged, while runtime Auto checkpoints sustain Combo
-                    // through the complete visual path.
-                    startBeat = judgedStructuralStart.Beat;
-                    startTime = judgedStructuralStart.Time;
+                    // Judgment visibility and Hold duration are independent.
+                    // Once a path contains any authored judgment, runtime Auto
+                    // checkpoints sustain the complete visual path, including
+                    // a headless lead-in or an unjudged visual tail.
+                    startBeat = VisualStartBeat;
+                    startTime = VisualStartTime;
                     endBeat = VisualEndBeat;
                     endTime = VisualEndTime;
                 }

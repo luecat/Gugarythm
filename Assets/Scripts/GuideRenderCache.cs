@@ -307,7 +307,7 @@ namespace Gugarhythm
         float EvaluateCurve(float p0, float p1, float p2, float p3, float progress)
         {
             if (guide.Ease != -1)
-                return Mathf.Lerp(p1, p2, Ease(progress, guide.Ease));
+                return Mathf.Lerp(p1, p2, HoldPathMath.EaseProgress(progress, guide.Ease));
 
             var t2 = progress * progress;
             var t3 = t2 * progress;
@@ -316,13 +316,6 @@ namespace Gugarhythm
                 (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
         }
 
-        static float Ease(float progress, int ease) => ease switch
-        {
-            1 => progress * progress,
-            2 => 1 - (1 - progress) * (1 - progress),
-            3 => progress < .5f ? 2 * progress * progress : 1 - Mathf.Pow(-2 * progress + 2, 2) * .5f,
-            _ => progress,
-        };
     }
 
     public readonly struct GuideProjectedSample

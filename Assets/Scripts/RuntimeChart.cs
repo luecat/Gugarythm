@@ -425,6 +425,12 @@ namespace Gugarhythm
                 {
                     if (!TryGetPlayableBeatBounds(semanticFallback.SemanticNodes,
                         out playableStartBeat, out playableEndBeat)) continue;
+                    // A valid semantic fallback still represents one complete
+                    // visual Hold. Once any authored node is judged, sustain
+                    // checkpoints cover the geometry head-to-tail just like a
+                    // RuntimeHoldPath, including an unjudged/headless lead-in.
+                    playableStartBeat = semanticFallback.Nodes[0].Beat;
+                    playableEndBeat = semanticFallback.Nodes[^1].Beat;
                 }
                 else
                 {

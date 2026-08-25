@@ -393,6 +393,8 @@ namespace Gugarhythm
         readonly Stack<SimLineGraphic> simLinePool = new();
         readonly Stack<TaperedConnectorGraphic> guidePool = new();
         readonly Dictionary<int, TouchMemory> touches = new();
+        readonly TouchInputBuffer touchInputBuffer = new();
+        readonly List<BufferedTouchSample> bufferedTouchSamples = new(32);
         readonly List<InputToken> inputBatch = new();
         readonly List<ActiveContact> contacts = new();
         readonly List<ContactPathSegment> contactPaths = new();
@@ -413,6 +415,7 @@ namespace Gugarhythm
         readonly List<RuntimeSimLine> visibleSimLines = new();
         readonly List<RuntimeGuide> visibleGuides = new();
         readonly Dictionary<RuntimeGuide, GuideRenderCache> guideRenderCaches = new();
+        readonly HashSet<RuntimeGuide> exactCpuGuides = new();
         readonly Dictionary<RuntimeHoldPath, HoldRenderCache> holdRenderCaches = new();
         readonly Dictionary<string, HoldVisualRange> holdVisualRanges = new(StringComparer.Ordinal);
         readonly List<int> noteViewReleaseKeys = new();
@@ -429,6 +432,7 @@ namespace Gugarhythm
         readonly TimingSampleWindow presentationDeltaSamples = new(1200, 10f);
         readonly TimingSampleWindow presentationPhaseErrorSamples = new(1200, 10f);
         readonly TimingSampleWindow judgmentDurationSamples = new(1200, 10f);
+        readonly TimingSampleWindow inputQueueDelaySamples = new(1200, 10f);
         readonly HotPathFrameMetrics hotPathFrameMetrics = new();
         readonly HotPathTimingSampleSet hotPathTimingSamples = new(1200, 10f);
         readonly VisualFrameContext visualFrameContext = new();
@@ -615,6 +619,7 @@ namespace Gugarhythm
         float upperHiddenBarPercent;
         bool fastLateDisplayEnabled;
         bool autoPlayEnabled;
+        bool touchCallbacksSubscribed;
         float judgmentHideAt = -1f;
         float nextPerformanceHudRefresh;
         bool gameplayStageVisible;
@@ -792,6 +797,7 @@ namespace Gugarhythm
             EnsureDesktopMouseAvailable();
 #endif
             EnhancedTouchSupport.Enable();
+            SubscribeTouchCallbacks();
             LoadArtwork();
             BuildInterface();
             SetPerformanceDiagnosticsEnabled(false);
@@ -928,13 +934,13 @@ namespace Gugarhythm
         void OnDestroy()
         {
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
+            UnsubscribeTouchCallbacks();
             presentationClock.Invalidate();
             StopCalibrationTickAudio();
             ClearHoldSound();
 #if UNITY_EDITOR || UNITY_STANDALONE
             TouchSimulation.Disable();
 #endif
-            if (EnhancedTouchSupport.enabled) EnhancedTouchSupport.Disable();
             if (laneMaterial != null) Destroy(laneMaterial);
             if (missedHoldMaterial != null) Destroy(missedHoldMaterial);
             gpuRibbonRenderer?.Dispose();
@@ -943,11 +949,47 @@ namespace Gugarhythm
             if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
         }
 
+        void SubscribeTouchCallbacks()
+        {
+            if (touchCallbacksSubscribed) return;
+            EnsureEnhancedTouchForCallbackMutation();
+            Touch.onFingerDown += BufferFingerSample;
+            Touch.onFingerMove += BufferFingerSample;
+            Touch.onFingerUp += BufferFingerSample;
+            touchCallbacksSubscribed = true;
+        }
+
+        void UnsubscribeTouchCallbacks()
+        {
+            if (!touchCallbacksSubscribed) return;
+            // A previous scene instance can be destroyed after the next scene
+            // has started, or after another owner changed global Input System
+            // state. Enhanced Touch requires support to be enabled even when
+            // removing callbacks, so restore it before detaching this owner.
+            EnsureEnhancedTouchForCallbackMutation();
+            Touch.onFingerDown -= BufferFingerSample;
+            Touch.onFingerMove -= BufferFingerSample;
+            Touch.onFingerUp -= BufferFingerSample;
+            touchCallbacksSubscribed = false;
+        }
+
+        public static void EnsureEnhancedTouchForCallbackMutation()
+        {
+            if (!EnhancedTouchSupport.enabled) EnhancedTouchSupport.Enable();
+        }
+
+        void BufferFingerSample(Finger finger)
+        {
+            if (!running || paused || finger == null) return;
+            var touch = finger.lastTouch;
+            if (!touch.valid) return;
+            touchInputBuffer.Enqueue(touch.touchId, touch.time, touch.screenPosition, touch.phase);
+        }
+
         void Update()
         {
             var measurePerformance = performanceDiagnosticsEnabled;
             var gameplayTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
-            UpdatePerformanceHud();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (measurePerformance) GameplayFrameProfiler.Begin();
             try
@@ -961,6 +1003,14 @@ namespace Gugarhythm
             // gameplay converts it to touch semantics in CollectMouseAsTouch.
             EnsureDesktopMouseAvailable();
 #endif
+            if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0)
+            {
+                if (ShouldPauseForAudioConfigurationChange(true, running, paused)) PauseForAudioDeviceChange();
+                else ClearHoldSound();
+            }
+            if (running && !paused && chart != null && judgmentEngine != null)
+                UpdateGameplayFrame(measurePerformance, gameplayTimingStart);
+            UpdatePerformanceHud();
             PollNativeImport();
             UpdateSafeAreaLayout();
             UpdateInputLaneFeedback();
@@ -968,12 +1018,17 @@ namespace Gugarhythm
             UpdateLatencyCalibration();
             if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
                 ClearJudgment();
-            if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0)
-            {
-                if (ShouldPauseForAudioConfigurationChange(true, running, paused)) PauseForAudioDeviceChange();
-                else ClearHoldSound();
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
             }
-            if (!running || paused || chart == null || judgmentEngine == null) return;
+            finally
+            {
+                if (measurePerformance) GameplayFrameProfiler.End();
+            }
+#endif
+        }
+
+        void UpdateGameplayFrame(bool measurePerformance, long gameplayTimingStart)
+        {
             var rawDspTime = AudioSettings.dspTime;
             var realtime = Time.realtimeSinceStartupAsDouble;
             var authoritativeSongTime = GameplayTiming.ChartTimeAtDsp(
@@ -1006,13 +1061,6 @@ namespace Gugarhythm
                 hotPathTimingSamples.AddFrame(latestHotPathFrameSnapshot, Time.unscaledDeltaTime);
             }
             if (authoritativeSongTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
-#if UNITY_EDITOR || DEVELOPMENT_BUILD
-            }
-            finally
-            {
-                if (measurePerformance) GameplayFrameProfiler.End();
-            }
-#endif
         }
 
         bool AreAllNotesResolved()
@@ -1576,6 +1624,8 @@ namespace Gugarhythm
             effects.Pause();
             holdEffects.Pause();
             touches.Clear();
+            touchInputBuffer.Clear();
+            bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
             pauseTitle.text = "暫停";
@@ -1605,6 +1655,8 @@ namespace Gugarhythm
             effects.Stop();
             ClearHoldSound();
             touches.Clear();
+            touchInputBuffer.Clear();
+            bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
             pauseTitle.text = "音訊裝置已變更\n請重新同步";
@@ -1631,6 +1683,8 @@ namespace Gugarhythm
             }
 
             touches.Clear();
+            touchInputBuffer.Clear();
+            bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
             if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
@@ -1688,6 +1742,8 @@ namespace Gugarhythm
             effects.Stop();
             ClearHoldSound();
             touches.Clear();
+            touchInputBuffer.Clear();
+            bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
             ClearInputLaneFeedback();
@@ -1720,6 +1776,8 @@ namespace Gugarhythm
             contactCleanupBuffers.BeginFrame();
             hudState.Invalidate();
             touches.Clear();
+            touchInputBuffer.Clear();
+            bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
             ClearInputLaneFeedback();
@@ -1757,11 +1815,13 @@ namespace Gugarhythm
             {
                 cachedGuideChart = chart;
                 guideRenderCaches.Clear();
+                exactCpuGuides.Clear();
                 foreach (var guide in chart.Guides)
                 {
                     var cache = new GuideRenderCache(guide);
                     cache.BuildVisualSpans(chart);
                     guideRenderCaches.Add(guide, cache);
+                    if (GpuRibbonGuideRouting.RequiresCpu(chart, cache)) exactCpuGuides.Add(guide);
                 }
                 holdRenderCaches.Clear();
                 foreach (var path in chart.HoldPaths) holdRenderCaches.Add(path, new HoldRenderCache(path, chart));
@@ -1787,7 +1847,7 @@ namespace Gugarhythm
                     Debug.LogWarning(gpuRibbonFallbackReason);
                 }
             }
-            var cpuGuides = gpuRibbonRenderer?.RendersGuides != true;
+            var cpuGuides = gpuRibbonRenderer?.RendersGuides != true || exactCpuGuides.Count > 0;
             var cpuHolds = gpuRibbonRenderer?.RendersHolds != true;
             if (guideBatch != null) guideBatch.gameObject.SetActive(cpuGuides);
             if (holdGreenBatch != null) holdGreenBatch.gameObject.SetActive(cpuHolds);
@@ -1817,88 +1877,100 @@ namespace Gugarhythm
             contacts.Clear();
             contactPaths.Clear();
             if (!EnhancedTouchSupport.enabled) EnhancedTouchSupport.Enable();
-            contactCleanupBuffers.BeginFrame();
-            var seen = contactCleanupBuffers.ActiveContactIds;
-            foreach (var touch in Touch.activeTouches)
+            touchInputBuffer.DrainTo(bufferedTouchSamples);
+            for (var index = 0; index < bufferedTouchSamples.Count; index++)
             {
-                var id = touch.touchId;
-                var eventTime = InputEventSongTime(touch.time);
-                var isInInputBand = TryScreenToLane(touch.screenPosition, out var lane, out var gridRow);
-                var wasTracking = touches.TryGetValue(id, out var memory);
-                if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) continue;
-                if (!isInInputBand)
-                {
-                    seen.Add(id);
-                    lane = InputLaneAtCanvasX(ScreenToCanvasX(touch.screenPosition.x));
-                    if (touch.time > memory.LastInputRecordTime + 1e-7)
-                    {
-                        if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
-                        {
-                            contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
-                                memory.Lane, lane, true));
-                            virtualSlider.End(id, eventTime, lane, inputBatch);
-                            touches.Remove(id);
-                            continue;
-                        }
-                        if (Vector2.SqrMagnitude(touch.screenPosition - memory.ScreenPosition) > .01f)
-                            contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
-                                memory.Lane, lane, false));
-                        memory.LastInputRecordTime = touch.time;
-                        memory.EventTime = eventTime;
-                        memory.Lane = lane;
-                        memory.ScreenPosition = touch.screenPosition;
-                        touches[id] = memory;
-                    }
-                    contacts.Add(new ActiveContact(id, lane, memory.StartTime));
-                    continue;
-                }
-                seen.Add(id);
-                var entering = !wasTracking;
-                if (entering)
-                    memory = new TouchMemory { Lane = lane, GridRow = gridRow, EventTime = eventTime, StartTime = eventTime, LastInputRecordTime = double.NegativeInfinity };
-                if (touch.time > memory.LastInputRecordTime + 1e-7)
-                {
-                    if (touch.phase is UnityEngine.InputSystem.TouchPhase.Ended or UnityEngine.InputSystem.TouchPhase.Canceled)
-                    {
-                        if (!entering)
-                        {
-                            contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
-                                memory.Lane, lane, true));
-                            virtualSlider.End(id, eventTime, lane, inputBatch);
-                        }
-                    }
-                    else if (entering || touch.phase == UnityEngine.InputSystem.TouchPhase.Began)
-                        virtualSlider.Begin(id, eventTime, lane, inputBatch);
-                    else if (touch.phase == UnityEngine.InputSystem.TouchPhase.Moved && Vector2.SqrMagnitude(touch.screenPosition - memory.ScreenPosition) > .01f)
-                    {
-                        virtualSlider.Move(id, eventTime, lane, inputBatch);
-                        if (memory.GridRow != gridRow)
-                            inputBatch.Add(new InputToken(id, RuntimeNoteKind.Tap, eventTime, lane));
-                        contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
-                            memory.Lane, lane, false));
-                    }
-                    memory.LastInputRecordTime = touch.time;
-                    memory.EventTime = eventTime;
-                    memory.Lane = lane;
-                    memory.GridRow = gridRow;
-                    memory.ScreenPosition = touch.screenPosition;
-                    touches[id] = memory;
-                }
-                if (touch.phase is not UnityEngine.InputSystem.TouchPhase.Ended and not UnityEngine.InputSystem.TouchPhase.Canceled)
-                    contacts.Add(new ActiveContact(id, lane, memory.StartTime));
+                var sample = bufferedTouchSamples[index];
+                if (performanceDiagnosticsEnabled)
+                    inputQueueDelaySamples.AddSample(
+                        (float)(Math.Max(0, InputState.currentTime - sample.Time) * 1000d), Time.unscaledDeltaTime);
+                ProcessBufferedTouchSample(sample);
             }
 #if UNITY_EDITOR || UNITY_STANDALONE
-            CollectMouseAsTouch(seen);
-#endif
-            var removalIds = contactCleanupBuffers.RemovalIds;
-            foreach (var id in touches.Keys)
-                if (!seen.Contains(id)) removalIds.Add(id);
-            for (var index = 0; index < removalIds.Count; index++)
+            contactCleanupBuffers.BeginFrame();
+            var seenMouse = contactCleanupBuffers.ActiveContactIds;
+            CollectMouseAsTouch(seenMouse);
+            if (touches.ContainsKey(MouseContactId) && !seenMouse.Contains(MouseContactId))
             {
-                var id = removalIds[index];
-                touches.Remove(id);
-                virtualSlider.Cancel(id);
+                touches.Remove(MouseContactId);
+                virtualSlider.Cancel(MouseContactId);
             }
+#endif
+            foreach (var pair in touches)
+                if (pair.Key != MouseContactId)
+                    contacts.Add(new ActiveContact(pair.Key, pair.Value.Lane, pair.Value.StartTime));
+        }
+
+        void ProcessBufferedTouchSample(BufferedTouchSample sample)
+        {
+            var id = sample.FingerId;
+            var eventTime = InputEventSongTime(sample.Time);
+            var isInInputBand = TryScreenToLane(sample.ScreenPosition, out var lane, out var gridRow);
+            var wasTracking = touches.TryGetValue(id, out var memory);
+            if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) return;
+
+            var ended = sample.Phase is UnityEngine.InputSystem.TouchPhase.Ended or
+                UnityEngine.InputSystem.TouchPhase.Canceled;
+            if (!isInInputBand)
+            {
+                lane = InputLaneAtCanvasX(ScreenToCanvasX(sample.ScreenPosition.x));
+                if (ended)
+                {
+                    contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                        memory.Lane, lane, true));
+                    virtualSlider.End(id, eventTime, lane, inputBatch);
+                    touches.Remove(id);
+                    return;
+                }
+                if (Vector2.SqrMagnitude(sample.ScreenPosition - memory.ScreenPosition) > .01f)
+                    contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                        memory.Lane, lane, false));
+                memory.LastInputRecordTime = sample.Time;
+                memory.EventTime = eventTime;
+                memory.Lane = lane;
+                memory.ScreenPosition = sample.ScreenPosition;
+                touches[id] = memory;
+                return;
+            }
+
+            var entering = !wasTracking;
+            if (entering)
+                memory = new TouchMemory
+                {
+                    Lane = lane,
+                    GridRow = gridRow,
+                    EventTime = eventTime,
+                    StartTime = eventTime,
+                    LastInputRecordTime = double.NegativeInfinity,
+                };
+            if (ended)
+            {
+                if (!entering)
+                {
+                    contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                        memory.Lane, lane, true));
+                    virtualSlider.End(id, eventTime, lane, inputBatch);
+                }
+                touches.Remove(id);
+                return;
+            }
+            if (entering || sample.Phase == UnityEngine.InputSystem.TouchPhase.Began)
+                virtualSlider.Begin(id, eventTime, lane, inputBatch);
+            else if (sample.Phase == UnityEngine.InputSystem.TouchPhase.Moved &&
+                     Vector2.SqrMagnitude(sample.ScreenPosition - memory.ScreenPosition) > .01f)
+            {
+                virtualSlider.Move(id, eventTime, lane, inputBatch);
+                if (memory.GridRow != gridRow)
+                    inputBatch.Add(new InputToken(id, RuntimeNoteKind.Tap, eventTime, lane));
+                contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
+                    memory.Lane, lane, false));
+            }
+            memory.LastInputRecordTime = sample.Time;
+            memory.EventTime = eventTime;
+            memory.Lane = lane;
+            memory.GridRow = gridRow;
+            memory.ScreenPosition = sample.ScreenPosition;
+            touches[id] = memory;
         }
 
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -2131,7 +2203,8 @@ namespace Gugarhythm
 #endif
             renderedPersistentHoldHeads.Clear();
             gpuRibbonRenderer?.UpdateFrame(visualFrameContext, ApproachDuration, CanvasHeight, NearTrackProgress);
-            if (gpuRibbonRenderer?.RendersGuides == true)
+            var hasGpuGuides = gpuRibbonRenderer?.RendersGuides == true;
+            if (hasGpuGuides && exactCpuGuides.Count == 0)
             {
                 latestGuideFrameSnapshot = default;
             }
@@ -2143,6 +2216,7 @@ namespace Gugarhythm
                 guideRenderMetrics.SetCandidateCount(visibleGuides.Count);
                 foreach (var guide in visibleGuides)
                 {
+                    if (hasGpuGuides && !exactCpuGuides.Contains(guide)) continue;
                     var clippingStart = PerformanceTimestamp();
                     var cache = guideRenderCaches[guide];
                     cache.QueryVisibleSpans(visualFrameContext, ApproachDuration, visibleGuideSpans);
@@ -2723,13 +2797,7 @@ namespace Gugarhythm
             batch.SetPathPoint(index, position, width);
         }
 
-        static float EaseConnector(float progress, int ease) => ease switch
-        {
-            1 => 1f - Mathf.Cos(progress * Mathf.PI * .5f),
-            2 => Mathf.Sin(progress * Mathf.PI * .5f),
-            3 => progress < .5f ? 2 * progress * progress : 1 - Mathf.Pow(-2 * progress + 2, 2) * .5f,
-            _ => progress,
-        };
+        static float EaseConnector(float progress, int ease) => HoldPathMath.EaseProgress(progress, ease);
 
         // approach=0 is the far spawn plane; approach=1 is the judgment edge.
         float ApproachProgress(RuntimeNote note, double visualTime) =>
@@ -3242,6 +3310,7 @@ namespace Gugarhythm
             var presentationDelta = presentationDeltaSamples.Snapshot();
             var phaseError = presentationPhaseErrorSamples.Snapshot();
             var judgmentDuration = judgmentDurationSamples.Snapshot();
+            var inputQueueDelay = inputQueueDelaySamples.Snapshot();
             var hotPathTimings = hotPathTimingSamples.Snapshot();
             var guideFrame = latestGuideFrameSnapshot;
             var hotPathFrame = latestHotPathFrameSnapshot;
@@ -3263,6 +3332,7 @@ namespace Gugarhythm
                 $"GUIDE {FormatTimingTriplet(timings.Guides)}   SIM   {FormatTimingTriplet(timings.SimLines)}\n" +
                 $"DSP Δ {FormatTimingTriplet(rawDspDelta)}   PRESENT Δ {FormatTimingTriplet(presentationDelta)}\n" +
                 $"PHASE {FormatTimingTriplet(phaseError)}   JUDGE {FormatTimingTriplet(judgmentDuration)}\n" +
+                $"INPUT {FormatTimingTriplet(inputQueueDelay)}\n" +
                 ribbonStatus + "\n" +
                 $"G {guideFrame.CandidateCount}/{guideFrame.VisibleCount}  S {guideFrame.SampleCount}  " +
                 $"V {guideFrame.VertexCount}  T {guideFrame.TriangleCount}  D {guideFrame.DirtyCount}  M {guideFrame.MeshBuildMilliseconds:0.00}\n" +
@@ -3298,6 +3368,7 @@ namespace Gugarhythm
             presentationDeltaSamples.Reset();
             presentationPhaseErrorSamples.Reset();
             judgmentDurationSamples.Reset();
+            inputQueueDelaySamples.Reset();
             previousDiagnosticsRawDspTime = rawDspTime;
             previousDiagnosticsPresentationDspTime = presentationDspTime;
         }

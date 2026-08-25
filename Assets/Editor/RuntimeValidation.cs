@@ -12,6 +12,19 @@ using UnityEngine.UI;
 
 public static class RuntimeValidation
 {
+    [MenuItem("Gugarhythm/Validate Hold And Input Fixes")]
+    public static void ValidateHoldAndInputFixes()
+    {
+        ValidateHoldPlayableRangeCheckpoints();
+        ValidateChartRenderIndex();
+        ValidateGameplayPresentationClock();
+        ValidateUscSlideMidpointRoles();
+        ValidateHoldEaseParity();
+        ValidateGpuRibbonRendering();
+        ValidateBufferedTouchInput();
+        Debug.Log("GUGARHYTHM_HOLD_INPUT_FIXES_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Validate Rendering Performance")]
     public static void ValidateRenderingPerformance()
     {
@@ -295,6 +308,25 @@ public static class RuntimeValidation
             Require(Math.Abs(correction) <= Math.Min(.002d, renderDelta * .125d) + 1e-9,
                 $"Presentation slew exceeded its per-frame correction contract on frame {frame}");
             previous = presented;
+        }
+
+        var extremeClock = new GameplayPresentationClock();
+        extremeClock.Reset(startDsp, 0);
+        var previousExtremePosition = startDsp * 10000d;
+        var previousReversePosition = -startDsp * 5d;
+        for (var frame = 1; frame <= 240; frame++)
+        {
+            var realtime = frame * renderDelta;
+            var rawDsp = startDsp + Math.Floor(realtime / dspQuantum) * dspQuantum;
+            var presented = extremeClock.Sample(rawDsp, realtime, hardResetThreshold);
+            var extremePosition = presented * 10000d;
+            var reversePosition = presented * -5d;
+            Require(Math.Abs((extremePosition - previousExtremePosition) - renderDelta * 10000d) < 1e-6,
+                $"A 10000x flash TimeScale must advance by a stable per-frame position on frame {frame}");
+            Require(Math.Abs((reversePosition - previousReversePosition) + renderDelta * 5d) < 1e-9,
+                $"A reverse TimeScale must move backward without DSP-block position jumps on frame {frame}");
+            previousExtremePosition = extremePosition;
+            previousReversePosition = reversePosition;
         }
 
         clock.Invalidate();
@@ -708,24 +740,24 @@ public static class RuntimeValidation
 
         Require(allNoneAutos.Length == 0 && allNone.PlayableCount == 0,
             $"An explicit all-none Hold must have no playable range or Auto checkpoints, got Auto={allNoneAutos.Length}");
-        Require(noneLeadAutos.SequenceEqual(new[] { 2.5d, 3d, 3.5d }) && noneLead.PlayableCount == 5,
-            $"A none lead-in must create Auto checkpoints only inside its first/last judged bounds, got {string.Join(",", noneLeadAutos)}");
+        Require(noneLeadAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2.5d, 3d, 3.5d }) && noneLead.PlayableCount == 8,
+            $"A headless Hold with judged nodes must create Auto checkpoints across its complete visual path, got {string.Join(",", noneLeadAutos)}");
         Require(repeatedAutos.SequenceEqual(new[] { .5d, 1.5d }) && repeatedAutoDuplicates == 0 && authoredCollisionCount == 0,
             $"Repeated Apply must rebuild exactly one Auto per eligible beat and skip authored judged beats, got {string.Join(",", repeatedAutos)}");
         var legacyTail = legacy.Connectors[^1].End;
         Require(legacyAutos.SequenceEqual(new[] { .5d, 1d, 1.5d }) && legacyTail.IsHoldTerminal &&
                 legacyTail.HoldCheckpointSource == HoldCheckpointSource.Tail,
             "An all-Unspecified legacy/SCP path must retain geometry-head-to-tail checkpoints and legacy Tail metadata");
-        Require(singleJudgedAutos.Length == 0 && singleJudged.PlayableCount == 1 &&
+        Require(singleJudgedAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2.5d, 3d, 3.5d }) && singleJudged.PlayableCount == 7 &&
                 !singleJudged.Notes[1].IsHoldTerminal && singleJudged.Notes[1].HoldCheckpointSource != HoldCheckpointSource.Tail &&
                 !singleJudged.Notes[2].IsHoldTerminal && singleJudged.Notes[2].HoldCheckpointSource != HoldCheckpointSource.Tail,
-            "A one-judged-node path has no interior Auto and only an explicit judged structural End may become Tail");
+            "A one-judged-node headless Hold must sustain Auto checkpoints across its complete visual path without inventing Tail metadata");
         Require(judgedHeadToNoneEndAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2d, 2.5d, 3d, 3.5d }) &&
                 judgedHeadToNoneEnd.PlayableCount == 8,
             $"A judged Hold head must sustain Auto checkpoints through an unjudged visual End, got {string.Join(",", judgedHeadToNoneEndAutos)}");
         var noneLeadTail = noneLead.Connectors[^1].End;
-        Require(noneLeadTail.IsHoldTerminal && noneLeadTail.HoldCheckpointSource == HoldCheckpointSource.Tail,
-            "An explicit judged structural End must retain Tail metadata");
+        Require(noneLeadTail.IsHoldTerminal && noneLeadTail.HoldCheckpointSource == HoldCheckpointSource.Mid,
+            "A judged Trace End must terminate the Hold while retaining Trace checkpoint metadata");
         Require(fallback.FallbackConnectors.Count == 2 && fallbackHead.Judged && fallbackLeft.Judged && fallbackRight.Judged,
             "A failed Hold topology must preserve legacy connectors and authored judgments");
 
@@ -740,9 +772,9 @@ public static class RuntimeValidation
                 TryReadDouble(noneLeadPath, "VisualEndBeat", out var visualEndBeat) && Math.Abs(visualEndBeat - 4) < 1e-9 &&
                 TryReadDouble(noneLeadPath, "VisualStartTime", out var visualStartTime) && Math.Abs(visualStartTime) < 1e-9 &&
                 TryReadDouble(noneLeadPath, "VisualEndTime", out var visualEndTime) && Math.Abs(visualEndTime - 4) < 1e-9 &&
-                TryReadDouble(noneLeadPath, "PlayableStartBeat", out var playableStartBeat) && Math.Abs(playableStartBeat - 2) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "PlayableStartBeat", out var playableStartBeat) && Math.Abs(playableStartBeat) < 1e-9 &&
                 TryReadDouble(noneLeadPath, "PlayableEndBeat", out var playableEndBeat) && Math.Abs(playableEndBeat - 4) < 1e-9 &&
-                TryReadDouble(noneLeadPath, "PlayableStartTime", out var playableStartTime) && Math.Abs(playableStartTime - 2) < 1e-9 &&
+                TryReadDouble(noneLeadPath, "PlayableStartTime", out var playableStartTime) && Math.Abs(playableStartTime) < 1e-9 &&
                 TryReadDouble(noneLeadPath, "PlayableEndTime", out var playableEndTime) && Math.Abs(playableEndTime - 4) < 1e-9 &&
                 TryReadBool(legacyPath, "HasPlayableRange", out var legacyHasRange) && legacyHasRange &&
                 TryReadDouble(legacyPath, "PlayableStartBeat", out var legacyStartBeat) && Math.Abs(legacyStartBeat) < 1e-9 &&
@@ -821,6 +853,15 @@ public static class RuntimeValidation
             .Where(note => note.HoldCheckpointSource == HoldCheckpointSource.Auto)
             .OrderBy(note => note.Beat).ToArray();
 
+        var nonInvertibleHeadless = Chain(
+            Node(2130, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, 0),
+            Node(2131, 4, SlideNodeRole.End, SlideJudgeMode.Trace, true, 4));
+        nonInvertibleHeadless.DefaultTimeScaleGroup = "reverse";
+        nonInvertibleHeadless.TimeScaleGroups["reverse"] = new RuntimeTimeScaleGroup("reverse", new[] { (0d, -1d) });
+        foreach (var note in nonInvertibleHeadless.Notes) note.TimeScaleGroup = "reverse";
+        HoldCheckpointBuilder.Apply(nonInvertibleHeadless, beat => beat);
+        var nonInvertibleHeadlessAutos = AutoBeats(nonInvertibleHeadless);
+
         var invalidLegacy = new RuntimeChart();
         var invalidLegacyHead = Node(2110, 0, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true);
         var invalidLegacyLeft = Node(2111, 2, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true, -1);
@@ -843,37 +884,39 @@ public static class RuntimeValidation
                   $"invalidLeadTickTail={invalidLeadTick.IsHoldTerminal} invalidLeadEndTail={invalidLeadEnd.IsHoldTerminal} " +
                   $"invalidNonEndTail={invalidNonEndLeft.IsHoldTerminal || invalidNonEndRight.IsHoldTerminal}");
 
-        Require(Math.Abs(attachPath.PlayableStartBeat.Value - 1) < 1e-9 &&
-                Math.Abs(attachPath.PlayableEndBeat.Value - 3) < 1e-9 &&
-                Math.Abs(attachPath.PlayableStartTime.Value - 1) < 1e-9 &&
-                Math.Abs(attachPath.PlayableEndTime.Value - 3) < 1e-9 &&
-                attachAutos.SequenceEqual(new[] { 1.5d, 2.5d }) &&
+        Require(Math.Abs(attachPath.PlayableStartBeat.Value) < 1e-9 &&
+                Math.Abs(attachPath.PlayableEndBeat.Value - 4) < 1e-9 &&
+                Math.Abs(attachPath.PlayableStartTime.Value) < 1e-9 &&
+                Math.Abs(attachPath.PlayableEndTime.Value - 4) < 1e-9 &&
+                attachAutos.SequenceEqual(new[] { .5d, 1.5d, 2.5d, 3.5d }) &&
                 earlyAttach.HoldCheckpointSource == HoldCheckpointSource.Mid &&
                 lateAttach.HoldCheckpointSource == HoldCheckpointSource.Mid,
-            "Judged Attach nodes outside connector geometry membership must define the earliest/latest playable bounds");
+            "A Hold with judged Attach nodes must sustain checkpoints across its complete visual bounds");
         Require(shiftedNodesOnce &&
                 Math.Abs(shiftedPath.VisualStartBeat - 4) < 1e-9 && Math.Abs(shiftedPath.VisualEndBeat - 8) < 1e-9 &&
                 Math.Abs(shiftedPath.VisualStartTime - 2) < 1e-9 && Math.Abs(shiftedPath.VisualEndTime - 6) < 1e-9 &&
-                Math.Abs(shiftedPath.PlayableStartBeat.Value - 5) < 1e-9 && Math.Abs(shiftedPath.PlayableEndBeat.Value - 7) < 1e-9 &&
-                Math.Abs(shiftedPath.PlayableStartTime.Value - 3) < 1e-9 && Math.Abs(shiftedPath.PlayableEndTime.Value - 5) < 1e-9,
+                Math.Abs(shiftedPath.PlayableStartBeat.Value - 4) < 1e-9 && Math.Abs(shiftedPath.PlayableEndBeat.Value - 8) < 1e-9 &&
+                Math.Abs(shiftedPath.PlayableStartTime.Value - 2) < 1e-9 && Math.Abs(shiftedPath.PlayableEndTime.Value - 6) < 1e-9,
             "RuntimeChart.ShiftTiming must refresh all visual/playable path bounds without shifting authored nodes twice");
         Require(invalidAllNoneAutos.Length == 0 && invalidAllNone.PlayableCount == 0,
             "An invalid explicit all-none topology must not fall back to legacy Auto judgments");
         Require(invalidNoneLeadAutos.Length == 0 && !invalidLeadTick.IsHoldTerminal &&
                 invalidLeadTick.HoldCheckpointSource == HoldCheckpointSource.Mid &&
-                invalidLeadEnd.IsHoldTerminal && invalidLeadEnd.HoldCheckpointSource == HoldCheckpointSource.Tail,
+                invalidLeadEnd.IsHoldTerminal && invalidLeadEnd.HoldCheckpointSource == HoldCheckpointSource.Mid,
             "An invalid explicit none lead-in must retain authored structural semantics without synthesizing unsafe Auto judgments");
         Require(invalidNonEndAutos.Length == 0 && !invalidNonEndLeft.IsHoldTerminal && !invalidNonEndRight.IsHoldTerminal &&
                 invalidNonEndLeft.HoldCheckpointSource == HoldCheckpointSource.Mid &&
                 invalidNonEndRight.HoldCheckpointSource == HoldCheckpointSource.Mid,
             "An invalid explicit path ending at a non-End node must not infer Tail or synthesize Auto judgments");
-        var expectedEaseInLane = 2 * (1 - Math.Cos(Math.PI * .25));
+        const double expectedEaseInLane = .5;
         Require(nonInvertibleAutos.Select(note => note.Beat).SequenceEqual(new[] { .5d, 1.5d }) &&
                 Math.Abs(nonInvertibleAutos[0].Lane - expectedEaseInLane) < 1e-6 &&
                 nonInvertibleLinear.Notes[1].HoldCheckpointSource == HoldCheckpointSource.Mid &&
                 nonInvertibleLinear.Notes[2].IsHoldTerminal &&
-                nonInvertibleLinear.Notes[2].HoldCheckpointSource == HoldCheckpointSource.Tail,
+                nonInvertibleLinear.Notes[2].HoldCheckpointSource == HoldCheckpointSource.Mid,
             "A unique time-monotonic explicit chain must retain authored-bound Auto checkpoints and per-segment ease even when visual time is non-invertible");
+        Require(nonInvertibleHeadlessAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2d, 2.5d, 3d, 3.5d }),
+            $"A headless fallback Hold must sustain checkpoints across its complete visual path, got {string.Join(",", nonInvertibleHeadlessAutos)}");
         Require(invalidLegacyAutos.SequenceEqual(new[] { .5d, 1d, 1.5d }),
             "An invalid all-Unspecified topology must retain legacy checkpoint fallback behavior");
     }
@@ -919,7 +962,7 @@ public static class RuntimeValidation
 
     static void ValidateHoldEaseParity()
     {
-        var easeNames = new[] { "linear", "in", "out", "inout" };
+        var easeNames = new[] { "linear", "in", "out", "inout", "outin" };
         var sampleProgress = new[] { .25f, .75f };
         var sharedMathType = typeof(RuntimeHoldPath).Assembly.GetType("Gugarhythm.HoldPathMath");
         var sharedEaseMethod = sharedMathType?.GetMethod("EaseProgress",
@@ -928,10 +971,13 @@ public static class RuntimeValidation
 
         float ExpectedProgress(float progress, int ease) => ease switch
         {
-            1 => 1f - (float)Math.Cos(progress * Math.PI * .5),
-            2 => (float)Math.Sin(progress * Math.PI * .5),
+            1 => progress * progress,
+            2 => 1 - (1 - progress) * (1 - progress),
             3 => progress < .5f ? 2 * progress * progress :
                 1 - (float)Math.Pow(-2 * progress + 2, 2) * .5f,
+            4 => progress < .5f
+                ? (1 - (1 - progress * 2) * (1 - progress * 2)) * .5f
+                : .5f + (progress * 2 - 1) * (progress * 2 - 1) * .5f,
             _ => progress,
         };
 
@@ -943,8 +989,6 @@ public static class RuntimeValidation
                         {{ ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 }},
                         {{ ""type"": ""slide"", ""connections"": [
                             {{ ""beat"": 4, ""judgeType"": ""normal"", ""lane"": 0, ""size"": 1, ""type"": ""start"", ""ease"": ""{easeNames[ease]}"" }},
-                            {{ ""beat"": 4.5, ""judgeType"": ""trace"", ""lane"": 99, ""size"": 1, ""type"": ""attach"" }},
-                            {{ ""beat"": 5.5, ""judgeType"": ""trace"", ""lane"": 99, ""size"": 1, ""type"": ""attach"" }},
                             {{ ""beat"": 6, ""judgeType"": ""trace"", ""lane"": 4, ""size"": 1, ""type"": ""end"" }}
                         ] }}
                     ]
@@ -953,10 +997,6 @@ public static class RuntimeValidation
             var imported = new UscChartImporter().Import($"ease-{ease}.usc",
                 System.Text.Encoding.UTF8.GetBytes(usc));
             Require(imported.Success, $"Ease {ease} USC fixture must import: {imported.Error}");
-            var attachNotes = imported.Chart.Notes
-                .Where(note => note.SlideNodeRole == SlideNodeRole.Attach)
-                .OrderBy(note => note.Beat)
-                .ToArray();
             var validPath = imported.Chart.HoldPaths.Single();
 
             var fallback = new RuntimeChart { DefaultTimeScaleGroup = "reverse" };
@@ -1003,20 +1043,21 @@ public static class RuntimeValidation
                 .Select(note => note.Lane)
                 .ToArray();
 
-            Require(attachNotes.Length == sampleProgress.Length && fallbackLanes.Length == sampleProgress.Length,
-                $"Ease {ease} parity fixture must produce two Attach and two sampled fallback Auto nodes");
+            Require(fallbackLanes.Length == sampleProgress.Length,
+                $"Ease {ease} parity fixture must produce two sampled fallback Auto nodes");
             for (var sample = 0; sample < sampleProgress.Length; sample++)
             {
                 var expectedLane = 4 * ExpectedProgress(sampleProgress[sample], ease);
-                var validPathLane = validPath.Evaluator.Evaluate(attachNotes[sample].Time).Lane;
-                Require(Math.Abs(attachNotes[sample].Lane - validPathLane) < 1e-6,
-                    $"Valid-path USC Attach Ease {ease} drifted from its shared evaluator at progress {sampleProgress[sample]}");
+                var validSampleTime = validPath.VisualStartTime +
+                    (validPath.VisualEndTime - validPath.VisualStartTime) * sampleProgress[sample];
+                var validPathLane = validPath.Evaluator.Evaluate(validSampleTime).Lane;
                 Require(Math.Abs(validPathLane - expectedLane) < 1e-6,
                     $"Valid-path USC segment Ease {ease} drifted from authored per-segment interpolation at progress {sampleProgress[sample]}");
                 Require(Math.Abs(fallbackLanes[sample] - expectedLane) < 1e-6,
                     $"Safe fallback Ease {ease} drifted at progress {sampleProgress[sample]}");
             }
-            markerValues.Add($"ease{ease}=valid:{attachNotes[0].Lane:0.######}:{attachNotes[1].Lane:0.######}" +
+            markerValues.Add($"ease{ease}=valid:{validPath.Evaluator.Evaluate(validPath.VisualStartTime + (validPath.VisualEndTime - validPath.VisualStartTime) * .25).Lane:0.######}:" +
+                $"{validPath.Evaluator.Evaluate(validPath.VisualStartTime + (validPath.VisualEndTime - validPath.VisualStartTime) * .75).Lane:0.######}" +
                 $"/fallback:{fallbackLanes[0]:0.######}:{fallbackLanes[1]:0.######}");
         }
 
@@ -1108,6 +1149,33 @@ public static class RuntimeValidation
         index.QuerySimLines(0, 0, simLineAhead, simLines);
         Require(simLines.Contains(farPlaneSimLine) && simLineAhead > SonolusLandscapePrototype.NoteApproachDurationSeconds,
             "SimLine indexed visibility must preserve the original 8-pixel far-plane allowance");
+
+        RuntimeGuidePoint ReversePoint(double time, float lane) => new()
+        {
+            Time = time,
+            Beat = time,
+            Lane = lane,
+            Size = 1,
+            TimeScaleGroup = "reverse-span",
+        };
+        var reverseChart = new RuntimeChart { DefaultTimeScaleGroup = "reverse-span" };
+        reverseChart.TimeScaleGroups["reverse-span"] = new RuntimeTimeScaleGroup("reverse-span", new[]
+        {
+            (0d, 1d), (1d, -1d), (2d, 1d),
+        });
+        var reverseGuide = new RuntimeGuide
+        {
+            Start = ReversePoint(.5, -1),
+            Head = ReversePoint(.5, -1),
+            Tail = ReversePoint(2.5, 1),
+            End = ReversePoint(2.5, 1),
+        };
+        reverseChart.Guides.Add(reverseGuide);
+        var reverseIndex = new ChartRenderIndex(reverseChart);
+        var reverseVisible = new List<RuntimeGuide>();
+        reverseIndex.QueryGuides(1, 0, 0, reverseVisible);
+        Require(reverseVisible.Count == 1 && ReferenceEquals(reverseVisible[0], reverseGuide),
+            "Guide indexing must retain interior visual extrema when a TimeScale reverses direction");
 
         var emptyIndex = new ChartRenderIndex(new RuntimeChart());
         emptyIndex.QueryNotes(0, 1, 1, notes);
@@ -1215,6 +1283,7 @@ public static class RuntimeValidation
             "Projected Guide tessellation must retain cached clipping endpoints without a second projection pass");
         guideIndex.QueryGuides(10, 0, 1, visible);
         Require(visible.Count == 0, "Guide queries must release candidates outside the visual interval");
+
     }
 
     static void ValidateLibrarySelectionFrameGeometry()
@@ -1963,6 +2032,22 @@ public static class RuntimeValidation
             TailOpacity = .25f,
         };
         chart.Guides.Add(alternateGuide);
+        chart.TimeScaleGroups["flash"] = new RuntimeTimeScaleGroup("flash", new[]
+        {
+            (0d, 10000d), (1d, 1d),
+        });
+        var flashGuide = new RuntimeGuide
+        {
+            Start = new RuntimeGuidePoint { Time = 0, Lane = -1, Size = 1, TimeScaleGroup = "flash" },
+            Head = new RuntimeGuidePoint { Time = 0, Lane = -1, Size = 1, TimeScaleGroup = "flash" },
+            Tail = new RuntimeGuidePoint { Time = 1, Lane = 1, Size = 1, TimeScaleGroup = "flash" },
+            End = new RuntimeGuidePoint { Time = 1, Lane = 1, Size = 1, TimeScaleGroup = "flash" },
+            Color = 4,
+            Ease = 3,
+            HeadOpacity = 1,
+            TailOpacity = 1,
+        };
+        chart.Guides.Add(flashGuide);
         var head = new RuntimeNote
         {
             Index = 10, Time = 0, Beat = 0, Lane = -1, Size = 1, Kind = RuntimeNoteKind.Sustain,
@@ -2009,15 +2094,17 @@ public static class RuntimeValidation
         guideCache.BuildVisualSpans(chart);
         var alternateGuideCache = new GuideRenderCache(alternateGuide);
         alternateGuideCache.BuildVisualSpans(chart);
+        var flashGuideCache = new GuideRenderCache(flashGuide);
+        flashGuideCache.BuildVisualSpans(chart);
         var caches = new Dictionary<RuntimeGuide, GuideRenderCache>
         {
             [guide] = guideCache,
             [alternateGuide] = alternateGuideCache,
+            [flashGuide] = flashGuideCache,
         };
         var first = GpuRibbonMeshBuilder.Build(chart, caches);
         var second = GpuRibbonMeshBuilder.Build(chart, caches);
-        var expectedGuidePathCount = chart.Guides.Count(candidate =>
-            candidate != null && caches.ContainsKey(candidate));
+        const int expectedGuidePathCount = 2;
         var expectedHoldPathCount = chart.HoldPaths.Where(path => path != null)
             .Sum(path => path.RenderRuns.Count) +
             chart.FallbackConnectors.Count(connector => connector?.Start != null && connector.End != null);
@@ -2032,8 +2119,10 @@ public static class RuntimeValidation
         var actualChunkKindCounts = first.Chunks.GroupBy(chunk => chunk.Kind)
             .ToDictionary(group => group.Key, group => group.Count());
         Require(first.GuidePathCount == expectedGuidePathCount,
-            $"GPU ribbon Guide ownership count drifted: expected {expectedGuidePathCount} requested paths, " +
+            $"GPU ribbon must leave a Guide whose fixed mesh step crosses the whole approach window on the exact CPU renderer: expected {expectedGuidePathCount} safe paths, " +
             $"actual {first.GuidePathCount}");
+        Require(!first.GroupNames.Contains("flash"),
+            "GPU ribbon metadata must not claim an extreme-speed Guide routed to exact CPU clipping");
         Require(first.HoldPathCount == expectedHoldPathCount,
             $"GPU ribbon Hold ownership count drifted: expected {expectedHoldPathCount} requested " +
             $"render runs/fallback connectors, actual {first.HoldPathCount}");
@@ -2120,7 +2209,7 @@ public static class RuntimeValidation
             using (var writer = new BinaryWriter(stream))
             {
                 stream.Position = sizeof(int);
-                writer.Write(4);
+                writer.Write(5);
             }
             ForgetGpuRibbonMemoryEntry(cacheKey);
             var rebuilt = GpuRibbonCache.LoadOrBuild(chart, caches, out var rebuiltCacheHit);
@@ -2128,13 +2217,13 @@ public static class RuntimeValidation
                     rebuilt.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
                         .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)) &&
                     GpuRibbonCache.TryRead(runtimeCachePath, cacheKey, out _),
-                "LoadOrBuild must reject a version-4 runtime cache and replace it with exact version-5 geometry");
+                "LoadOrBuild must reject a version-5 runtime cache and replace it with exact version-6 geometry");
             ForgetGpuRibbonMemoryEntry(cacheKey);
             var diskRestored = GpuRibbonCache.LoadOrBuild(chart, caches, out var diskCacheHit);
             Require(diskCacheHit && diskRestored != null &&
                     diskRestored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
                         .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)),
-                "LoadOrBuild must read the rebuilt version-5 geometry through its real disk-cache path");
+                "LoadOrBuild must read the rebuilt version-6 geometry through its real disk-cache path");
         }
         finally
         {
@@ -2235,8 +2324,6 @@ public static class RuntimeValidation
         Require(paths.Paths.Count == 1 && paths.FallbackConnectors.Count == 0,
             "GPU ownership fallback fixture must begin with one complete Hold path");
         chart.HoldPaths.AddRange(paths.Paths);
-        end.Time = double.NaN;
-
         var guideCache = new GuideRenderCache(guide);
         guideCache.BuildVisualSpans(chart);
         var caches = new Dictionary<RuntimeGuide, GuideRenderCache> { [guide] = guideCache };
@@ -2262,7 +2349,7 @@ public static class RuntimeValidation
             var cpuHoldsEnabled = renderer?.RendersHolds != true;
             Require(created && renderer != null && renderer.RendersGuides && !renderer.RendersHolds &&
                     cpuHoldsEnabled && string.IsNullOrEmpty(fallbackReason),
-                "TryCreate must keep a valid GPU Guide renderer but decline incomplete Hold ownership so CPU routing stays enabled");
+                "TryCreate must keep GPU Guides but always leave Hold ownership on the runtime-clipped CPU renderer");
         }
         finally
         {
@@ -2393,7 +2480,7 @@ public static class RuntimeValidation
         var traceHead = At(4);
         var traceMid = At(5);
         var traceTail = At(6);
-        var noneNodes = new[] { At(7), At(8), At(9) };
+        var noneNodes = new[] { At(7), At(9) };
         var flickTail = At(12);
         var noneDirectionTail = At(15);
         var noneHead = At(16);
@@ -2428,7 +2515,8 @@ public static class RuntimeValidation
                 flickHead.SlideNodeRole == SlideNodeRole.Start && flickHead.SlideJudgeMode == SlideJudgeMode.Flick &&
                 !flickHead.IsHoldTerminal,
             "A directional Slide Start must remain a Flick head instead of being consumed as a Tap");
-        Require(noneNodes.All(note => !note.Judged) && !noneDirectionTail.Judged && !noneHeadTail.Judged && chart.PlayableCount == 14,
+        Require(noneNodes.All(note => !note.Judged) && nodes.All(note => note.SourceId != "usc-slide:8") &&
+                !noneDirectionTail.Judged && !noneHeadTail.Judged && chart.PlayableCount == 14,
             "Slide judgeType:none nodes must stay out of judgment and PlayableCount");
         Require(!noneHead.Judged && firstJudgedAfterNoneHead.Judged && firstJudgedAfterNoneHead.Kind == RuntimeNoteKind.Sustain,
             "A judged structural Slide Tick after a none head must remain contact-judged");
@@ -2501,11 +2589,11 @@ public static class RuntimeValidation
                 ""objects"": [
                     { ""type"": ""bpm"", ""beat"": 0, ""bpm"": 120 },
                     { ""type"": ""slide"", ""connections"": [
-                        { ""beat"": 10, ""judgeType"": ""normal"", ""lane"": 0, ""size"": 1, ""type"": ""start"" },
-                        { ""beat"": 10.1, ""lane"": 1, ""size"": 1, ""type"": ""tick"" },
-                        { ""beat"": 10.2, ""critical"": false, ""lane"": 4, ""size"": 1, ""type"": ""attach"" },
-                        { ""beat"": 10.3, ""critical"": false, ""lane"": 2, ""size"": 1, ""type"": ""tick"" },
-                        { ""beat"": 10.4, ""judgeType"": ""trace"", ""lane"": 3, ""size"": 1, ""type"": ""end"" }
+                        { ""beat"": 10, ""ease"": ""linear"", ""judgeType"": ""normal"", ""lane"": 0, ""size"": 1, ""type"": ""start"" },
+                        { ""beat"": 11, ""ease"": ""linear"", ""lane"": 2, ""size"": 1, ""type"": ""tick"" },
+                        { ""beat"": 12, ""critical"": false, ""lane"": 99, ""size"": 9, ""type"": ""attach"" },
+                        { ""beat"": 13, ""critical"": false, ""ease"": ""linear"", ""lane"": 6, ""size"": 3, ""type"": ""tick"" },
+                        { ""beat"": 14, ""judgeType"": ""trace"", ""lane"": 8, ""size"": 1, ""type"": ""end"" }
                     ] }
                 ]
             }
@@ -2515,39 +2603,78 @@ public static class RuntimeValidation
         var chart = result.Chart;
         var nodes = chart.Notes.Concat(chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End }))
             .Distinct().ToArray();
-        RuntimeNote At(double beat) => nodes.Single(note => Math.Abs(note.Beat - beat) < 1e-9);
-        var bendOnly = At(10.1);
-        var particleOnly = At(10.2);
-        var criticalBend = At(10.3);
+        RuntimeNote At(double beat) => nodes.Single(note => Math.Abs(note.Beat - beat) < 1e-9 &&
+            note.HoldCheckpointSource != HoldCheckpointSource.Auto);
+        var bendOnly = nodes.SingleOrDefault(note => Math.Abs(note.Beat - 11) < 1e-9 &&
+            note.HoldCheckpointSource != HoldCheckpointSource.Auto);
+        var particleOnly = At(12);
+        var particleAndBend = At(13);
 
-        Require(!bendOnly.Visible && !bendOnly.Judged && !chart.Notes.Contains(bendOnly),
-            "A tick without critical must bend the Hold path without creating a particle or judgment");
-        Require(particleOnly.Visible && !particleOnly.Judged && chart.Notes.Contains(particleOnly),
-            "An attach must create a visible particle without becoming a judgment");
+        Require(bendOnly != null && !bendOnly.Visible && !bendOnly.Judged && !chart.Notes.Contains(bendOnly) &&
+                chart.Connectors.Any(connector => ReferenceEquals(connector.End, bendOnly)) &&
+                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, bendOnly)),
+            "A tick without an authored critical field must bend the Hold without creating a particle");
+        Require(particleOnly.Visible && !particleOnly.Judged && chart.Notes.Contains(particleOnly) &&
+                Math.Abs(particleOnly.Lane - 4f) < .0001f && Math.Abs(particleOnly.Size - 2f) < .0001f,
+            "An attach must follow the uninterrupted authored Hold curve without becoming a geometry corner");
         Require(particleOnly.SlideNodeRole == SlideNodeRole.Attach && particleOnly.SlideJudgeMode == SlideJudgeMode.None,
             "An authored attach must retain Attach role and None judgment metadata");
-        Require(Math.Abs(particleOnly.Lane - 1.5f) < .0001f,
-            "An attach particle must use the interpolated Hold trajectory instead of its own raw lane coordinate");
         Require(particleOnly.HoldRootIndex == At(10).Index &&
                 !SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, .999f) &&
                 SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, 1f),
             "An attach particle must belong to its Hold and retract at the same judgment-line threshold");
-        Require(!criticalBend.Visible && !criticalBend.Judged && !chart.Notes.Contains(criticalBend),
-            "A geometry Tick must stay particle-free even when it carries Critical segment styling");
-        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, bendOnly)) &&
-                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, bendOnly)),
-            "A bend-only tick must remain in the connector path");
-        Require(!chart.Connectors.Any(connector => ReferenceEquals(connector.Start, particleOnly) || ReferenceEquals(connector.End, particleOnly)),
-            "An attach particle must not create a Hold-path bend");
-        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, criticalBend)) &&
-                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, criticalBend)),
-            "A Critical geometry Tick must remain in the connector path");
-        Require(SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, true) &&
-                !SonolusLandscapePrototype.ShouldShowNoteParticle(criticalBend, true),
-            "Only an explicit USC Attach may create an unjudged Hold midpoint particle");
+        Require(particleAndBend.Visible && !particleAndBend.Judged && chart.Notes.Contains(particleAndBend) &&
+                Math.Abs(particleAndBend.Lane - 6f) < .0001f && Math.Abs(particleAndBend.Size - 3f) < .0001f,
+            "A tick with an authored critical field must retain its geometry and visible midpoint particle");
+        Require(!chart.Connectors.Any(connector => ReferenceEquals(connector.Start, particleOnly) ||
+                                                  ReferenceEquals(connector.End, particleOnly)),
+            "An attach particle must not split an eased Hold segment into linear connector pieces");
+        Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, particleAndBend)) &&
+                chart.Connectors.Any(connector => ReferenceEquals(connector.Start, particleAndBend)),
+            "A visible Tick must remain in the authored Hold geometry path");
         Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(bendOnly, true) &&
-                !SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, false),
-            "Bend-only ticks and missing particle textures must remain hidden");
+                SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, true) &&
+                SonolusLandscapePrototype.ShouldShowNoteParticle(particleAndBend, true),
+            "Authored Attach and visible Tick midpoint particles must both render when textures exist");
+        Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, false) &&
+                !SonolusLandscapePrototype.ShouldShowNoteParticle(particleAndBend, false),
+            "Missing midpoint textures must keep USC Hold particles hidden");
+    }
+
+    static void ValidateBufferedTouchInput()
+    {
+        var buffer = new TouchInputBuffer();
+        var samples = new List<BufferedTouchSample>();
+        buffer.Enqueue(7, 1.000, new Vector2(10, 20), UnityEngine.InputSystem.TouchPhase.Began);
+        buffer.Enqueue(7, 1.004, new Vector2(11, 20), UnityEngine.InputSystem.TouchPhase.Moved);
+        buffer.Enqueue(7, 1.008, new Vector2(12, 20), UnityEngine.InputSystem.TouchPhase.Ended);
+        buffer.DrainTo(samples);
+
+        Require(samples.Count == 3 && samples[0].FingerId == 7 && samples[0].Time == 1.000 &&
+                samples[0].Phase == UnityEngine.InputSystem.TouchPhase.Began &&
+                samples[1].Time == 1.004 && samples[1].Phase == UnityEngine.InputSystem.TouchPhase.Moved &&
+                samples[2].Time == 1.008 && samples[2].Phase == UnityEngine.InputSystem.TouchPhase.Ended,
+            "Buffered touch input must preserve every native record in FIFO order within one gameplay frame");
+        buffer.DrainTo(samples);
+        Require(samples.Count == 0,
+            "Buffered touch input must consume each native record exactly once instead of replaying it next frame");
+
+        var enhancedTouchWasEnabled = UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled;
+        try
+        {
+            if (enhancedTouchWasEnabled)
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
+            SonolusLandscapePrototype.EnsureEnhancedTouchForCallbackMutation();
+            Require(UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled,
+                "Scene teardown must be able to detach Enhanced Touch callbacks after another scene disabled global support");
+        }
+        finally
+        {
+            if (enhancedTouchWasEnabled)
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Enable();
+            else if (UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled)
+                UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
+        }
     }
 
     static void ValidateHeadlessCriticalSlideStart()

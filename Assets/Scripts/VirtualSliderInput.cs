@@ -1,5 +1,8 @@
 using System;
 using System.Collections.Generic;
+using UnityEngine;
+using UnityEngine.InputSystem;
+using InputTouchPhase = UnityEngine.InputSystem.TouchPhase;
 
 namespace Gugarhythm
 {
@@ -143,5 +146,39 @@ namespace Gugarhythm
                 FlickAnchorTime = time;
             }
         }
+    }
+
+    public readonly struct BufferedTouchSample
+    {
+        public int FingerId { get; }
+        public double Time { get; }
+        public Vector2 ScreenPosition { get; }
+        public InputTouchPhase Phase { get; }
+
+        public BufferedTouchSample(int fingerId, double time, Vector2 screenPosition, InputTouchPhase phase)
+        {
+            FingerId = fingerId;
+            Time = time;
+            ScreenPosition = screenPosition;
+            Phase = phase;
+        }
+    }
+
+    public sealed class TouchInputBuffer
+    {
+        readonly List<BufferedTouchSample> pending = new(32);
+
+        public void Enqueue(int fingerId, double time, Vector2 screenPosition, InputTouchPhase phase) =>
+            pending.Add(new BufferedTouchSample(fingerId, time, screenPosition, phase));
+
+        public void DrainTo(List<BufferedTouchSample> output)
+        {
+            if (output == null) throw new ArgumentNullException(nameof(output));
+            output.Clear();
+            output.AddRange(pending);
+            pending.Clear();
+        }
+
+        public void Clear() => pending.Clear();
     }
 }

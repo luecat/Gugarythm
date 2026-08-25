@@ -147,25 +147,30 @@ namespace Gugarhythm
                 var connectionType = (string)connection["type"] ?? "tick";
                 var flick = connection["direction"] != null;
                 var trace = judgeType.Equals("trace", StringComparison.OrdinalIgnoreCase);
-                // USC middle connections encode independent path and particle
-                // roles: tick changes only the path, while attach is the
-                // explicit particle-only connection.
                 var isAttach = connectionType.Equals("attach", StringComparison.OrdinalIgnoreCase);
+                var isTick = connectionType.Equals("tick", StringComparison.OrdinalIgnoreCase);
+                var hasAuthoredCritical = connection["critical"]?.Type == JTokenType.Boolean;
+                // USC encodes three independent midpoint roles: Attach is a
+                // particle sampled on the surrounding curve, a plain Tick is
+                // geometry-only, and a Tick with an authored Critical field
+                // is both geometry and a visible particle.
                 var isPathPoint = !isAttach;
-                // Critical controls the material/texture treatment. It does
-                // not turn a geometry-only tick into a particle note.
-                var hasParticle = isAttach;
+                var hasParticle = isAttach || isTick && hasAuthoredCritical;
                 var semantics = MapSlideSemantics(connectionType, judgeType, flick, hasParticle);
                 var lane = (float?)connection["lane"] ?? 0;
                 var size = Math.Max(.25f, (float?)connection["size"] ?? 1);
-                if (isAttach && previousPoint != null && TryFindNextPathConnection(sourceConnections, connectionIndex + 1, out var nextPath))
+                if (isAttach && previousPoint != null &&
+                    TryFindNextPathConnection(sourceConnections, connectionIndex + 1, out var nextPath))
                 {
                     var nextBeat = (double?)nextPath["beat"] ?? beat;
                     var span = nextBeat - previousPoint.Beat;
-                    var progress = span <= 1e-7 ? 0f : (float)Math.Clamp((beat - previousPoint.Beat) / span, 0, 1);
+                    var progress = span <= 1e-7 ? 0f :
+                        (float)Math.Clamp((beat - previousPoint.Beat) / span, 0, 1);
                     progress = HoldPathMath.EaseProgress(progress, previousEase);
-                    lane = previousPoint.Lane + (((float?)nextPath["lane"] ?? previousPoint.Lane) - previousPoint.Lane) * progress;
-                    size = previousPoint.Size + (Math.Max(.25f, (float?)nextPath["size"] ?? previousPoint.Size) - previousPoint.Size) * progress;
+                    lane = previousPoint.Lane +
+                        (((float?)nextPath["lane"] ?? previousPoint.Lane) - previousPoint.Lane) * progress;
+                    size = previousPoint.Size +
+                        (Math.Max(.25f, (float?)nextPath["size"] ?? previousPoint.Size) - previousPoint.Size) * progress;
                 }
                 var archetype = trace ? "USC Trace Slide " + connectionType :
                     (connectionType is "tick" or "attach") ? "USC SlideTickNote" : "USC Slide " + connectionType;
@@ -184,7 +189,7 @@ namespace Gugarhythm
                     SlideJudgeMode = semantics.JudgeMode,
                     TimeScaleGroup = TimeScaleGroupKey(chart, connection["timeScaleGroup"]),
                 };
-                if (isAttach && holdRoot != null) point.HoldRootIndex = holdRoot.Index;
+                if ((isAttach || isTick) && holdRoot != null) point.HoldRootIndex = holdRoot.Index;
                 if (point.Visible) chart.Notes.Add(point);
                 if (isPathPoint && previousPoint != null) chart.Connectors.Add(new RuntimeConnector
                 {
@@ -200,6 +205,21 @@ namespace Gugarhythm
                     previousEase = EaseType(connection["ease"]);
                 }
             }
+        }
+
+        static bool TryFindNextPathConnection(JObject[] connections, int startIndex, out JObject pathConnection)
+        {
+            for (var index = startIndex; index < connections.Length; index++)
+            {
+                var candidate = connections[index];
+                var type = (string)candidate["type"] ?? "tick";
+                var isAttach = type.Equals("attach", StringComparison.OrdinalIgnoreCase);
+                if (isAttach) continue;
+                pathConnection = candidate;
+                return true;
+            }
+            pathConnection = null;
+            return false;
         }
 
         static (SlideNodeRole Role, SlideJudgeMode JudgeMode, RuntimeNoteKind Kind, bool Judged, bool Visible,
@@ -223,18 +243,6 @@ namespace Gugarhythm
             return (role, judgeMode, kind, judged, judged || hasParticle,
                 judged && role is SlideNodeRole.Tick or SlideNodeRole.Attach
                     ? HoldCheckpointSource.Mid : HoldCheckpointSource.None);
-        }
-
-        static bool TryFindNextPathConnection(JObject[] connections, int startIndex, out JObject pathConnection)
-        {
-            for (var index = startIndex; index < connections.Length; index++)
-                if (!string.Equals((string)connections[index]["type"], "attach", StringComparison.OrdinalIgnoreCase))
-                {
-                    pathConnection = connections[index];
-                    return true;
-                }
-            pathConnection = null;
-            return false;
         }
 
         static void BuildTimeScaleGroups(RuntimeChart chart, JArray objects, BeatTimeMap tempo)
@@ -328,6 +336,7 @@ namespace Gugarhythm
             if (string.Equals(value, "in", StringComparison.OrdinalIgnoreCase)) return 1;
             if (string.Equals(value, "out", StringComparison.OrdinalIgnoreCase)) return 2;
             if (string.Equals(value, "inout", StringComparison.OrdinalIgnoreCase)) return 3;
+            if (string.Equals(value, "outin", StringComparison.OrdinalIgnoreCase)) return 4;
             return 0;
         }
 

@@ -15,11 +15,43 @@ namespace Gugarhythm
         public int VertexCount;
     }
 
+    public static class GpuRibbonGuideRouting
+    {
+        // At the fastest supported scroll setting the complete approach window
+        // is 0.4 visual seconds. If one immutable GPU mesh edge crosses more
+        // than that, an extreme TimeScale can interpolate an entire flash from
+        // one coarse edge. Keep only those Guides on exact CPU clipping.
+        public const double MaximumGpuVisualStep = .4d;
+
+        public static bool RequiresCpu(RuntimeChart chart, GuideRenderCache cache)
+        {
+            if (chart == null || cache == null) return true;
+            var group = string.IsNullOrEmpty(cache.TimeScaleGroup)
+                ? chart.DefaultTimeScaleGroup ?? string.Empty : cache.TimeScaleGroup;
+            var progressValues = new SortedSet<float>();
+            for (var index = 0; index <= GpuRibbonMeshBuilder.GuideSubdivisionCount; index++)
+                progressValues.Add(index / (float)GpuRibbonMeshBuilder.GuideSubdivisionCount);
+            GpuRibbonMeshBuilder.AppendGuideTimeScaleBoundaries(chart, cache, group, progressValues);
+
+            var previous = double.NaN;
+            foreach (var progress in progressValues)
+            {
+                var sample = cache.Evaluate(progress);
+                var position = chart.VisualPosition(sample.Time, group);
+                if (!double.IsFinite(position)) return true;
+                if (double.IsFinite(previous) && Math.Abs(position - previous) > MaximumGpuVisualStep)
+                    return true;
+                previous = position;
+            }
+            return false;
+        }
+    }
+
     // Converts chart-space ribbons into immutable UI metadata meshes.  All
     // sampling and time-scale evaluation happens here, never in the frame loop.
     public static class GpuRibbonMeshBuilder
     {
-        const int GuideSubdivisionCount = 128;
+        internal const int GuideSubdivisionCount = 128;
         const int HoldSubdivisionCount = 32;
         const int LegacySubdivisionCount = 128;
         const int MaximumVerticesPerChunk = 32000;
@@ -140,6 +172,7 @@ namespace Gugarhythm
             foreach (var guide in chart.Guides)
             {
                 if (guide == null || !guideCaches.TryGetValue(guide, out var cache)) continue;
+                if (GpuRibbonGuideRouting.RequiresCpu(chart, cache)) continue;
                 var group = ResolveGroup(chart, cache.TimeScaleGroup);
                 var groupIndex = GroupIndex(result, groupIndices, group);
                 progressValues.Clear();
@@ -255,7 +288,7 @@ namespace Gugarhythm
             return accumulator.AddPath(kind, GroupIndex(result, groupIndices, activeGroup), stateIndex, points);
         }
 
-        static void AppendGuideTimeScaleBoundaries(RuntimeChart chart, GuideRenderCache cache, string group,
+        internal static void AppendGuideTimeScaleBoundaries(RuntimeChart chart, GuideRenderCache cache, string group,
             SortedSet<float> output)
         {
             var duration = cache.TailTime - cache.HeadTime;

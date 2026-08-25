@@ -14,8 +14,8 @@ namespace Gugarhythm
     public static class GpuRibbonCache
     {
         const int Magic = 0x47525055; // UPRG
-        const int FormatVersion = 5;
-        const int BuildKeyVersion = 4;
+        const int FormatVersion = 6;
+        const int BuildKeyVersion = 5;
         const int MaximumChunkCount = 4096;
         const int MaximumVertexCount = 8_000_000;
         const int MaximumIndexCount = 24_000_000;
