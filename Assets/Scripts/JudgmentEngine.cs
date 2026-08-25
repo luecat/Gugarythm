@@ -72,6 +72,41 @@ namespace Gugarhythm
         }
     }
 
+    public enum JudgmentTiming { None, Fast, Late }
+
+    public static class JudgmentTimingClassifier
+    {
+        public static JudgmentTiming Classify(JudgmentGrade grade, double delta)
+        {
+            // FAST/LATE describes an actual non-perfect press. A MISS is
+            // generated after the input window expires, so it must not be
+            // presented or counted as a late press.
+            if (grade != JudgmentGrade.Great && grade != JudgmentGrade.Good)
+                return JudgmentTiming.None;
+            return delta < 0d ? JudgmentTiming.Fast : JudgmentTiming.Late;
+        }
+    }
+
+    public sealed class JudgmentTimingStatistics
+    {
+        public int Fast { get; private set; }
+        public int Late { get; private set; }
+
+        public void Reset()
+        {
+            Fast = 0;
+            Late = 0;
+        }
+
+        public JudgmentTiming Register(JudgmentEvent judgment)
+        {
+            var timing = JudgmentTimingClassifier.Classify(judgment.Grade, judgment.Delta);
+            if (timing == JudgmentTiming.Fast) Fast++;
+            else if (timing == JudgmentTiming.Late) Late++;
+            return timing;
+        }
+    }
+
     public sealed class ScoreState
     {
         public int Perfect { get; private set; }

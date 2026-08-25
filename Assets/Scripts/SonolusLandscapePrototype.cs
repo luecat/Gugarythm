@@ -30,7 +30,7 @@ namespace Gugarhythm
             var changed = false;
             foreach (var suffix in new[]
                      {
-                         "audio-offset-seconds", "settings-delay-offset-seconds", "scroll-speed",
+                         "audio-offset-seconds", "settings-delay-offset-seconds", "scroll-speed", "upper-hidden-bar-percent",
                          "music-volume", "key-volume",
                      })
                 changed |= MigrateFloat(suffix);
@@ -301,6 +301,7 @@ namespace Gugarhythm
         const float HitSourceY = 500f;
         const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
+        const float UpperHiddenBarBoundaryInset = 20f;
         // The authored playable surface spans exactly -6 through +6. Hold
         // heads include transparent sprite padding, so their rendered quad
         // must still be clipped to these visible track edges.
@@ -356,6 +357,15 @@ namespace Gugarhythm
         const float NoteExitMargin = 140f;
         const float JudgmentDisplayDuration = .35f;
         public static readonly Vector2 JudgmentSpriteSize = new(330, 110);
+        public static readonly float JudgmentTimingSpriteHeight = JudgmentSpriteSize.y * .5f;
+        // The source wordmarks have a transparent outer margin, so a small
+        // layout overlap keeps the visible letters close to the judgment text.
+        public static readonly float JudgmentTimingSpriteCenterYOffset = JudgmentSpriteSize.y * .55f;
+        public const float SettingsSliderWidth = 700f;
+        // Keep each setting card shorter than the main slider.
+        public const float FastLateDisplayWidth = SettingsSliderWidth * .5f - 24f;
+        const string FastLateDisplayPreferenceKey = "gugarhythm-fast-late-display";
+        const string AutoPlayPreferenceKey = "gugarhythm-auto-play";
         public const float InputLaneFeedbackDuration = .12f;
         const int InputLaneFeedbackGridCellCount = VirtualSliderInput.CellCount / 2;
         const float HoldLoopVolume = .55f;
@@ -364,6 +374,8 @@ namespace Gugarhythm
         readonly Dictionary<string, Texture2D> buttonTextures = new(StringComparer.Ordinal);
         readonly Dictionary<string, Texture2D> traceTextures = new(StringComparer.Ordinal);
         readonly Dictionary<JudgmentGrade, Texture2D> judgmentSprites = new();
+        readonly Dictionary<JudgmentTiming, Texture2D> judgmentTimingSprites = new();
+        readonly JudgmentTimingStatistics judgmentTimingStatistics = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> noteViews = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
         readonly HashSet<int> renderedPersistentHoldHeads = new();
@@ -484,13 +496,15 @@ namespace Gugarhythm
         RectTransform simLineLayer;
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
+        TaperedConnectorGraphic upperHiddenMask;
+        RectTransform upperHiddenBoundary;
         RectTransform menuPanel;
         RectTransform gameplayLoadingOverlay;
         RectTransform performanceHudPanel;
-        Button performanceHudToggleButton;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
         RectTransform settingsAudioPanel;
+        RectTransform settingsGamePanel;
         RectTransform settingsTagsPanel;
         RectTransform difficultyTagConfirmationPanel;
         RectTransform chartEditorPanel;
@@ -504,10 +518,10 @@ namespace Gugarhythm
         Text accuracyLabel;
         Text comboLabel;
         RawImage judgmentImage;
+        RawImage judgmentTimingImage;
         Text loadStatus;
         Text gameplayLoadingLabel;
         Text performanceHudLabel;
-        Text performanceHudToggleLabel;
         Text libraryCountLabel;
         Text librarySortLabel;
         Text librarySortModeLabel;
@@ -532,6 +546,7 @@ namespace Gugarhythm
         Text importDecisionText;
         Text resultText;
         Text speedLabel;
+        Text upperHiddenBarLabel;
         Text settingsMusicVolumeLabel;
         Text settingsKeyVolumeLabel;
         Text settingsDelayLabel;
@@ -546,6 +561,7 @@ namespace Gugarhythm
         Button calibrationIncreaseOffsetButton;
         Button calibrationResetOffsetButton;
         Button settingsAudioNavigationButton;
+        Button settingsGameNavigationButton;
         Button settingsTagsNavigationButton;
         Text resumeCountdownLabel;
         Text pauseTitle;
@@ -560,8 +576,11 @@ namespace Gugarhythm
         Button pauseButton;
         RectTransform calibrationPanel;
         readonly RectTransform[] calibrationProgressDots = new RectTransform[CalibrationRoundCount];
+        readonly bool[] calibrationRoundSucceeded = new bool[CalibrationRoundCount];
         Toggle autoPlayToggle;
+        Toggle fastLateDisplayToggle;
         Slider speedSlider;
+        Slider upperHiddenBarSlider;
         Slider settingsMusicVolumeSlider;
         Slider settingsKeyVolumeSlider;
         Material laneMaterial;
@@ -593,6 +612,9 @@ namespace Gugarhythm
         int calibrationRoundIndex;
         bool calibrationFourthBeatTapRegistered;
         float scrollSpeed = DefaultScrollSpeed;
+        float upperHiddenBarPercent;
+        bool fastLateDisplayEnabled;
+        bool autoPlayEnabled;
         float judgmentHideAt = -1f;
         float nextPerformanceHudRefresh;
         bool gameplayStageVisible;
@@ -757,6 +779,10 @@ namespace Gugarhythm
             LandscapeOrientation.Lock();
             QualitySettings.vSyncCount = 0;
             scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarhythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
+            upperHiddenBarPercent = ClampUpperHiddenBarPercent(
+                PlayerPrefs.GetFloat("gugarhythm-upper-hidden-bar-percent", 0f));
+            fastLateDisplayEnabled = PlayerPrefs.GetInt(FastLateDisplayPreferenceKey, 1) != 0;
+            autoPlayEnabled = PlayerPrefs.GetInt(AutoPlayPreferenceKey, 0) != 0;
             LibrarySortPreferences.Load(out librarySort, out librarySortAscending);
             audioOffsetSeconds = GameplayTimingPreferences.LoadDeviceOffset();
             settingsDelayOffsetSeconds = audioOffsetSeconds;
@@ -827,6 +853,7 @@ namespace Gugarhythm
             if (accuracyLabel != null) accuracyLabel.transform.parent.gameObject.SetActive(visible);
             if (comboLabel != null) comboLabel.gameObject.SetActive(false);
             if (judgmentImage != null) judgmentImage.gameObject.SetActive(visible);
+            if (judgmentTimingImage != null) judgmentTimingImage.gameObject.SetActive(visible);
             if (pauseButton != null) pauseButton.gameObject.SetActive(false);
         }
 
@@ -836,7 +863,6 @@ namespace Gugarhythm
             if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(visible);
             if (stage != null) stage.gameObject.SetActive(visible);
             if (performanceHudPanel != null) performanceHudPanel.gameObject.SetActive(visible && performanceDiagnosticsEnabled);
-            if (performanceHudToggleButton != null) performanceHudToggleButton.gameObject.SetActive(visible);
         }
 
         void SetGameplayLoadingVisible(bool visible, string message = null)
@@ -963,7 +989,7 @@ namespace Gugarhythm
             // beneath the button rather than input feedback.
             var judgmentTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             judgmentEngine.ProcessInto(authoritativeSongTime, inputBatch, contacts, contactPaths,
-                autoPlayToggle != null && autoPlayToggle.isOn, judgmentEvents);
+                autoPlayEnabled, judgmentEvents);
             if (measurePerformance)
                 RecordFramePacingDiagnostics(rawDspTime, presentationDspTime,
                     MillisecondsBetween(judgmentTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
@@ -1070,6 +1096,80 @@ namespace Gugarhythm
             PlayerPrefs.SetFloat("gugarhythm-scroll-speed", value);
         }
 
+        public static float ClampUpperHiddenBarPercent(float value) =>
+            float.IsFinite(value) ? Mathf.Clamp(value, 0f, 100f) : 0f;
+
+        public static float UpperHiddenBarScreenProgress(float percent) =>
+            ClampUpperHiddenBarPercent(percent) / 100f;
+
+        public static float UpperHiddenBarEdgeInset(float fullWidth) =>
+            Mathf.Clamp(UpperHiddenBarBoundaryInset, 0f, Mathf.Max(0f, fullWidth) * .5f);
+
+        void SetUpperHiddenBarPercent(float value)
+        {
+            upperHiddenBarPercent = ClampUpperHiddenBarPercent(value);
+            if (upperHiddenBarSlider != null && !Mathf.Approximately(upperHiddenBarSlider.value, upperHiddenBarPercent))
+                upperHiddenBarSlider.SetValueWithoutNotify(upperHiddenBarPercent);
+            if (upperHiddenBarLabel != null)
+                upperHiddenBarLabel.text = $"{upperHiddenBarPercent:0}%";
+            if (upperHiddenMask != null)
+            {
+                var visible = upperHiddenBarPercent > .0001f;
+                if (upperHiddenMask.gameObject.activeSelf != visible)
+                    upperHiddenMask.gameObject.SetActive(visible);
+                if (upperHiddenBoundary != null && upperHiddenBoundary.gameObject.activeSelf != visible)
+                    upperHiddenBoundary.gameObject.SetActive(visible);
+                if (visible)
+                {
+                    var screenProgress = UpperHiddenBarScreenProgress(upperHiddenBarPercent);
+                    var topLeft = X(-VisibleTrackLaneEdge, 0f);
+                    var topRight = X(VisibleTrackLaneEdge, 0f);
+                    var bottomLeft = X(-VisibleTrackLaneEdge, screenProgress);
+                    var bottomRight = X(VisibleTrackLaneEdge, screenProgress);
+                    var topInset = UpperHiddenBarEdgeInset(topRight - topLeft);
+                    var bottomInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
+                    topLeft += topInset;
+                    topRight -= topInset;
+                    bottomLeft += bottomInset;
+                    bottomRight -= bottomInset;
+                    upperHiddenMask.SetGeometry(
+                        new Vector2((topLeft + topRight) * .5f, TopY),
+                        new Vector2((bottomLeft + bottomRight) * .5f, ScreenY(screenProgress)),
+                        topRight - topLeft, bottomRight - bottomLeft);
+                    if (upperHiddenBoundary != null)
+                    {
+                        upperHiddenBoundary.sizeDelta = new Vector2(bottomRight - bottomLeft, 4);
+                        upperHiddenBoundary.anchoredPosition = new Vector2((bottomLeft + bottomRight) * .5f,
+                            ScreenY(screenProgress));
+                    }
+                }
+            }
+            PlayerPrefs.SetFloat("gugarhythm-upper-hidden-bar-percent", upperHiddenBarPercent);
+        }
+
+        void SetFastLateDisplay(bool enabled)
+        {
+            fastLateDisplayEnabled = enabled;
+            if (fastLateDisplayToggle != null && fastLateDisplayToggle.isOn != enabled)
+                fastLateDisplayToggle.SetIsOnWithoutNotify(enabled);
+            fastLateDisplayToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
+            if (!enabled) SetJudgmentSprite(judgmentTimingImage, null);
+            PlayerPrefs.SetInt(FastLateDisplayPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        public static bool ToggleAutoPlaySelection(bool enabled) => !enabled;
+
+        void SetAutoPlayEnabled(bool enabled)
+        {
+            autoPlayEnabled = enabled;
+            if (autoPlayToggle != null && autoPlayToggle.isOn != enabled)
+                autoPlayToggle.SetIsOnWithoutNotify(enabled);
+            autoPlayToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
+            PlayerPrefs.SetInt(AutoPlayPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
         void SetSettingsMusicVolume(float value)
         {
             value = Mathf.Clamp01(value);
@@ -1097,6 +1197,9 @@ namespace Gugarhythm
             RefreshSettingsDelayLabel();
         }
 
+        public static string DelayAdjustmentTimingHint(double delta) =>
+            delta < 0d ? "LATE" : delta > 0d ? "FAST" : string.Empty;
+
         void RefreshSettingsDelayLabel()
         {
             if (settingsDelayLabel != null)
@@ -1105,19 +1208,34 @@ namespace Gugarhythm
 
         void ShowSettingsAudio()
         {
-            if (settingsAudioPanel == null || settingsTagsPanel == null) return;
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
             settingsAudioPanel.gameObject.SetActive(true);
+            settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
             settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
+            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+        }
+
+        void ShowSettingsGame()
+        {
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            settingsAudioPanel.gameObject.SetActive(false);
+            settingsGamePanel.gameObject.SetActive(true);
+            settingsTagsPanel.gameObject.SetActive(false);
+            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
         }
 
         void ShowSettingsTags()
         {
-            if (settingsAudioPanel == null || settingsTagsPanel == null) return;
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
             settingsAudioPanel.gameObject.SetActive(false);
+            settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(true);
             settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
         }
 
@@ -1131,6 +1249,7 @@ namespace Gugarhythm
             if (running || calibrationPanel == null) return;
             StopCalibrationTickAudio();
             calibrationOffsets.Clear();
+            Array.Clear(calibrationRoundSucceeded, 0, calibrationRoundSucceeded.Length);
             calibrationRoundIndex = 0;
             calibrationFourthBeatTapRegistered = false;
             calibrationStartDsp = GameplayTiming.ChartAnchorDspForDeviceOffset(AudioSettings.dspTime + .8d, audioOffsetSeconds);
@@ -1139,7 +1258,7 @@ namespace Gugarhythm
             calibrationBackdrop?.gameObject.SetActive(true);
             calibrationPanel.gameObject.SetActive(true);
             RefreshManualAudioOffsetControls();
-            calibrationLabel.text = "第 1 / 4 輪";
+            calibrationLabel.text = "第 1 / 4 輪 · 請在重拍按 TAP";
             calibrationTapButton.interactable = true;
             calibrationRestartButton.interactable = true;
             calibrationCloseButton.interactable = true;
@@ -1170,15 +1289,9 @@ namespace Gugarhythm
 
                 if (calibrationRoundIndex >= CalibrationRoundCount)
                 {
-                    if (LatencyCalibrationMath.TryGetCalibrationAverage(calibrationOffsets, out var average))
-                    {
-                        SetAudioOffset(average);
-                        calibrationLabel.text = $"{average * 1000d:+0;-0;0} ms";
-                    }
-                    else
-                    {
-                        calibrationLabel.text = "未完成";
-                    }
+                    calibrationLabel.text = calibrationOffsets.Count > 0
+                        ? $"已調整 {audioOffsetSeconds * 1000d:+0;-0;0} ms"
+                        : "未偵測到拍點";
                     calibrationActive = false;
                     StopCalibrationTickAudio();
                     RefreshManualAudioOffsetControls();
@@ -1192,7 +1305,7 @@ namespace Gugarhythm
                 calibrationFourthBeatTapRegistered = false;
                 calibrationStartDsp = AudioSettings.dspTime + CalibrationRoundGapSeconds;
                 ScheduleCalibrationTicks();
-                calibrationLabel.text = $"第 {calibrationRoundIndex + 1} / {CalibrationRoundCount} 輪";
+                calibrationLabel.text = $"第 {calibrationRoundIndex + 1} / {CalibrationRoundCount} 輪 · 請在重拍按 TAP";
                 RefreshCalibrationProgress();
             }
         }
@@ -1203,13 +1316,27 @@ namespace Gugarhythm
         {
             if (!calibrationActive || calibrationFourthBeatTapRegistered) return;
             var fourthBeatDsp = CalibrationBeatDsp(CalibrationBeatsPerRound - 1);
-            if (inputDsp < fourthBeatDsp - CalibrationTapWindowSeconds ||
-                inputDsp > fourthBeatDsp + CalibrationTapWindowSeconds) return;
+            if (!LatencyCalibrationMath.IsCalibrationTapWithinWindow(inputDsp, fourthBeatDsp))
+            {
+                calibrationLabel.text = "太早或太晚，請在重拍按 TAP";
+                return;
+            }
             var expectedBeatDsp = fourthBeatDsp;
             var offset = CalibrationAudioOffsetForTap(inputDsp, expectedBeatDsp);
-            if (!LatencyCalibrationMath.IsTapOffsetValid(offset)) return;
+            if (!LatencyCalibrationMath.IsTapOffsetValid(offset))
+            {
+                calibrationLabel.text = "太早或太晚，請在重拍按 TAP";
+                return;
+            }
             calibrationOffsets.Add(offset);
             calibrationFourthBeatTapRegistered = true;
+            calibrationRoundSucceeded[calibrationRoundIndex] = true;
+            if (LatencyCalibrationMath.TryGetRunningCalibrationAverage(calibrationOffsets, out var average))
+            {
+                SetAudioOffset(average);
+                calibrationLabel.text = $"已調整 {audioOffsetSeconds * 1000d:+0;-0;0} ms · 本輪已收錄";
+            }
+            RefreshCalibrationProgress();
         }
 
         public static double CalibrationAudioOffsetForTap(double inputDsp, double audibleBeatDsp)
@@ -1253,7 +1380,7 @@ namespace Gugarhythm
             {
                 if (calibrationProgressDots[index] == null) continue;
                 var image = calibrationProgressDots[index].GetComponent<Image>();
-                image.color = index < calibrationRoundIndex
+                image.color = calibrationRoundSucceeded[index]
                     ? new Color(.06f, .58f, .96f)
                     : index == calibrationRoundIndex && calibrationActive
                         ? new Color(.25f, .78f, 1f)
@@ -1265,7 +1392,7 @@ namespace Gugarhythm
         const int CalibrationRoundCount = LatencyCalibrationMath.CalibrationRoundCount;
         const int CalibrationTickCount = CalibrationBeatsPerRound;
         const double CalibrationBeatDurationSeconds = .6d;
-        const double CalibrationTapWindowSeconds = .3d;
+        const double CalibrationTapWindowSeconds = LatencyCalibrationMath.TapWindowSeconds;
         const double CalibrationRoundGapSeconds = .8d;
 
         double CalibrationBeatDsp(int beatIndex) =>
@@ -1587,6 +1714,7 @@ namespace Gugarhythm
             BuildHoldRenderState();
             gpuRibbonRenderer?.ClearHoldStates();
             scoreState.Reset();
+            judgmentTimingStatistics.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
             judgmentEvents.Clear();
             contactCleanupBuffers.BeginFrame();
@@ -1894,7 +2022,9 @@ namespace Gugarhythm
 
         void OnJudgment(JudgmentEvent judgment)
         {
+            var timing = judgmentTimingStatistics.Register(judgment);
             ShowJudgment(judgment.Grade);
+            ShowJudgmentTiming(timing);
             PlayJudgmentSound(judgment);
             if (judgment.Note != null && judgment.Note.HoldRootIndex >= 0)
                 gpuRibbonRenderer?.SetHoldMissed(judgment.Note.HoldRootIndex,
@@ -2864,7 +2994,7 @@ namespace Gugarhythm
             if (currentLibraryEntry != null)
                 LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
             resultPanel.gameObject.SetActive(true);
-            resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}";
+            resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}\n\nFAST      LATE\n{judgmentTimingStatistics.Fast:N0}          {judgmentTimingStatistics.Late:N0}";
         }
 
         void LoadArtwork()
@@ -2995,6 +3125,22 @@ namespace Gugarhythm
             simLineLayer = Layer("Synchronization Lines", stage);
             persistentHoldHeadLayer = Layer("Persistent Hold Heads", stage);
             noteLayer = Layer("Notes", stage);
+            var upperHiddenMaskObject = new GameObject("Upper Hidden Bar", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
+            var upperHiddenMaskRect = upperHiddenMaskObject.GetComponent<RectTransform>();
+            upperHiddenMaskRect.SetParent(stage, false);
+            Fill(upperHiddenMaskRect);
+            upperHiddenMask = upperHiddenMaskObject.GetComponent<TaperedConnectorGraphic>();
+            upperHiddenMask.raycastTarget = false;
+            upperHiddenMask.color = new Color(.01f, .02f, .06f, .96f);
+            upperHiddenMask.drawGlow = false;
+            upperHiddenMask.drawEdges = false;
+            upperHiddenMask.fillAlphaScale = 1f;
+            upperHiddenMask.fillAlphaLimit = 1f;
+            upperHiddenBoundary = Panel("Upper Hidden Boundary", stage, new Color(.35f, .72f, 1f, .78f),
+                Vector2.zero, Vector2.zero);
+            upperHiddenBoundary.GetComponent<Image>().raycastTarget = false;
+            SetUpperHiddenBarPercent(upperHiddenBarPercent);
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
             BuildPerformanceHud(safeAreaRoot);
@@ -3039,16 +3185,9 @@ namespace Gugarhythm
             performanceHudLabel.rectTransform.anchorMax = Vector2.one;
             performanceHudLabel.rectTransform.offsetMin = new Vector2(14, 10);
             performanceHudLabel.rectTransform.offsetMax = new Vector2(-12, -10);
-
-            performanceHudToggleButton = MakeFlatButton("效能", root, Vector2.zero,
-                TogglePerformanceDiagnostics, new Vector2(128, 48), new Color(.04f, .28f, .42f, .92f));
-            PinToAnchor(performanceHudToggleButton.GetComponent<RectTransform>(), new Vector2(0, 1),
-                new Vector2(0, 1), new Vector2(608, -112));
-            performanceHudToggleLabel = performanceHudToggleButton.GetComponentInChildren<Text>();
         }
 
-        void TogglePerformanceDiagnostics() =>
-            SetPerformanceDiagnosticsEnabled(!performanceDiagnosticsEnabled);
+        public static bool ShouldShowPerformanceDiagnosticsToggle() => false;
 
         void SetPerformanceDiagnosticsEnabled(bool enabled)
         {
@@ -3063,8 +3202,6 @@ namespace Gugarhythm
             performanceDiagnosticsEnabled = enabled;
             if (performanceHudPanel != null)
                 performanceHudPanel.gameObject.SetActive(gameplayStageVisible && enabled);
-            if (performanceHudToggleLabel != null)
-                performanceHudToggleLabel.text = enabled ? "關閉效能" : "效能";
 
             if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
             if (enabled)
@@ -3297,6 +3434,15 @@ namespace Gugarhythm
             PinToAnchor(judgmentImage.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f), Vector2.zero);
             foreach (var grade in new[] { JudgmentGrade.Perfect, JudgmentGrade.Great, JudgmentGrade.Good, JudgmentGrade.Miss })
                 judgmentSprites[grade] = Resources.Load<Texture2D>(JudgmentSpriteResourcePath(grade));
+            var timingObject = new GameObject("Judgment Timing Graphic", typeof(RectTransform), typeof(CanvasRenderer), typeof(RawImage));
+            judgmentTimingImage = timingObject.GetComponent<RawImage>();
+            judgmentTimingImage.rectTransform.SetParent(canvasRoot, false);
+            judgmentTimingImage.raycastTarget = false;
+            judgmentTimingImage.enabled = false;
+            PinToAnchor(judgmentTimingImage.rectTransform, new Vector2(.5f, .5f), new Vector2(.5f, .5f),
+                new Vector2(0, JudgmentTimingSpriteCenterYOffset));
+            foreach (var timing in new[] { JudgmentTiming.Fast, JudgmentTiming.Late })
+                judgmentTimingSprites[timing] = Resources.Load<Texture2D>(JudgmentTimingSpriteResourcePath(timing));
             pauseButton = MakeButton("暫停", root, new Vector2(-24, -24), PauseGame, new Vector2(150, 64));
             PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
             pauseButton.gameObject.SetActive(false);
@@ -3461,10 +3607,35 @@ namespace Gugarhythm
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-52, -48));
 
             var navigation = Panel("Settings Navigation", settingsPanel, new Color(.13f, .13f, .13f, 1f), new Vector2(270, 760), new Vector2(-600, -20));
-            settingsAudioNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
-            settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 205), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsAudioNavigationButton = MakeFlatButton("音訊", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
+            settingsGameNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             var card = Panel("Settings Audio Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             settingsAudioPanel = card;
+
+            var delayTitle = Label("延遲調整", card, 24);
+            delayTitle.alignment = TextAnchor.MiddleLeft;
+            delayTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            delayTitle.rectTransform.anchoredPosition = new Vector2(0, -70);
+            MakeFlatButton("−1 ms", card, new Vector2(-300, -125), () => AdjustSettingsDelay(-SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            Panel("Delay Value Background", card, new Color(.18f, .18f, .18f), new Vector2(180, 52), new Vector2(-100, -125));
+            settingsDelayLabel = Label("", card, 20);
+            settingsDelayLabel.alignment = TextAnchor.MiddleCenter;
+            settingsDelayLabel.rectTransform.sizeDelta = new Vector2(180, 52);
+            settingsDelayLabel.rectTransform.anchoredPosition = new Vector2(-100, -125);
+            MakeFlatButton("＋1 ms", card, new Vector2(100, -125), () => AdjustSettingsDelay(SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            MakeFlatButton("自動調整", card, new Vector2(300, -125), OpenAutoAdjustPanel, new Vector2(150, 52), new Color(.18f, .28f, .38f));
+            var delayLateHint = Label($"−：{DelayAdjustmentTimingHint(-SettingsDelayAdjustment.StepSeconds)}", card, 17);
+            delayLateHint.alignment = TextAnchor.MiddleCenter;
+            delayLateHint.color = new Color(.66f, .66f, .66f);
+            delayLateHint.rectTransform.sizeDelta = new Vector2(150, 28);
+            delayLateHint.rectTransform.anchoredPosition = new Vector2(-300, -170);
+            var delayFastHint = Label($"＋：{DelayAdjustmentTimingHint(SettingsDelayAdjustment.StepSeconds)}", card, 17);
+            delayFastHint.alignment = TextAnchor.MiddleCenter;
+            delayFastHint.color = new Color(.66f, .66f, .66f);
+            delayFastHint.rectTransform.sizeDelta = new Vector2(150, 28);
+            delayFastHint.rectTransform.anchoredPosition = new Vector2(100, -170);
+            RefreshSettingsDelayLabel();
 
             var musicVolumeTitle = Label("音樂音量", card, 24);
             musicVolumeTitle.alignment = TextAnchor.MiddleLeft;
@@ -3488,31 +3659,52 @@ namespace Gugarhythm
             SetSettingsMusicVolume(settingsMusicVolumeSlider.value);
             SetSettingsKeyVolume(settingsKeyVolumeSlider.value);
 
-            var delayTitle = Label("延遲調整", card, 24);
-            delayTitle.alignment = TextAnchor.MiddleLeft;
-            delayTitle.rectTransform.sizeDelta = new Vector2(760, 42);
-            delayTitle.rectTransform.anchoredPosition = new Vector2(0, -245);
-            MakeFlatButton("−1 ms", card, new Vector2(-300, -300), () => AdjustSettingsDelay(-SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
-            Panel("Delay Value Background", card, new Color(.18f, .18f, .18f), new Vector2(180, 52), new Vector2(-100, -300));
-            settingsDelayLabel = Label("", card, 20);
-            settingsDelayLabel.alignment = TextAnchor.MiddleCenter;
-            settingsDelayLabel.rectTransform.sizeDelta = new Vector2(180, 52);
-            settingsDelayLabel.rectTransform.anchoredPosition = new Vector2(-100, -300);
-            MakeFlatButton("＋1 ms", card, new Vector2(100, -300), () => AdjustSettingsDelay(SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
-            MakeFlatButton("自動調整", card, new Vector2(300, -300), OpenAutoAdjustPanel, new Vector2(150, 52), new Color(.18f, .28f, .38f));
-            RefreshSettingsDelayLabel();
-
-            var speedTitle = Label("速度", card, 24);
+            settingsGamePanel = Panel("Settings Game Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            var speedTitle = Label("速度", settingsGamePanel, 24);
             speedTitle.alignment = TextAnchor.MiddleLeft;
             speedTitle.rectTransform.sizeDelta = new Vector2(760, 42);
-            speedTitle.rectTransform.anchoredPosition = new Vector2(0, -70);
-            speedSlider = MakeSlider(card, new Vector2(0, -120), 1f, 20f, scrollSpeed, SetScrollSpeed);
+            speedTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
+            speedSlider = MakeSlider(settingsGamePanel, new Vector2(0, 225), 1f, 20f, scrollSpeed, SetScrollSpeed);
             speedSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
-            speedLabel = Label("", card, 20);
+            speedLabel = Label("", settingsGamePanel, 20);
             speedLabel.alignment = TextAnchor.MiddleLeft;
             speedLabel.rectTransform.sizeDelta = new Vector2(700, 36);
-            speedLabel.rectTransform.anchoredPosition = new Vector2(0, -165);
+            speedLabel.rectTransform.anchoredPosition = new Vector2(0, 175);
             SetScrollSpeed(scrollSpeed);
+
+            var upperHiddenBarTitle = Label("上隱條", settingsGamePanel, 24);
+            upperHiddenBarTitle.alignment = TextAnchor.MiddleLeft;
+            upperHiddenBarTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            upperHiddenBarTitle.rectTransform.anchoredPosition = new Vector2(0, 45);
+            upperHiddenBarSlider = MakeSlider(settingsGamePanel, new Vector2(0, -10), 0f, 100f,
+                upperHiddenBarPercent, SetUpperHiddenBarPercent);
+            upperHiddenBarSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(SettingsSliderWidth, 18);
+            upperHiddenBarLabel = Label("", settingsGamePanel, 20);
+            upperHiddenBarLabel.alignment = TextAnchor.MiddleLeft;
+            upperHiddenBarLabel.rectTransform.sizeDelta = new Vector2(700, 36);
+            upperHiddenBarLabel.rectTransform.anchoredPosition = new Vector2(0, -55);
+            SetUpperHiddenBarPercent(upperHiddenBarPercent);
+
+            var fastLateTitle = Label("FAST／LATE 顯示", settingsGamePanel, 24);
+            fastLateTitle.alignment = TextAnchor.MiddleLeft;
+            fastLateTitle.rectTransform.sizeDelta = new Vector2(FastLateDisplayWidth, 42);
+            fastLateTitle.rectTransform.anchoredPosition = new Vector2(-SettingsSliderWidth * .5f + FastLateDisplayWidth * .5f, -160);
+            fastLateDisplayToggle = MakeFigmaSlidingToggle("顯示", settingsGamePanel,
+                new Vector2(-SettingsSliderWidth * .5f + FastLateDisplayWidth * .5f, -215),
+                FastLateDisplayWidth, fastLateDisplayEnabled);
+            fastLateDisplayToggle.onValueChanged.AddListener(SetFastLateDisplay);
+            SetFastLateDisplay(fastLateDisplayEnabled);
+
+            var autoPlayTitle = Label("AUTO PLAY", settingsGamePanel, 24);
+            autoPlayTitle.alignment = TextAnchor.MiddleLeft;
+            autoPlayTitle.rectTransform.sizeDelta = new Vector2(FastLateDisplayWidth, 42);
+            autoPlayTitle.rectTransform.anchoredPosition = new Vector2(FastLateDisplayWidth * .5f, -160);
+            autoPlayToggle = MakeFigmaSlidingToggle("啟用", settingsGamePanel,
+                new Vector2(FastLateDisplayWidth * .5f, -215),
+                FastLateDisplayWidth, autoPlayEnabled);
+            autoPlayToggle.onValueChanged.AddListener(SetAutoPlayEnabled);
+            SetAutoPlayEnabled(autoPlayEnabled);
+            settingsGamePanel.gameObject.SetActive(false);
 
             settingsTagsPanel = Panel("Settings Tags Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             var tagTitle = Label("難度標籤", settingsTagsPanel, 32); tagTitle.alignment = TextAnchor.MiddleLeft; tagTitle.rectTransform.sizeDelta = new Vector2(940, 62); tagTitle.rectTransform.anchoredPosition = new Vector2(0, 330);
@@ -4085,7 +4277,7 @@ namespace Gugarhythm
                     new Color(.30f, .32f, .35f), new Vector2(10, 10), new Vector2((index - 1.5f) * 36f, 68));
                 calibrationProgressDots[index].GetComponent<Image>().raycastTarget = false;
             }
-            calibrationTapButton = MakeFlatButton("TAP", calibrationPanel, new Vector2(0, -12), RegisterCalibrationTapFromButton, new Vector2(230, 98), new Color(.08f, .43f, .76f));
+            calibrationTapButton = MakePressFlatButton("TAP", calibrationPanel, new Vector2(0, -12), RegisterCalibrationTapFromButton, new Vector2(230, 98), new Color(.08f, .43f, .76f));
             var tapText = calibrationTapButton.GetComponentInChildren<Text>();
             tapText.alignment = TextAnchor.MiddleCenter;
             tapText.fontSize = 30;
@@ -4419,6 +4611,13 @@ namespace Gugarhythm
             _ => string.Empty,
         };
 
+        public static string JudgmentTimingSpriteResourcePath(JudgmentTiming timing) => timing switch
+        {
+            JudgmentTiming.Fast => "JudgmentSprites/fast",
+            JudgmentTiming.Late => "JudgmentSprites/late",
+            _ => string.Empty,
+        };
+
         IEnumerator AnimateHitEffect(RectTransform particleRoot, HitBurstGraphic burst)
         {
             const float Duration = 15f / 60f;
@@ -4448,9 +4647,23 @@ namespace Gugarhythm
             judgmentHideAt = Time.unscaledTime + JudgmentDisplayDuration;
         }
 
+        void ShowJudgmentTiming(JudgmentTiming timing)
+        {
+            if (!fastLateDisplayEnabled || judgmentTimingImage == null || timing == JudgmentTiming.None ||
+                !judgmentTimingSprites.TryGetValue(timing, out var sprite) || sprite == null)
+            {
+                SetJudgmentSprite(judgmentTimingImage, null);
+                return;
+            }
+            var width = JudgmentTimingSpriteHeight * sprite.width / Mathf.Max(1, sprite.height);
+            judgmentTimingImage.rectTransform.sizeDelta = new Vector2(width, JudgmentTimingSpriteHeight);
+            SetJudgmentSprite(judgmentTimingImage, sprite);
+        }
+
         void ClearJudgment()
         {
             SetJudgmentSprite(judgmentImage, null);
+            SetJudgmentSprite(judgmentTimingImage, null);
             judgmentHideAt = -1f;
         }
 
@@ -4475,6 +4688,16 @@ namespace Gugarhythm
             var button = panel.gameObject.AddComponent<Button>();
             button.targetGraphic = image;
             button.onClick.AddListener(() => action());
+            return button;
+        }
+
+        static Button MakePressFlatButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size, Color color)
+        {
+            var button = MakeFlatButton(text, parent, position, action, size, color);
+            var trigger = button.gameObject.AddComponent<EventTrigger>();
+            var entry = new EventTrigger.Entry { eventID = EventTriggerType.PointerDown };
+            entry.callback.AddListener(_ => action());
+            trigger.triggers = new List<EventTrigger.Entry> { entry };
             return button;
         }
 
@@ -4692,6 +4915,51 @@ namespace Gugarhythm
             toggle.targetGraphic = background;
             toggle.graphic = check;
             toggle.isOn = false;
+            return toggle;
+        }
+
+        static Toggle MakeFigmaSlidingToggle(string labelText, RectTransform parent, Vector2 position, float width, bool enabled)
+        {
+            var rootObject = new GameObject($"{labelText} Sliding Toggle", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(FigmaRoundedRectangleGraphic), typeof(Toggle), typeof(FigmaSlidingToggleVisual));
+            var root = rootObject.GetComponent<RectTransform>();
+            root.SetParent(parent, false);
+            root.sizeDelta = new Vector2(width, 56f);
+            root.anchoredPosition = position;
+            var background = rootObject.GetComponent<FigmaRoundedRectangleGraphic>();
+            background.Configure(new Color(.11f, .13f, .17f, 1f), 14f);
+            var label = Label(labelText, root, 20);
+            label.alignment = TextAnchor.MiddleLeft;
+            label.rectTransform.anchorMin = new Vector2(0f, .5f);
+            label.rectTransform.anchorMax = new Vector2(0f, .5f);
+            label.rectTransform.pivot = new Vector2(0f, .5f);
+            label.rectTransform.sizeDelta = new Vector2(width - 118f, 44f);
+            label.rectTransform.anchoredPosition = new Vector2(20f, 0f);
+
+            var trackObject = new GameObject("Sliding Track", typeof(RectTransform), typeof(CanvasRenderer), typeof(FigmaRoundedRectangleGraphic));
+            var trackRect = trackObject.GetComponent<RectTransform>();
+            trackRect.SetParent(root, false);
+            trackRect.sizeDelta = new Vector2(88f, 44f);
+            trackRect.anchoredPosition = new Vector2(width * .5f - 64f, 0f);
+            var track = trackObject.GetComponent<FigmaRoundedRectangleGraphic>();
+            track.raycastTarget = false;
+
+            var handleObject = new GameObject("Sliding Handle", typeof(RectTransform), typeof(CanvasRenderer), typeof(FigmaRoundedRectangleGraphic));
+            var handle = handleObject.GetComponent<RectTransform>();
+            handle.SetParent(trackRect, false);
+            handle.sizeDelta = new Vector2(32f, 32f);
+            var handleGraphic = handleObject.GetComponent<FigmaRoundedRectangleGraphic>();
+            handleGraphic.Configure(new Color(.97f, .99f, 1f, 1f), 16f);
+            handleGraphic.raycastTarget = false;
+
+            var toggle = rootObject.GetComponent<Toggle>();
+            toggle.targetGraphic = background;
+            // Toggle.graphic is treated as a checkmark and fades out while
+            // disabled. The Figma handle is persistent and is moved by
+            // FigmaSlidingToggleVisual instead.
+            toggle.graphic = null;
+            toggle.isOn = enabled;
+            rootObject.GetComponent<FigmaSlidingToggleVisual>().Initialize(toggle, handle, track, 22f);
             return toggle;
         }
 

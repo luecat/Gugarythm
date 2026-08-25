@@ -45,9 +45,11 @@ public static class RuntimeValidation
     {
         ValidateGgrPackageReader();
         ValidateScrollSpeedMath();
+        ValidateUpperHiddenBarSettings();
         ValidateUscLeadingMeasurePadding();
         ValidateInitialWaterfallTiming();
         ValidatePerformanceSampleWindow();
+        ValidatePerformanceDiagnosticsToggleVisibility();
         ValidateTimingSampleWindow();
         ValidateGameplayPresentationClock();
         ValidateVisualFrameContext();
@@ -84,7 +86,11 @@ public static class RuntimeValidation
         ValidateHoldSoundGate();
         ValidateHoldJudgmentAudioRouting();
         ValidateHitEffectColorRouting();
+        ValidateJudgmentTimingStatistics();
+        ValidateAutoPlaySelection();
+        ValidateFigmaSlidingToggleLayout();
         ValidateJudgmentSpritePaths();
+        ValidateJudgmentTimingSpritePaths();
         ValidateJudgmentSpriteVisibility();
         ValidateJudgmentSpriteSize();
         var path = Path.Combine(Application.dataPath, "StreamingAssets/Charts/default.scp");
@@ -232,6 +238,12 @@ public static class RuntimeValidation
         Require(budgets.Over120HzBudget == 2 && budgets.Over60HzBudget == 1 && budgets.Over30HzBudget == 0,
             $"Frame budget counters must classify 120, 60, and 30 Hz threshold breaches independently " +
             $"(actual {budgets.Over120HzBudget}/{budgets.Over60HzBudget}/{budgets.Over30HzBudget})");
+    }
+
+    static void ValidatePerformanceDiagnosticsToggleVisibility()
+    {
+        Require(!SonolusLandscapePrototype.ShouldShowPerformanceDiagnosticsToggle(),
+            "The player-facing performance diagnostics toggle must remain hidden");
     }
 
     static void ValidateTimingSampleWindow()
@@ -1325,9 +1337,20 @@ public static class RuntimeValidation
 
     static void ValidateLatencyCalibrationMath()
     {
+        Require(SonolusLandscapePrototype.DelayAdjustmentTimingHint(-.001d) == "LATE",
+            "Negative delay adjustment must identify late input");
+        Require(SonolusLandscapePrototype.DelayAdjustmentTimingHint(.001d) == "FAST",
+            "Positive delay adjustment must identify fast input");
         var samples = new[] { .010d, .020d, .030d, .040d };
         Require(LatencyCalibrationMath.TryGetCalibrationAverage(samples, out var average) && Math.Abs(average - .025d) < .000001d,
             "Four calibration rounds must average their valid fourth-beat taps");
+        Require(LatencyCalibrationMath.TryGetRunningCalibrationAverage(new[] { .010d }, out var immediateAverage) &&
+            Math.Abs(immediateAverage - .010d) < .000001d,
+            "A valid first calibration tap must produce an immediate adjustment");
+        Require(LatencyCalibrationMath.IsCalibrationTapWithinWindow(.5d, 0d),
+            "Calibration must accept a tap at the widened half-second boundary");
+        Require(!LatencyCalibrationMath.IsCalibrationTapWithinWindow(.501d, 0d),
+            "Calibration must reject a tap outside the widened window");
         Require(!LatencyCalibrationMath.TryGetCalibrationAverage(new[] { .010d, double.NaN, .030d, .040d }, out _),
             "Calibration must reject a round containing an invalid tap");
         Require(!LatencyCalibrationMath.TryGetCalibrationAverage(new[] { .010d, .020d, .030d }, out _),
@@ -1454,6 +1477,34 @@ public static class RuntimeValidation
         Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(2f) - 4f) < .0001f,
             "Halving scroll speed must double the approach duration");
         Debug.Log("GUGARHYTHM_SCROLL_SPEED_VALIDATION_OK");
+    }
+
+    static void ValidateUpperHiddenBarSettings()
+    {
+        var method = typeof(SonolusLandscapePrototype).GetMethod(
+            "ClampUpperHiddenBarPercent", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(method != null, "Upper hidden bar settings must expose a clamped percentage rule");
+        Require(Math.Abs((float)method.Invoke(null, new object[] { -25f })) < .0001f,
+            "Upper hidden bar percentage must clamp below zero");
+        Require(Math.Abs((float)method.Invoke(null, new object[] { 37.5f }) - 37.5f) < .0001f,
+            "Upper hidden bar percentage must preserve an in-range value");
+        Require(Math.Abs((float)method.Invoke(null, new object[] { 125f }) - 100f) < .0001f,
+            "Upper hidden bar percentage must clamp above one hundred");
+        var progressMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "UpperHiddenBarScreenProgress", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(progressMethod != null, "Upper hidden bar settings must expose a track-relative depth rule");
+        Require(Math.Abs((float)progressMethod.Invoke(null, new object[] { 50f }) - .5f) < .0001f,
+            "Upper hidden bar must cover the requested fraction of the track depth");
+        Require(Math.Abs((float)progressMethod.Invoke(null, new object[] { 125f }) - 1f) < .0001f,
+            "Upper hidden bar depth must use the clamped percentage");
+        var insetMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "UpperHiddenBarEdgeInset", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(insetMethod != null, "Upper hidden bar settings must keep its fill inside the track boundaries");
+        Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 80f }) - 20f) < .0001f,
+            "Upper hidden bar must inset a normal-width track edge");
+        Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 20f }) - 10f) < .0001f,
+            "Upper hidden bar must never invert a narrow track");
+        Debug.Log("GUGARHYTHM_UPPER_HIDDEN_BAR_VALIDATION_OK");
     }
 
     static void ValidateLibrarySelectionRestore()
@@ -2610,6 +2661,87 @@ public static class RuntimeValidation
             "Good judgment must select its image asset");
         Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Miss) == "JudgmentSprites/miss",
             "Miss judgment must select its image asset");
+    }
+
+    static void ValidateJudgmentTimingStatistics()
+    {
+        var statistics = new JudgmentTimingStatistics();
+        Require(statistics.Register(new JudgmentEvent(null, JudgmentGrade.Great, -.01d)) == JudgmentTiming.Fast,
+            "An early non-perfect press must be classified as FAST");
+        Require(statistics.Register(new JudgmentEvent(null, JudgmentGrade.Good, .01d)) == JudgmentTiming.Late,
+            "A late non-perfect press must be classified as LATE");
+        Require(statistics.Register(new JudgmentEvent(null, JudgmentGrade.Perfect, -.01d)) == JudgmentTiming.None,
+            "Perfect judgments must not produce a FAST or LATE indicator");
+        Require(statistics.Register(new JudgmentEvent(null, JudgmentGrade.Miss, .01d)) == JudgmentTiming.None,
+            "Automatic misses must not be counted as an input FAST or LATE");
+        Require(statistics.Fast == 1 && statistics.Late == 1,
+            "FAST and LATE totals must count only non-perfect input judgments");
+    }
+
+    static void ValidateFigmaSlidingToggleLayout()
+    {
+        Require(Math.Abs(FigmaSlidingToggleLayout.HandleX(false, 22f) + 22f) < .0001f,
+            "A disabled Figma toggle handle must rest on the left edge");
+        Require(Math.Abs(FigmaSlidingToggleLayout.HandleX(true, 22f) - 22f) < .0001f,
+            "An enabled Figma toggle handle must rest on the right edge");
+        Require(Math.Abs(FigmaRoundedRectangleLayout.CornerStartAngleDegrees(0)) < .0001f &&
+                Math.Abs(FigmaRoundedRectangleLayout.CornerStartAngleDegrees(3) - 270f) < .0001f,
+            "Rounded rectangle arcs must start at their outside edges");
+
+        var parentObject = new GameObject("Figma Toggle Validation Parent", typeof(RectTransform));
+        try
+        {
+            var factory = typeof(SonolusLandscapePrototype).GetMethod("MakeFigmaSlidingToggle",
+                System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Require(factory != null, "FAST/LATE must use the Figma sliding toggle factory");
+            var toggle = (Toggle)factory.Invoke(null, new object[]
+            {
+                "顯示", parentObject.GetComponent<RectTransform>(), Vector2.zero, 350f, false,
+            });
+            Require(toggle.graphic == null,
+                "The sliding handle must not be Toggle.graphic because Unity hides that graphic when toggled off");
+            var handle = toggle.transform.Find("Sliding Track/Sliding Handle").GetComponent<FigmaRoundedRectangleGraphic>();
+            Require(handle.canvasRenderer.GetAlpha() > .99f,
+                "The disabled sliding handle must remain opaque instead of fading out");
+            Require(handle.rectTransform.anchoredPosition.x < 0f,
+                "The disabled sliding handle must remain visible on the left side");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(parentObject);
+        }
+    }
+
+    static void ValidateAutoPlaySelection()
+    {
+        Require(SonolusLandscapePrototype.ToggleAutoPlaySelection(false),
+            "AUTO PLAY selection must enable from the disabled state");
+        Require(!SonolusLandscapePrototype.ToggleAutoPlaySelection(true),
+            "AUTO PLAY selection must disable from the enabled state");
+    }
+
+    static void ValidateJudgmentTimingSpritePaths()
+    {
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentTimingSpriteHeight -
+                    SonolusLandscapePrototype.JudgmentSpriteSize.y * .5f) < .0001f,
+            "FAST/LATE indicator height must be half the main judgment height");
+        Require(Math.Abs(SonolusLandscapePrototype.JudgmentTimingSpriteCenterYOffset -
+                    SonolusLandscapePrototype.JudgmentSpriteSize.y * .55f) < .0001f,
+            "FAST/LATE indicator must visually sit close above the main judgment image");
+        Require(SonolusLandscapePrototype.FastLateDisplayWidth <
+                    SonolusLandscapePrototype.SettingsSliderWidth * .5f,
+            "FAST/LATE and AUTO PLAY setting cards must be shorter than half the slider width");
+        Require(Math.Abs(SonolusLandscapePrototype.SettingsSliderWidth -
+                    SonolusLandscapePrototype.FastLateDisplayWidth * 2f - 24f) < .0001f,
+            "FAST/LATE and AUTO PLAY cards must retain a 24-unit gutter at the center line");
+        Require(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Fast) == "JudgmentSprites/fast",
+            "FAST timing must select its image asset");
+        Require(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Late) == "JudgmentSprites/late",
+            "LATE timing must select its image asset");
+        Require(Resources.Load<Texture2D>(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Fast)) != null,
+            "FAST timing sprite resource is missing");
+        Require(Resources.Load<Texture2D>(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Late)) != null,
+            "LATE timing sprite resource is missing");
     }
 
     static void ValidateJudgmentSpriteVisibility()
