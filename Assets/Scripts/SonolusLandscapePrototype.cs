@@ -196,20 +196,6 @@ namespace Gugarhythm
             }
         }
 
-        public readonly struct NoteSurfaceMapping
-        {
-            public readonly NoteSurfaceQuad Quad;
-            public readonly float HorizontalStart;
-            public readonly float HorizontalEnd;
-
-            public NoteSurfaceMapping(NoteSurfaceQuad quad, float horizontalStart, float horizontalEnd)
-            {
-                Quad = quad;
-                HorizontalStart = horizontalStart;
-                HorizontalEnd = horizontalEnd;
-            }
-        }
-
         public enum HoldConnectorRenderMode { AnchorClipped, NaturalPassThrough }
 
         [Flags]
@@ -531,6 +517,7 @@ namespace Gugarhythm
         Text librarySortModeLabel;
         RectTransform libraryDirectionIcon;
         Text detailTitleLabel;
+        int detailTitleMaxFontSize;
         Text detailArtistLabel;
         Text detailDifficultyLabel;
         Text detailAccuracyLabel;
@@ -2334,7 +2321,7 @@ namespace Gugarhythm
                 var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
                 var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
                 if (note.HoldRootIndex == note.Index)
-                    ApplyNoteSurfaceQuad(view, BuildClippedHoldHeadSurface(note.Lane, renderSize, screenProgress, height));
+                    ApplyNoteSurfaceQuad(view, BuildHoldHeadSurface(note.Lane, renderSize, screenProgress, height));
                 else
                     ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
                 view.color = IsHoldMid(note) ? Color.clear : Color.white;
@@ -2585,24 +2572,7 @@ namespace Gugarhythm
             var bodyWidth = LaneWidth(lane, size, screenProgress);
             var renderWidth = HoldHeadRenderQuadWidth(bodyWidth, height, root.Critical);
             var renderSize = size * renderWidth / Mathf.Max(.001f, bodyWidth);
-            ApplyNoteSurfaceQuad(view, BuildClippedHoldHeadSurface(lane, renderSize, screenProgress, height));
-        }
-
-        static float ClampInBoundsHoldHeadWidth(float renderWidth, float lane, float size, float screenProgress)
-        {
-            _ = size;
-            // Always constrain the complete Hold-head quad to the visible
-            // playable track, including notes authored at or beyond an edge.
-            var center = X(lane, screenProgress);
-            var left = X(-VisibleTrackLaneEdge, screenProgress);
-            var right = X(VisibleTrackLaneEdge, screenProgress);
-            return ClampCenteredWidthToBounds(renderWidth, center, left, right);
-        }
-
-        static float ClampCenteredWidthToBounds(float renderWidth, float center, float left, float right)
-        {
-            var halfAvailable = Math.Max(0f, Math.Min(center - left, right - center));
-            return Math.Min(renderWidth, 2f * halfAvailable);
+            ApplyNoteSurfaceQuad(view, BuildHoldHeadSurface(lane, renderSize, screenProgress, height));
         }
 
         bool IsHoldCurrentlyMissed(RuntimeConnector connector)
@@ -2847,19 +2817,9 @@ namespace Gugarhythm
             return BuildNoteSurfaceQuadRange(lane - size, lane + size, screenProgress, height);
         }
 
-        public static NoteSurfaceMapping BuildClippedHoldHeadSurface(
-            float lane, float renderSize, float screenProgress, float height)
+        public static NoteSurfaceQuad BuildHoldHeadSurface(float lane, float renderSize, float screenProgress, float height)
         {
-            var fullLeft = lane - renderSize;
-            var fullRight = lane + renderSize;
-            var fullSpan = Mathf.Max(.0001f, fullRight - fullLeft);
-            var clippedLeft = Mathf.Clamp(fullLeft, -VisibleTrackLaneEdge, VisibleTrackLaneEdge);
-            var clippedRight = Mathf.Clamp(fullRight, clippedLeft, VisibleTrackLaneEdge);
-            var horizontalStart = Mathf.Clamp01((clippedLeft - fullLeft) / fullSpan);
-            var horizontalEnd = Mathf.Clamp01((clippedRight - fullLeft) / fullSpan);
-            return new NoteSurfaceMapping(
-                BuildNoteSurfaceQuadRange(clippedLeft, clippedRight, screenProgress, height),
-                horizontalStart, horizontalEnd);
+            return BuildNoteSurfaceQuad(lane, renderSize, screenProgress, height);
         }
 
         static NoteSurfaceQuad BuildNoteSurfaceQuadRange(
@@ -2885,19 +2845,6 @@ namespace Gugarhythm
             view.rectTransform.anchoredPosition = center;
             view.rectTransform.sizeDelta = new Vector2(width, height);
             view.SetSurfaceQuad(quad.UpperLeft - center, quad.UpperRight - center, quad.LowerRight - center, quad.LowerLeft - center);
-        }
-
-        static void ApplyNoteSurfaceQuad(HorizontalSlicedRawImage view, NoteSurfaceMapping mapping)
-        {
-            var quad = mapping.Quad;
-            var center = (quad.UpperLeft + quad.UpperRight + quad.LowerRight + quad.LowerLeft) * .25f;
-            var width = Mathf.Max(quad.UpperRight.x - quad.UpperLeft.x, quad.LowerRight.x - quad.LowerLeft.x);
-            var height = Mathf.Max(quad.UpperLeft.y - quad.LowerLeft.y, quad.UpperRight.y - quad.LowerRight.y);
-            view.rectTransform.anchoredPosition = center;
-            view.rectTransform.sizeDelta = new Vector2(width, height);
-            view.SetSurfaceQuad(quad.UpperLeft - center, quad.UpperRight - center,
-                quad.LowerRight - center, quad.LowerLeft - center,
-                mapping.HorizontalStart, mapping.HorizontalEnd);
         }
 
         static float ScreenProgressAtY(float y) => (TopY - y) / (TopY - HitY);
@@ -3036,12 +2983,10 @@ namespace Gugarhythm
 
         public static float HoldConnectorRenderWidth(float bodyWidth, float lane, float size, float screenProgress)
         {
-            var headHeight = HoldHeadRenderHeight(NoteSurfaceHeight(screenProgress));
-            var headQuadWidth = HoldHeadRenderQuadWidth(bodyWidth, headHeight, false);
-            var clippedHeadQuadWidth = ClampInBoundsHoldHeadWidth(headQuadWidth, lane, size, screenProgress);
-            var padding = headHeight * ButtonOuterPaddingPixels(false) / NoteTextureHeight;
-            var visibleHeadWidth = Mathf.Max(0, clippedHeadQuadWidth - padding * 2);
-            return HoldConnectorRenderWidth(visibleHeadWidth);
+            _ = lane;
+            _ = size;
+            _ = screenProgress;
+            return HoldConnectorRenderWidth(bodyWidth);
         }
 
         public static float HoldConnectorVisibleBodyWidth(float renderWidth) =>
@@ -3650,6 +3595,9 @@ namespace Gugarhythm
             coverAspect.aspectMode = CoverPresentationAspectMode();
             var detailKicker = Label("CHART DETAIL", detail, 18); detailKicker.color = new Color(.64f, .64f, .64f); detailKicker.alignment = TextAnchor.MiddleLeft; detailKicker.rectTransform.sizeDelta = new Vector2(320, 34); PinToAnchor(detailKicker.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 305));
             detailTitleLabel = Label("選擇一份譜面", detail, 58); detailTitleLabel.alignment = TextAnchor.MiddleLeft; detailTitleLabel.rectTransform.sizeDelta = new Vector2(620, 92); PinToAnchor(detailTitleLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 183.5f));
+            detailTitleMaxFontSize = detailTitleLabel.fontSize;
+            detailTitleLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
+            detailTitleLabel.verticalOverflow = VerticalWrapMode.Truncate;
             detailArtistLabel = Label("", detail, 25); detailArtistLabel.color = new Color(.68f, .68f, .68f); detailArtistLabel.alignment = TextAnchor.MiddleLeft; detailArtistLabel.rectTransform.sizeDelta = new Vector2(620, 48); PinToAnchor(detailArtistLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 113.5f));
             var infoDivider = Panel("Detail Divider", detail, new Color(.28f, .28f, .28f), new Vector2(0, PersistentGrayDividerThickness), Vector2.zero); infoDivider.anchorMin = new Vector2(.51f, .5f); infoDivider.anchorMax = new Vector2(.94f, .5f); infoDivider.offsetMin = new Vector2(0, 72); infoDivider.offsetMax = new Vector2(0, 72 + PersistentGrayDividerThickness); infoDivider.GetComponent<Image>().raycastTarget = false;
             detailDifficultyLabel = Label("選擇難度", detail, 17); detailDifficultyLabel.color = new Color(.68f, .68f, .68f); detailDifficultyLabel.alignment = TextAnchor.MiddleLeft; detailDifficultyLabel.rectTransform.sizeDelta = new Vector2(440, 38); PinToAnchor(detailDifficultyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 36));
@@ -4166,14 +4114,14 @@ namespace Gugarhythm
             var group = selectedLibraryEntry == null ? null : groups.FirstOrDefault(item => item.GroupId == selectedLibraryEntry.GroupId);
             if (group == null)
             {
-                detailTitleLabel.text = "選擇一份譜面";
+                SetDetailTitle("選擇一份譜面");
                 detailArtistLabel.text = string.Empty;
                 detailDifficultyLabel.text = "選擇難度";
                 detailAccuracyLabel.text = "BEST ACCURACY\n<size=52>—</size>";
                 RefreshDetailCover(null);
                 return;
             }
-            detailTitleLabel.text = group.Title;
+            SetDetailTitle(group.Title);
             detailArtistLabel.text = group.Artist;
             detailDifficultyLabel.text = "選擇難度";
             var current = group.Difficulties.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id) ?? group.Difficulties[0];
@@ -4194,6 +4142,24 @@ namespace Gugarhythm
                 button.GetComponentInChildren<Text>().color = active ? new Color(.22f, .68f, 1f) : new Color(.78f, .78f, .78f);
             }
             detailAccuracyLabel.text = current.BestAccuracy < 0 ? "BEST ACCURACY\n<size=52>—</size>" : $"BEST ACCURACY\n<size=52>{current.BestAccuracy:F2}%</size>";
+        }
+
+        void SetDetailTitle(string title)
+        {
+            if (detailTitleLabel == null) return;
+            detailTitleLabel.text = title ?? string.Empty;
+            detailTitleLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
+            detailTitleLabel.verticalOverflow = VerticalWrapMode.Truncate;
+            detailTitleLabel.resizeTextForBestFit = false;
+
+            var maximumSize = detailTitleMaxFontSize > 0 ? detailTitleMaxFontSize : detailTitleLabel.fontSize;
+            var minimumSize = Mathf.Min(maximumSize, Mathf.Max(1, Mathf.RoundToInt(maximumSize * (28f / 58f))));
+            var availableWidth = detailTitleLabel.rectTransform.rect.width;
+            if (availableWidth <= 0f) availableWidth = detailTitleLabel.rectTransform.sizeDelta.x;
+
+            detailTitleLabel.fontSize = maximumSize;
+            while (detailTitleLabel.fontSize > minimumSize && detailTitleLabel.preferredWidth > availableWidth)
+                detailTitleLabel.fontSize--;
         }
 
         void RefreshDetailCover(LocalChartEntry entry)

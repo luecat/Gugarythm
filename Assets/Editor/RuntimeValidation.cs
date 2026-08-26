@@ -21,6 +21,7 @@ public static class RuntimeValidation
         ValidateUscSlideMidpointRoles();
         ValidateHoldEaseParity();
         ValidateGpuRibbonRendering();
+        ValidateNoteRenderWidths();
         ValidateBufferedTouchInput();
         Debug.Log("GUGARHYTHM_HOLD_INPUT_FIXES_VALIDATION_OK");
     }
@@ -1695,52 +1696,33 @@ public static class RuntimeValidation
         Require(Math.Abs((1 - SonolusLandscapePrototype.HoldConnectorSourceUvInset * 2) * 306 - 240) < .0001f,
             "A lane-confined Hold ribbon must map only the texture's visible core across its authored lane span");
 
-        var clippedConnectorWidth = typeof(SonolusLandscapePrototype).GetMethod(
-            "HoldConnectorRenderWidth", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static,
-            null, new[] { typeof(float), typeof(float), typeof(float), typeof(float) }, null);
-        Require(clippedConnectorWidth != null,
-            "Hold connectors must expose the same edge-clamped width calculation used by Hold heads");
-        var clippedRenderWidth = (float)clippedConnectorWidth.Invoke(null, new object[] { 1000f, 0f, 6f, 1f });
-        var clippedVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(clippedRenderWidth);
-        Require(clippedVisibleWidth < 1000f,
-            "An edge-clamped Hold connector must shrink with its head instead of retaining its authored full width");
+        var outOfBoundsConnectorWidth = SonolusLandscapePrototype.HoldConnectorRenderWidth(1000f, 7f, 1f, 1f);
+        Require(Math.Abs(SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(outOfBoundsConnectorWidth) - 1000f) < .0001f,
+            "An out-of-track Hold connector must retain its authored visible width instead of being clamped to the track");
 
-        var clampHeadWidth = typeof(SonolusLandscapePrototype).GetMethod(
-            "ClampInBoundsHoldHeadWidth", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        var projectLane = typeof(SonolusLandscapePrototype).GetMethod(
-            "X", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
-        Require(clampHeadWidth != null && projectLane != null,
-            "Hold-head track-bound validation requires the production clamp and lane projector");
-        var trackLeft = (float)projectLane.Invoke(null, new object[] { -6f, 1f });
-        var trackRight = (float)projectLane.Invoke(null, new object[] { 6f, 1f });
-        var completeTrackWidth = trackRight - trackLeft;
-        var fullTrackHeadWidth = (float)clampHeadWidth.Invoke(null, new object[] { 10000f, 0f, 6f, 1f });
-        var oversizedHeadWidth = (float)clampHeadWidth.Invoke(null, new object[] { 10000f, 0f, 7f, 1f });
-        Require(fullTrackHeadWidth <= completeTrackWidth + .001f && oversizedHeadWidth <= completeTrackWidth + .001f,
-            "Descending Hold-head alpha bounds must never exceed the visible -6 to +6 note track");
-
-        var edgeBody = SonolusLandscapePrototype.BuildNoteSurfaceQuad(-5f, 1f, 1f, holdHeadHeight);
+        var buildHoldHead = typeof(SonolusLandscapePrototype).GetMethod(
+            "BuildHoldHeadSurface", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
+        Require(buildHoldHead != null,
+            "Hold-head rendering must expose the same full surface projection for in-track and out-of-track heads");
         var edgeRenderSize = holdHeadQuadWidth / 147.5f;
-        var leftEdgeHead = SonolusLandscapePrototype.BuildClippedHoldHeadSurface(
-            -5f, edgeRenderSize, 1f, holdHeadHeight);
-        Require(leftEdgeHead.HorizontalStart > 0f && Math.Abs(leftEdgeHead.HorizontalEnd - 1f) < .0001f,
-            "A left-edge Hold head must crop only its out-of-track source pixels");
-        Require(Math.Abs(leftEdgeHead.Quad.UpperLeft.x - edgeBody.UpperLeft.x) < .0001f &&
-                Math.Abs(leftEdgeHead.Quad.LowerLeft.x - edgeBody.LowerLeft.x) < .0001f &&
-                leftEdgeHead.Quad.UpperRight.x > edgeBody.UpperRight.x &&
-                leftEdgeHead.Quad.LowerRight.x > edgeBody.LowerRight.x,
-            "Cropping a left-edge Hold head must preserve its authored visible body and opposite-side padding");
+        var trackSurface = SonolusLandscapePrototype.BuildNoteSurfaceQuad(0f, 6f, 1f, holdHeadHeight);
+        var leftOutside = (SonolusLandscapePrototype.NoteSurfaceQuad)buildHoldHead.Invoke(
+            null, new object[] { -7f, edgeRenderSize, 1f, holdHeadHeight });
+        var rightOutside = (SonolusLandscapePrototype.NoteSurfaceQuad)buildHoldHead.Invoke(
+            null, new object[] { 7f, edgeRenderSize, 1f, holdHeadHeight });
+        Require(leftOutside.UpperLeft.x < trackSurface.UpperLeft.x &&
+                leftOutside.LowerLeft.x < trackSurface.LowerLeft.x &&
+                rightOutside.UpperRight.x > trackSurface.UpperRight.x &&
+                rightOutside.LowerRight.x > trackSurface.LowerRight.x,
+            "Out-of-track Hold heads must keep their outer vertices beyond the visible track instead of clipping at its edges");
 
-        var rightEdgeBody = SonolusLandscapePrototype.BuildNoteSurfaceQuad(5f, 1f, 1f, holdHeadHeight);
-        var rightEdgeHead = SonolusLandscapePrototype.BuildClippedHoldHeadSurface(
-            5f, edgeRenderSize, 1f, holdHeadHeight);
-        Require(Math.Abs(rightEdgeHead.HorizontalStart) < .0001f && rightEdgeHead.HorizontalEnd < 1f,
-            "A right-edge Hold head must crop only its out-of-track source pixels");
-        Require(rightEdgeHead.Quad.UpperLeft.x < rightEdgeBody.UpperLeft.x &&
-                rightEdgeHead.Quad.LowerLeft.x < rightEdgeBody.LowerLeft.x &&
-                Math.Abs(rightEdgeHead.Quad.UpperRight.x - rightEdgeBody.UpperRight.x) < .0001f &&
-                Math.Abs(rightEdgeHead.Quad.LowerRight.x - rightEdgeBody.LowerRight.x) < .0001f,
-            "Cropping a right-edge Hold head must preserve its authored visible body and opposite-side padding");
+        var expectedLeft = SonolusLandscapePrototype.BuildNoteSurfaceQuad(-7f, edgeRenderSize, 1f, holdHeadHeight);
+        var expectedRight = SonolusLandscapePrototype.BuildNoteSurfaceQuad(7f, edgeRenderSize, 1f, holdHeadHeight);
+        Require((leftOutside.UpperLeft - expectedLeft.UpperLeft).sqrMagnitude < .0001f &&
+                (leftOutside.LowerRight - expectedLeft.LowerRight).sqrMagnitude < .0001f &&
+                (rightOutside.UpperLeft - expectedRight.UpperLeft).sqrMagnitude < .0001f &&
+                (rightOutside.LowerRight - expectedRight.LowerRight).sqrMagnitude < .0001f,
+            "Out-of-track Hold heads must preserve the complete authored quad without deformation");
     }
 
     static void ValidateNoteRenderVisibilityWindow()
