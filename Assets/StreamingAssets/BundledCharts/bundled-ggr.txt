@@ -3,6 +3,7 @@ Meteor-Snow.ggr
 OUTRAGE.ggr
 Phantom-Crisis.ggr
 Sweet-&-Sour.ggr
+Test.ggr
 YOUNITHM.ggr
 dominus-usc.ggr
 retribution-cycle-of-redemption.ggr

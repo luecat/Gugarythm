@@ -147,6 +147,7 @@ namespace Gugarhythm
         public const double SustainLookbackWindow = 9.0 / 60.0;
         public const double CommitGrace = .025;
         public const float LaneForgiveness = .85f;
+        const double StackedTimeTolerance = 1e-9;
         public bool JudgmentProtectionEnabled { get; set; } = true;
 
         readonly List<RuntimeNote> notes;
@@ -163,6 +164,7 @@ namespace Gugarhythm
         readonly Dictionary<int, Edge> matchedByNoteWorkspace = new();
         readonly List<Edge> matchedByInputWorkspace = new();
         readonly List<bool> hasMatchedInputWorkspace = new();
+        readonly Dictionary<int, Edge> registrationBestByNoteWorkspace = new();
         readonly List<int> seenInputStamps = new();
         readonly HashSet<int> seenNoteIndexes = new();
         readonly List<Edge> registrationWorkspace = new();
@@ -303,19 +305,8 @@ namespace Gugarhythm
                 for (var noteIndex = first; noteIndex < end; noteIndex++)
                 {
                     var note = indexedNotes[noteIndex];
-                    if (note.Grade != JudgmentGrade.Pending || IsContactNote(note) || note.Kind != input.Kind) continue;
-                    if (input.Kind != RuntimeNoteKind.Flick && !LaneMatches(note, input.Lane)) continue;
-                    var protectionLane = input.Lane;
-                    var eventTime = input.Kind == RuntimeNoteKind.Flick
-                        ? FlickIntersectionTime(input, note, out protectionLane)
-                        : input.Time;
-                    if (!eventTime.HasValue) continue;
-                    var grade = GradeFor(note, eventTime.Value - note.Time);
-                    if (grade == JudgmentGrade.Pending) continue;
-                    if (JudgmentProtectionEnabled &&
-                        IsProtectedCandidate(note, eventTime.Value, protectionLane)) continue;
-                    var spatial = Math.Abs(input.Lane - note.Lane);
-                    edgeWorkspace.Add(new Edge(inputIndex, note, eventTime.Value, grade, Math.Abs(eventTime.Value - note.Time), spatial));
+                    if (note.Kind != input.Kind || !TryCreateEdge(inputIndex, input, note, out var edge)) continue;
+                    edgeWorkspace.Add(edge);
                 }
             }
 
@@ -366,14 +357,62 @@ namespace Gugarhythm
                 TryAugment(inputOrderWorkspace[orderIndex]);
             }
 
+            registrationBestByNoteWorkspace.Clear();
             for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
-                if (hasMatchedInputWorkspace[inputIndex]) registrationWorkspace.Add(matchedByInputWorkspace[inputIndex]);
+            {
+                if (!hasMatchedInputWorkspace[inputIndex]) continue;
+                var matched = matchedByInputWorkspace[inputIndex];
+                var input = inputs[inputIndex];
+
+                // Hold terminals keep their authored release/flick semantics.
+                // They may be matched normally, but never seed or join a
+                // same-time stacked-note expansion.
+                if (matched.Note.IsHoldTerminal)
+                {
+                    registrationBestByNoteWorkspace[matched.Note.Index] = matched;
+                    continue;
+                }
+
+                var first = LowerBoundTime(discreteMissNotes, matched.Note.Time - StackedTimeTolerance);
+                var end = UpperBoundTime(discreteMissNotes, matched.Note.Time + StackedTimeTolerance);
+                for (var noteIndex = first; noteIndex < end; noteIndex++)
+                {
+                    var note = discreteMissNotes[noteIndex];
+                    if (note.IsHoldTerminal ||
+                        Math.Abs(note.Time - matched.Note.Time) > StackedTimeTolerance ||
+                        !TryCreateEdge(inputIndex, input, note, out var candidate)) continue;
+                    if (!registrationBestByNoteWorkspace.TryGetValue(candidate.Note.Index, out var best) ||
+                        CompareEdges(candidate, best) < 0)
+                        registrationBestByNoteWorkspace[candidate.Note.Index] = candidate;
+                }
+            }
+            foreach (var pair in registrationBestByNoteWorkspace)
+                registrationWorkspace.Add(pair.Value);
             StableSortRegistrationEdges(registrationWorkspace);
             for (var edgeIndex = 0; edgeIndex < registrationWorkspace.Count; edgeIndex++)
             {
                 var edge = registrationWorkspace[edgeIndex];
                 Register(edge.Note, edge.Grade, edge.EventTime - edge.Note.Time, output);
             }
+        }
+
+        bool TryCreateEdge(int inputIndex, InputToken input, RuntimeNote note, out Edge edge)
+        {
+            edge = default;
+            if (note.Grade != JudgmentGrade.Pending || IsContactNote(note)) return false;
+            if (input.Kind != RuntimeNoteKind.Flick && !LaneMatches(note, input.Lane)) return false;
+            var protectionLane = input.Lane;
+            var eventTime = input.Kind == RuntimeNoteKind.Flick
+                ? FlickIntersectionTime(input, note, out protectionLane)
+                : input.Time;
+            if (!eventTime.HasValue) return false;
+            var grade = GradeFor(note, eventTime.Value - note.Time);
+            if (grade == JudgmentGrade.Pending) return false;
+            if (JudgmentProtectionEnabled && IsProtectedCandidate(note, eventTime.Value, protectionLane)) return false;
+            var spatial = Math.Abs(input.Lane - note.Lane);
+            edge = new Edge(inputIndex, note, eventTime.Value, grade,
+                Math.Abs(eventTime.Value - note.Time), spatial);
+            return true;
         }
 
         bool TryAugment(int inputIndex)

@@ -108,11 +108,7 @@ public static class CreatePrototypeScene
         PlayerSettings.Android.targetArchitectures = AndroidArchitecture.ARM64;
         PlayerSettings.SetScriptingBackend(NamedBuildTarget.Android, ScriptingImplementation.IL2CPP);
         PlayerSettings.productName = "GUGArhythm";
-        PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
-        PlayerSettings.allowedAutorotateToPortrait = false;
-        PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
-        PlayerSettings.allowedAutorotateToLandscapeLeft = false;
-        PlayerSettings.allowedAutorotateToLandscapeRight = false;
+        ConfigureLandscapeAutorotation();
         var directory = "Builds";
         Directory.CreateDirectory(directory);
         var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
@@ -137,11 +133,7 @@ public static class CreatePrototypeScene
         PlayerSettings.SetApplicationIdentifier(NamedBuildTarget.iOS, "com.luecat.gugarhythm");
         PlayerSettings.SetScriptingBackend(NamedBuildTarget.iOS, ScriptingImplementation.IL2CPP);
         PlayerSettings.productName = "GUGArhythm";
-        PlayerSettings.defaultInterfaceOrientation = UIOrientation.LandscapeLeft;
-        PlayerSettings.allowedAutorotateToPortrait = false;
-        PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
-        PlayerSettings.allowedAutorotateToLandscapeLeft = false;
-        PlayerSettings.allowedAutorotateToLandscapeRight = false;
+        ConfigureLandscapeAutorotation();
         var report = BuildPipeline.BuildPlayer(new BuildPlayerOptions
         {
             scenes = PlayerBuildScenePaths(),
@@ -209,13 +201,38 @@ public static class CreatePrototypeScene
     {
         AssetDatabase.ImportAsset(ApplicationIconPath, ImportAssetOptions.ForceSynchronousImport);
         var icon = AssetDatabase.LoadAssetAtPath<Texture2D>(ApplicationIconPath);
-        if (icon == null) throw new System.Exception($"Android application icon not found: {ApplicationIconPath}");
+        if (icon == null) throw new System.Exception($"Application icon not found: {ApplicationIconPath}");
         var iconSizes = PlayerSettings.GetIconSizes(NamedBuildTarget.Android, IconKind.Application);
         var icons = new Texture2D[iconSizes.Length];
         for (var index = 0; index < icons.Length; index++) icons[index] = icon;
         PlayerSettings.SetIcons(NamedBuildTarget.Android, icons, IconKind.Application);
         ConfigureAndroidPlatformIcons(icon);
+        ConfigureIosPlatformIcons(icon);
         AssetDatabase.SaveAssets();
+    }
+
+    static void ConfigureIosPlatformIcons(Texture2D icon)
+    {
+        foreach (var kind in PlayerSettings.GetSupportedIconKinds(NamedBuildTarget.iOS))
+        {
+            var slots = PlayerSettings.GetPlatformIcons(NamedBuildTarget.iOS, kind);
+            for (var index = 0; index < slots.Length; index++)
+            {
+                var textures = new Texture2D[slots[index].maxLayerCount];
+                for (var layer = 0; layer < textures.Length; layer++) textures[layer] = icon;
+                slots[index].SetTextures(textures);
+            }
+            PlayerSettings.SetPlatformIcons(NamedBuildTarget.iOS, kind, slots);
+        }
+    }
+
+    static void ConfigureLandscapeAutorotation()
+    {
+        PlayerSettings.defaultInterfaceOrientation = UIOrientation.AutoRotation;
+        PlayerSettings.allowedAutorotateToLandscapeLeft = true;
+        PlayerSettings.allowedAutorotateToLandscapeRight = true;
+        PlayerSettings.allowedAutorotateToPortrait = false;
+        PlayerSettings.allowedAutorotateToPortraitUpsideDown = false;
     }
 
     static void ConfigureAndroidPlatformIcons(Texture2D icon)

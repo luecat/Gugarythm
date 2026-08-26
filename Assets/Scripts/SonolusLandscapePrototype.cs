@@ -63,11 +63,11 @@ namespace Gugarhythm
     {
         public static void Lock()
         {
+            Screen.orientation = ScreenOrientation.AutoRotation;
             Screen.autorotateToPortrait = false;
             Screen.autorotateToPortraitUpsideDown = false;
-            Screen.autorotateToLandscapeLeft = false;
-            Screen.autorotateToLandscapeRight = false;
-            Screen.orientation = ScreenOrientation.LandscapeLeft;
+            Screen.autorotateToLandscapeLeft = true;
+            Screen.autorotateToLandscapeRight = true;
         }
     }
 
@@ -4367,11 +4367,11 @@ namespace Gugarhythm
 #if UNITY_EDITOR
             var path = UnityEditor.EditorUtility.OpenFilePanel("匯入 GGR", "", "ggr");
             if (!string.IsNullOrEmpty(path)) StartCoroutine(ImportPath(path));
-#elif UNITY_ANDROID
+#elif UNITY_ANDROID || UNITY_IOS
             NativeChartPicker.OpenFile();
             SetStatus("請在系統檔案選擇器選取 GGR…");
 #else
-            SetStatus("目前請將譜面放入 StreamingAssets，或使用 Android 匯入。");
+            SetStatus("目前請將譜面放入 StreamingAssets，或使用 Android／iOS 匯入。");
 #endif
         }
 
@@ -4386,7 +4386,7 @@ namespace Gugarhythm
 
         void PollNativeImport()
         {
-#if UNITY_ANDROID && !UNITY_EDITOR
+#if (UNITY_ANDROID || UNITY_IOS) && !UNITY_EDITOR
             if (loading) return;
             var result = NativeChartPicker.ConsumeResult();
             if (!string.IsNullOrEmpty(result)) StartCoroutine(ImportPaths(NativeChartPicker.SplitResultPaths(result)));

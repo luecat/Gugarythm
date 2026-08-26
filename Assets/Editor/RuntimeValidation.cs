@@ -6,6 +6,7 @@ using System.Linq;
 using System.Security.Cryptography;
 using Gugarhythm;
 using UnityEditor;
+using UnityEditor.Build;
 using Unity.Profiling;
 using UnityEngine;
 using UnityEngine.UI;
@@ -42,6 +43,32 @@ public static class RuntimeValidation
         ValidateJudgmentIndexedEquivalence();
         Debug.Log("GUGARHYTHM_FRAME_PACING_FIXES_VALIDATION_OK");
     }
+
+    [MenuItem("Gugarhythm/Validate Judgment Rules")]
+    public static void ValidateJudgmentRulesOnly()
+    {
+        ValidateJudgmentRules();
+        ValidateJudgmentIndexedEquivalence();
+        Debug.Log("GUGARHYTHM_JUDGMENT_RULES_VALIDATION_OK");
+    }
+
+    [MenuItem("Gugarhythm/Validate Bundled Charts")]
+    public static void ValidateBundledChartsOnly()
+    {
+        ValidateBundledChartManifest();
+    }
+
+    [MenuItem("Gugarhythm/Validate iOS Presentation")]
+    public static void ValidateIosPresentationOnly()
+    {
+        ValidateIosApplicationIcon();
+        ValidateLandscapeAutorotation();
+        Debug.Log("GUGARHYTHM_IOS_PRESENTATION_VALIDATION_OK");
+    }
+
+    public static void ValidateIosApplicationIconOnly() => ValidateIosApplicationIcon();
+
+    public static void ValidateLandscapeAutorotationOnly() => ValidateLandscapeAutorotation();
 
     [MenuItem("Gugarhythm/Validate Repository Cleanup")]
     public static void ValidateRepositoryCleanup()
@@ -83,6 +110,8 @@ public static class RuntimeValidation
         ValidateLibrarySelectionRestore();
         ValidateStartupSplashConfiguration();
         ValidateBrandAndPresentationContracts();
+        ValidateIosApplicationIcon();
+        ValidateLandscapeAutorotation();
         ValidateStartupBuildSceneOrder();
         ValidateBundledChartManifest();
         ValidateUscSlideRoleClassification();
@@ -1360,6 +1389,66 @@ public static class RuntimeValidation
         }
     }
 
+    static void ValidateIosApplicationIcon()
+    {
+        var configure = typeof(CreatePrototypeScene).GetMethod("ConfigureApplicationIcon",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(configure != null, "The player build must expose application icon configuration for validation");
+        configure.Invoke(null, null);
+
+        var expected = AssetDatabase.LoadAssetAtPath<Texture2D>("Assets/Art/AppIcon/gugarhythm-icon.png");
+        Require(expected != null, "The GUGArhythm application icon asset must exist");
+        var kinds = PlayerSettings.GetSupportedIconKinds(NamedBuildTarget.iOS);
+        Require(kinds.Length > 0, "Unity must expose iOS platform icon kinds");
+        var slots = kinds.SelectMany(kind => PlayerSettings.GetPlatformIcons(NamedBuildTarget.iOS, kind)).ToArray();
+        Require(slots.Length > 0, "Unity must expose iPhone, iPad, and App Store icon slots");
+        Require(slots.All(slot => slot.GetTextures().Length == slot.maxLayerCount &&
+                slot.GetTextures().All(texture => texture == expected)),
+            "Every iOS application icon slot must use the GUGArhythm icon asset");
+    }
+
+    static void ValidateLandscapeAutorotation()
+    {
+        var configure = typeof(CreatePrototypeScene).GetMethod("ConfigureLandscapeAutorotation",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        Require(configure != null, "Player builds must expose landscape autorotation configuration for validation");
+        configure.Invoke(null, null);
+        Require(PlayerSettings.defaultInterfaceOrientation == UIOrientation.AutoRotation &&
+                !PlayerSettings.allowedAutorotateToPortrait &&
+                !PlayerSettings.allowedAutorotateToPortraitUpsideDown &&
+                PlayerSettings.allowedAutorotateToLandscapeLeft &&
+                PlayerSettings.allowedAutorotateToLandscapeRight,
+            $"Player settings must allow both landscape orientations while rejecting portrait rotation; " +
+            $"orientation={PlayerSettings.defaultInterfaceOrientation} portrait={PlayerSettings.allowedAutorotateToPortrait} " +
+            $"portraitUpsideDown={PlayerSettings.allowedAutorotateToPortraitUpsideDown} " +
+            $"landscapeLeft={PlayerSettings.allowedAutorotateToLandscapeLeft} " +
+            $"landscapeRight={PlayerSettings.allowedAutorotateToLandscapeRight}");
+
+        var originalOrientation = Screen.orientation;
+        var originalPortrait = Screen.autorotateToPortrait;
+        var originalPortraitUpsideDown = Screen.autorotateToPortraitUpsideDown;
+        var originalLandscapeLeft = Screen.autorotateToLandscapeLeft;
+        var originalLandscapeRight = Screen.autorotateToLandscapeRight;
+        try
+        {
+            LandscapeOrientation.Lock();
+            Require(!Screen.autorotateToPortrait && !Screen.autorotateToPortraitUpsideDown &&
+                    Screen.autorotateToLandscapeLeft && Screen.autorotateToLandscapeRight,
+                $"Runtime must auto-rotate between both landscape orientations while rejecting portrait rotation; " +
+                $"portrait={Screen.autorotateToPortrait} " +
+                $"portraitUpsideDown={Screen.autorotateToPortraitUpsideDown} " +
+                $"landscapeLeft={Screen.autorotateToLandscapeLeft} landscapeRight={Screen.autorotateToLandscapeRight}");
+        }
+        finally
+        {
+            Screen.orientation = originalOrientation;
+            Screen.autorotateToPortrait = originalPortrait;
+            Screen.autorotateToPortraitUpsideDown = originalPortraitUpsideDown;
+            Screen.autorotateToLandscapeLeft = originalLandscapeLeft;
+            Screen.autorotateToLandscapeRight = originalLandscapeRight;
+        }
+    }
+
     static void ValidateStartupBuildSceneOrder()
     {
         var method = typeof(CreatePrototypeScene).GetMethod("PlayerBuildScenePaths",
@@ -1379,7 +1468,7 @@ public static class RuntimeValidation
             .Select(line => line.Trim())
             .Where(line => line.Length > 0 && !line.StartsWith("#", StringComparison.Ordinal))
             .ToArray();
-        Require(names.Length == 14, $"Expected 14 bundled GGR charts, got {names.Length}");
+        Require(names.Length == 15, $"Expected 15 bundled GGR charts including Test, got {names.Length}");
         Require(names.Distinct(StringComparer.OrdinalIgnoreCase).Count() == names.Length,
             "Bundled GGR manifest must not contain duplicate files");
         foreach (var name in names)
@@ -1389,6 +1478,30 @@ public static class RuntimeValidation
             Require(File.Exists(Path.Combine(Application.dataPath, "StreamingAssets/BundledCharts", name)),
                 "Bundled GGR file is missing: " + name);
         }
+
+        const string testName = "Test.ggr";
+        Require(names.Contains(testName, StringComparer.Ordinal), "Bundled GGR manifest must include Test.ggr");
+        var testPath = Path.Combine(Application.dataPath, "StreamingAssets/BundledCharts", testName);
+        var imported = new GgrChartImporter().Import(testName, File.ReadAllBytes(testPath));
+        Require(imported.Success && imported.Chart != null, "Test.ggr must import through the production GGR importer");
+        Require(imported.Chart.Title == "Test", $"Expected bundled test chart title Test, got {imported.Chart.Title}");
+        var stacked = imported.Chart.Notes
+            .Where(note => Math.Abs(note.Beat - 4d) < 1e-9 && note.Kind == RuntimeNoteKind.Tap)
+            .ToArray();
+        Require(stacked.Length == 10 && stacked.Count(note => note.SlideNodeRole == SlideNodeRole.Start &&
+                note.HoldRootIndex == note.Index && !note.IsHoldTerminal) == 5,
+            "Test chart beat 4 must stack five real Hold heads with five Tap notes");
+        var stackedScore = new ScoreState();
+        var stackedEngine = new JudgmentEngine(imported.Chart.Notes, stackedScore);
+        var stackedTime = stacked[0].Time;
+        stackedEngine.Process(stackedTime,
+            new[] { new InputToken(1, RuntimeNoteKind.Tap, stackedTime, -4) }, Array.Empty<ActiveContact>());
+        Require(stacked.All(note => note.Grade == JudgmentGrade.Perfect) &&
+                stackedScore.Perfect == 10 && stackedScore.Combo == 10,
+            $"One Tap must judge all ten stacked Test chart notes as independent Perfects; " +
+            $"perfect={stackedScore.Perfect} combo={stackedScore.Combo} notes=" +
+            string.Join(",", stacked.Select(note =>
+                $"{note.Index}:{note.Grade}:lane={note.Lane}:size={note.Size}:head={note.HoldRootIndex == note.Index}")));
         Debug.Log("GUGARHYTHM_BUNDLED_CHARTS_VALIDATION_OK count=" + names.Length);
     }
 
@@ -3011,15 +3124,81 @@ public static class RuntimeValidation
         engine.Process(2, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2, -2), new InputToken(2, RuntimeNoteKind.Tap, 2, 2) }, Array.Empty<ActiveContact>());
         Require(left.Grade == JudgmentGrade.Perfect && right.Grade == JudgmentGrade.Perfect, "Batched multi-touch matching failed");
 
-        var overlapA = Note(20, 2.5, 1);
-        var overlapB = Note(21, 2.5, 1);
-        engine = new JudgmentEngine(new[] { overlapA, overlapB }, new ScoreState());
-        engine.Process(2.5, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.5, 1) }, Array.Empty<ActiveContact>());
-        Require((overlapA.Grade == JudgmentGrade.Perfect) != (overlapB.Grade == JudgmentGrade.Perfect),
-            "One discrete activation must not consume two geometrically overlapping notes");
+        var stackedNotes = Enumerable.Range(0, 10)
+            .Select(index => Note(20 + index, 2.5, index % 2 == 0 ? -.35f : .35f))
+            .ToArray();
+        for (var index = 0; index < stackedNotes.Length; index++)
+            stackedNotes[index].Size = .35f + index * .1f;
+        var nearbyNote = Note(30, 2.55, 0);
+        var stackedScore = new ScoreState();
+        engine = new JudgmentEngine(stackedNotes.Append(nearbyNote), stackedScore);
+        engine.Process(2.5, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.5, 0) }, Array.Empty<ActiveContact>());
+        Require(stackedNotes.All(note => note.Grade == JudgmentGrade.Perfect) &&
+                stackedScore.Perfect == 10 && stackedScore.Combo == 10,
+            "One discrete activation must consume every same-time note whose playable span contains the pressed lane");
+        Require(nearbyNote.Grade == JudgmentGrade.Pending,
+            "A stacked activation must not consume a nearby note at a different judgment time");
 
-        overlapA = Note(22, 2.6, 1);
-        overlapB = Note(23, 2.6, 1);
+        var stackedTap = Note(31, 2.55, 0);
+        var stackedFlick = Note(32, 2.55, 0);
+        stackedFlick.Kind = RuntimeNoteKind.Flick;
+        engine = new JudgmentEngine(new[] { stackedTap, stackedFlick }, new ScoreState());
+        engine.Process(2.55, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.55, 0) }, Array.Empty<ActiveContact>());
+        Require(stackedTap.Grade == JudgmentGrade.Perfect && stackedFlick.Grade == JudgmentGrade.Perfect,
+            "A press must consume every same-time discrete note at that lane regardless of note kind");
+
+        var flickAnchor = Note(330, 2.56, 0);
+        flickAnchor.Kind = RuntimeNoteKind.Flick;
+        var stackedTapFromFlick = Note(331, 2.56, 0);
+        engine = new JudgmentEngine(new[] { flickAnchor, stackedTapFromFlick }, new ScoreState());
+        engine.Process(2.56, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Flick, 2.56, 0, 0, 2.56),
+        }, Array.Empty<ActiveContact>());
+        Require(flickAnchor.Grade == JudgmentGrade.Perfect && stackedTapFromFlick.Grade == JudgmentGrade.Perfect,
+            "A non-terminal Flick must expand into other same-time discrete notes at that lane");
+
+        var stackedHoldHead = Note(332, 2.565, 0);
+        stackedHoldHead.HoldRootIndex = stackedHoldHead.Index;
+        stackedHoldHead.SlideNodeRole = SlideNodeRole.Start;
+        stackedHoldHead.SlideJudgeMode = SlideJudgeMode.Normal;
+        stackedHoldHead.HoldCheckpointSource = HoldCheckpointSource.None;
+        stackedHoldHead.IsHoldTerminal = false;
+        var stackedTapBesideHead = Note(333, 2.565, 0);
+        engine = new JudgmentEngine(new[] { stackedHoldHead, stackedTapBesideHead }, new ScoreState());
+        engine.Process(2.565, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.565, 0) }, Array.Empty<ActiveContact>());
+        Require(stackedHoldHead.Grade == JudgmentGrade.Perfect && stackedTapBesideHead.Grade == JudgmentGrade.Perfect,
+            "A real non-terminal Hold head must participate in same-time stacked-note judgment");
+
+        stackedTap = Note(33, 2.57, 0);
+        var stackedFlickTail = Note(34, 2.57, 0);
+        stackedFlickTail.Kind = RuntimeNoteKind.Flick;
+        stackedFlickTail.IsHoldTerminal = true;
+        stackedFlickTail.HoldCheckpointSource = HoldCheckpointSource.Tail;
+        stackedFlickTail.SlideNodeRole = SlideNodeRole.End;
+        stackedFlickTail.SlideJudgeMode = SlideJudgeMode.Flick;
+        engine = new JudgmentEngine(new[] { stackedTap, stackedFlickTail }, new ScoreState());
+        engine.Process(2.57, new[] { new InputToken(1, RuntimeNoteKind.Tap, 2.57, 0) }, Array.Empty<ActiveContact>());
+        Require(stackedTap.Grade == JudgmentGrade.Perfect && stackedFlickTail.Grade == JudgmentGrade.Pending,
+            "A stacked Tap must not bypass the Flick gesture required by a Hold terminal");
+
+        stackedTap = Note(35, 2.58, 0);
+        stackedFlickTail = Note(36, 2.58, 0);
+        stackedFlickTail.Kind = RuntimeNoteKind.Flick;
+        stackedFlickTail.IsHoldTerminal = true;
+        stackedFlickTail.HoldCheckpointSource = HoldCheckpointSource.Tail;
+        stackedFlickTail.SlideNodeRole = SlideNodeRole.End;
+        stackedFlickTail.SlideJudgeMode = SlideJudgeMode.Flick;
+        engine = new JudgmentEngine(new[] { stackedTap, stackedFlickTail }, new ScoreState());
+        engine.Process(2.58, new[]
+        {
+            new InputToken(1, RuntimeNoteKind.Flick, 2.58, 0, 0, 2.58),
+        }, Array.Empty<ActiveContact>());
+        Require(stackedFlickTail.Grade == JudgmentGrade.Perfect && stackedTap.Grade == JudgmentGrade.Pending,
+            "A correctly Flicked Hold terminal must resolve without expanding into other stacked notes");
+
+        var overlapA = Note(37, 2.6, 1);
+        var overlapB = Note(38, 2.6, 1);
         engine = new JudgmentEngine(new[] { overlapA, overlapB }, new ScoreState());
         engine.Process(2.6, new[]
         {
@@ -3342,10 +3521,10 @@ public static class RuntimeValidation
             new InputToken(7, RuntimeNoteKind.Tap, 20, 1),
             new InputToken(7, RuntimeNoteKind.Tap, 20, 0),
         }, Array.Empty<ActiveContact>());
-        RequireJudgmentEvents(events, (240, JudgmentGrade.Perfect, 0));
-        Require(forgivenessOnly.Grade == JudgmentGrade.Pending && authoredScore.Combo == 1 &&
-                authoredScore.MaxCombo == 1,
-            "An authored-span input must outrank the same finger's forgiveness-only activation");
+        RequireJudgmentEvents(events,
+            (240, JudgmentGrade.Perfect, 0), (241, JudgmentGrade.Perfect, 0));
+        Require(authoredScore.Combo == 2 && authoredScore.MaxCombo == 2,
+            "A same-time forgiveness-overlap note must join the authored-span note in the stacked activation");
 
         var flick = Note(250, 30, 0);
         flick.Kind = RuntimeNoteKind.Flick;
