@@ -115,56 +115,14 @@ namespace Gugarhythm
             VisualEndBeat = nodes[^1].Beat;
             VisualStartTime = nodes[0].Time;
             VisualEndTime = nodes[^1].Time;
-            HasPlayableRange = false;
-            PlayableStartBeat = null;
-            PlayableEndBeat = null;
-            PlayableStartTime = null;
-            PlayableEndTime = null;
-
-            if (PreservesLegacyCheckpointSemantics)
-            {
-                HasPlayableRange = true;
-                PlayableStartBeat = VisualStartBeat;
-                PlayableEndBeat = VisualEndBeat;
-                PlayableStartTime = VisualStartTime;
-                PlayableEndTime = VisualEndTime;
-            }
-            else
-            {
-                var hasJudgedNode = false;
-                var startBeat = double.PositiveInfinity;
-                var endBeat = double.NegativeInfinity;
-                var startTime = double.PositiveInfinity;
-                var endTime = double.NegativeInfinity;
-                foreach (var node in semanticNodes)
-                {
-                    if (!node.Judged) continue;
-                    hasJudgedNode = true;
-                    startBeat = Math.Min(startBeat, node.Beat);
-                    endBeat = Math.Max(endBeat, node.Beat);
-                    startTime = Math.Min(startTime, node.Time);
-                    endTime = Math.Max(endTime, node.Time);
-                }
-                if (hasJudgedNode)
-                {
-                    // Judgment visibility and Hold duration are independent.
-                    // Once a path contains any authored judgment, runtime Auto
-                    // checkpoints sustain the complete visual path, including
-                    // a headless lead-in or an unjudged visual tail.
-                    startBeat = VisualStartBeat;
-                    startTime = VisualStartTime;
-                    endBeat = VisualEndBeat;
-                    endTime = VisualEndTime;
-                }
-                HasPlayableRange = hasJudgedNode;
-                if (hasJudgedNode)
-                {
-                    PlayableStartBeat = startBeat;
-                    PlayableEndBeat = endBeat;
-                    PlayableStartTime = startTime;
-                    PlayableEndTime = endTime;
-                }
-            }
+            // A connector path is a Hold regardless of whether any authored
+            // node has its own judgment. judgeType only controls explicit node
+            // judgments; runtime checkpoints sustain the complete Hold path.
+            HasPlayableRange = true;
+            PlayableStartBeat = VisualStartBeat;
+            PlayableEndBeat = VisualEndBeat;
+            PlayableStartTime = VisualStartTime;
+            PlayableEndTime = VisualEndTime;
         }
     }
 

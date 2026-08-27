@@ -696,17 +696,16 @@ public static class RuntimeValidation
             return false;
         }
 
-        bool HasNullDouble(RuntimeHoldPath path, string propertyName)
-        {
-            var property = typeof(RuntimeHoldPath).GetProperty(propertyName);
-            return property != null && property.GetValue(path) == null;
-        }
-
         var allNone = Chain(
             Node(2000, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
             Node(2001, 8, SlideNodeRole.End, SlideJudgeMode.None, false, 2));
         HoldCheckpointBuilder.Apply(allNone, beat => beat);
         var allNoneAutos = AutoBeats(allNone);
+        var expectedAllNoneAutos = Enumerable.Range(1, 15).Select(index => index * .5d).ToArray();
+        var allNoneScore = new ScoreState();
+        var allNoneEngine = new JudgmentEngine(allNone.Notes, allNoneScore);
+        allNoneEngine.ProcessInto(8, Array.Empty<InputToken>(), Array.Empty<ActiveContact>(),
+            Array.Empty<ContactPathSegment>(), true, new List<JudgmentEvent>());
 
         var noneLead = Chain(
             Node(2010, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
@@ -768,8 +767,9 @@ public static class RuntimeValidation
                   $"judgedHeadToNoneEndPlayable={judgedHeadToNoneEnd.PlayableCount} " +
                   $"judgedHeadToNoneEndAuto={judgedHeadToNoneEndAutos.Length}");
 
-        Require(allNoneAutos.Length == 0 && allNone.PlayableCount == 0,
-            $"An explicit all-none Hold must have no playable range or Auto checkpoints, got Auto={allNoneAutos.Length}");
+        Require(allNoneAutos.SequenceEqual(expectedAllNoneAutos) && allNone.PlayableCount == 15 &&
+                allNoneScore.Perfect == 15 && allNoneScore.Combo == 15,
+            $"Every Hold must create Auto checkpoints even when all authored nodes use judgeType:none, got {string.Join(",", allNoneAutos)}");
         Require(noneLeadAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2.5d, 3d, 3.5d }) && noneLead.PlayableCount == 8,
             $"A headless Hold with judged nodes must create Auto checkpoints across its complete visual path, got {string.Join(",", noneLeadAutos)}");
         Require(repeatedAutos.SequenceEqual(new[] { .5d, 1.5d }) && repeatedAutoDuplicates == 0 && authoredCollisionCount == 0,
@@ -794,9 +794,11 @@ public static class RuntimeValidation
         var allNonePath = allNone.HoldPaths.Single();
         var noneLeadPath = noneLead.HoldPaths.Single();
         var legacyPath = legacy.HoldPaths.Single();
-        Require(TryReadBool(allNonePath, "HasPlayableRange", out var allNoneHasRange) && !allNoneHasRange &&
-                HasNullDouble(allNonePath, "PlayableStartBeat") && HasNullDouble(allNonePath, "PlayableEndBeat") &&
-                HasNullDouble(allNonePath, "PlayableStartTime") && HasNullDouble(allNonePath, "PlayableEndTime") &&
+        Require(TryReadBool(allNonePath, "HasPlayableRange", out var allNoneHasRange) && allNoneHasRange &&
+                TryReadDouble(allNonePath, "PlayableStartBeat", out var allNoneStartBeat) && Math.Abs(allNoneStartBeat) < 1e-9 &&
+                TryReadDouble(allNonePath, "PlayableEndBeat", out var allNoneEndBeat) && Math.Abs(allNoneEndBeat - 8) < 1e-9 &&
+                TryReadDouble(allNonePath, "PlayableStartTime", out var allNoneStartTime) && Math.Abs(allNoneStartTime) < 1e-9 &&
+                TryReadDouble(allNonePath, "PlayableEndTime", out var allNoneEndTime) && Math.Abs(allNoneEndTime - 8) < 1e-9 &&
                 TryReadBool(noneLeadPath, "HasPlayableRange", out var noneLeadHasRange) && noneLeadHasRange &&
                 TryReadDouble(noneLeadPath, "VisualStartBeat", out var visualStartBeat) && Math.Abs(visualStartBeat) < 1e-9 &&
                 TryReadDouble(noneLeadPath, "VisualEndBeat", out var visualEndBeat) && Math.Abs(visualEndBeat - 4) < 1e-9 &&
@@ -809,7 +811,7 @@ public static class RuntimeValidation
                 TryReadBool(legacyPath, "HasPlayableRange", out var legacyHasRange) && legacyHasRange &&
                 TryReadDouble(legacyPath, "PlayableStartBeat", out var legacyStartBeat) && Math.Abs(legacyStartBeat) < 1e-9 &&
                 TryReadDouble(legacyPath, "PlayableEndBeat", out var legacyEndBeat) && Math.Abs(legacyEndBeat - 2) < 1e-9,
-            "RuntimeHoldPath must expose visual/playable beat/time bounds and legacy-compatible HasPlayableRange");
+            "Every valid Hold path must expose complete visual/playable beat and time bounds");
 
         var attachBounds = Chain(
             Node(2060, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, -2),
@@ -892,6 +894,16 @@ public static class RuntimeValidation
         HoldCheckpointBuilder.Apply(nonInvertibleHeadless, beat => beat);
         var nonInvertibleHeadlessAutos = AutoBeats(nonInvertibleHeadless);
 
+        var nonInvertibleAllNone = Chain(
+            Node(2140, 0, SlideNodeRole.Start, SlideJudgeMode.None, false, 0),
+            Node(2141, 4, SlideNodeRole.End, SlideJudgeMode.None, false, 4));
+        nonInvertibleAllNone.DefaultTimeScaleGroup = "reverse-all-none";
+        nonInvertibleAllNone.TimeScaleGroups["reverse-all-none"] =
+            new RuntimeTimeScaleGroup("reverse-all-none", new[] { (0d, -1d) });
+        foreach (var note in nonInvertibleAllNone.Notes) note.TimeScaleGroup = "reverse-all-none";
+        HoldCheckpointBuilder.Apply(nonInvertibleAllNone, beat => beat);
+        var nonInvertibleAllNoneAutos = AutoBeats(nonInvertibleAllNone);
+
         var invalidLegacy = new RuntimeChart();
         var invalidLegacyHead = Node(2110, 0, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true);
         var invalidLegacyLeft = Node(2111, 2, SlideNodeRole.Unspecified, SlideJudgeMode.Unspecified, true, -1);
@@ -910,6 +922,7 @@ public static class RuntimeValidation
                   $"shiftPlayableTime={shiftedPath.PlayableStartTime}:{shiftedPath.PlayableEndTime} " +
                   $"invalidAllNoneAuto={invalidAllNoneAutos.Length} invalidNoneLeadAuto={invalidNoneLeadAutos.Length} " +
                   $"invalidNonEndAuto={invalidNonEndAutos.Length} nonInvertibleAuto={nonInvertibleAutos.Length} " +
+                  $"nonInvertibleAllNoneAuto={nonInvertibleAllNoneAutos.Length} " +
                   $"invalidLegacyAuto={invalidLegacyAutos.Length} " +
                   $"invalidLeadTickTail={invalidLeadTick.IsHoldTerminal} invalidLeadEndTail={invalidLeadEnd.IsHoldTerminal} " +
                   $"invalidNonEndTail={invalidNonEndLeft.IsHoldTerminal || invalidNonEndRight.IsHoldTerminal}");
@@ -947,6 +960,9 @@ public static class RuntimeValidation
             "A unique time-monotonic explicit chain must retain authored-bound Auto checkpoints and per-segment ease even when visual time is non-invertible");
         Require(nonInvertibleHeadlessAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2d, 2.5d, 3d, 3.5d }),
             $"A headless fallback Hold must sustain checkpoints across its complete visual path, got {string.Join(",", nonInvertibleHeadlessAutos)}");
+        Require(nonInvertibleAllNoneAutos.SequenceEqual(new[] { .5d, 1d, 1.5d, 2d, 2.5d, 3d, 3.5d }) &&
+                nonInvertibleAllNone.PlayableCount == 7,
+            $"An all-none fallback Hold must retain checkpoints across its complete visual path, got {string.Join(",", nonInvertibleAllNoneAutos)}");
         Require(invalidLegacyAutos.SequenceEqual(new[] { .5d, 1d, 1.5d }),
             "An invalid all-Unspecified topology must retain legacy checkpoint fallback behavior");
     }

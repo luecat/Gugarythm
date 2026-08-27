@@ -336,9 +336,9 @@ namespace Gugarhythm
     }
 
     /// <summary>
-    /// Adds runtime-only eighth-note checkpoints to connected Hold paths. Authored
-    /// Sustain mids remain separate checkpoints; judged terminals remain
-    /// contact/flick checkpoints while unjudged terminals stay visual only.
+    /// Adds runtime-only eighth-note checkpoints to every connected Hold path.
+    /// Authored Sustain mids remain separate checkpoints; judgeType controls
+    /// explicit node judgments without disabling the Hold's runtime checkpoints.
     /// </summary>
     public static class HoldCheckpointBuilder
     {
@@ -423,12 +423,8 @@ namespace Gugarhythm
                 }
                 else if (hasSemanticFallback)
                 {
-                    if (!TryGetPlayableBeatBounds(semanticFallback.SemanticNodes,
-                        out playableStartBeat, out playableEndBeat)) continue;
-                    // A valid semantic fallback still represents one complete
-                    // visual Hold. Once any authored node is judged, sustain
-                    // checkpoints cover the geometry head-to-tail just like a
-                    // RuntimeHoldPath, including an unjudged/headless lead-in.
+                    // A valid linear fallback still represents one complete
+                    // Hold even when every authored node uses judgeType:none.
                     playableStartBeat = semanticFallback.Nodes[0].Beat;
                     playableEndBeat = semanticFallback.Nodes[^1].Beat;
                 }
@@ -595,20 +591,6 @@ namespace Gugarhythm
             orderedNodes = null;
             orderedConnectors = null;
             return false;
-        }
-
-        static bool TryGetPlayableBeatBounds(IReadOnlyList<RuntimeNote> semanticNodes,
-            out double playableStartBeat, out double playableEndBeat)
-        {
-            playableStartBeat = double.PositiveInfinity;
-            playableEndBeat = double.NegativeInfinity;
-            foreach (var node in semanticNodes)
-            {
-                if (!node.Judged) continue;
-                playableStartBeat = Math.Min(playableStartBeat, node.Beat);
-                playableEndBeat = Math.Max(playableEndBeat, node.Beat);
-            }
-            return double.IsFinite(playableStartBeat) && double.IsFinite(playableEndBeat);
         }
 
         static List<RuntimeNote> CollectSemanticNodes(RuntimeChart chart, IReadOnlyList<RuntimeNote> geometryNodes)
