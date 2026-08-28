@@ -42,6 +42,7 @@ namespace Gugarhythm
         const string DifficultyTagsFile = "difficulty-tags.json";
 
         static string Root => Path.Combine(Application.persistentDataPath, "ChartLibrary");
+        internal static string StorageDirectoryPath => Root;
         static string ManifestPath => Path.Combine(Root, ManifestFile);
         static string DifficultyTagsPath => Path.Combine(Root, DifficultyTagsFile);
 

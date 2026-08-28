@@ -557,7 +557,29 @@ namespace Gugarhythm
         Text resumeCountdownLabel;
         Text pauseTitle;
         Button startButton;
+        Button localLibrarySourceButton;
+        Button onlineLibrarySourceButton;
+        Button importLibraryButton;
+        Button refreshRemoteLibraryButton;
+        Button downloadRemoteChartButton;
         LocalChartEntry selectedLibraryEntry;
+        ChartLibrarySource librarySource = ChartLibrarySource.Local;
+        IChartVaultClient chartVaultClient;
+        RemoteChartCatalogCache remoteCatalogCache;
+        RemoteChartDownloadService remoteChartDownloadService;
+        RemoteChartCatalog remoteCatalog;
+        RemoteChartSummary selectedRemoteChart;
+        Texture2D remoteCoverTexture;
+        ChartLibrarySort remoteLibrarySort = ChartLibrarySort.Title;
+        bool remoteLibrarySortAscending = true;
+        bool remoteLibraryScrollPositionInitialized;
+        bool remoteCatalogCacheLoaded;
+        bool remoteCatalogRequested;
+        bool remoteCatalogLoading;
+        bool remoteChartDownloading;
+        bool destroying;
+        int remoteOperationGeneration;
+        int remoteCoverGeneration;
         LocalChartEntry chartEditorEntry;
         string selectedDifficultyName = "";
         string pendingDifficultyTagDelete;
@@ -776,6 +798,17 @@ namespace Gugarhythm
             fastLateDisplayEnabled = PlayerPrefs.GetInt(FastLateDisplayPreferenceKey, 1) != 0;
             autoPlayEnabled = PlayerPrefs.GetInt(AutoPlayPreferenceKey, 0) != 0;
             LibrarySortPreferences.Load(out librarySort, out librarySortAscending);
+            var chartVaultStorageRoot = LocalChartLibrary.StorageDirectoryPath;
+            chartVaultClient = new ChartVaultClient();
+            remoteCatalogCache = new RemoteChartCatalogCache(
+                Path.Combine(chartVaultStorageRoot, "chart-vault-public-catalog.json"));
+            remoteChartDownloadService = new RemoteChartDownloadService(
+                chartVaultClient,
+                new PhysicalChartVaultFileStore(),
+                new GgrChartImporter(),
+                new LocalChartLibraryGateway(),
+                new RemoteChartLinkStore(Path.Combine(chartVaultStorageRoot, "chart-vault-links.json")),
+                () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             audioOffsetSeconds = GameplayTimingPreferences.LoadDeviceOffset();
             settingsDelayOffsetSeconds = audioOffsetSeconds;
 #if UNITY_EDITOR || UNITY_STANDALONE
@@ -803,7 +836,7 @@ namespace Gugarhythm
                 settingsPanel.gameObject.SetActive(false);
                 RestoreLibrarySelection();
                 RefreshLibraryUI();
-                startButton.interactable = ShouldEnableLibraryStartButton(selectedLibraryEntry != null);
+                startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
                 yield break;
             }
 
@@ -875,7 +908,11 @@ namespace Gugarhythm
             return true;
         }
 
-        static bool ShouldEnableLibraryStartButton(bool hasSelection) => hasSelection;
+        internal static bool ShouldFetchRemoteCatalogOnSourceChange(ChartLibrarySource source,
+            bool alreadyRequested) => source == ChartLibrarySource.Online && !alreadyRequested;
+
+        internal static bool ShouldEnableLibraryStartButton(ChartLibrarySource source,
+            bool hasLocalSelection) => source == ChartLibrarySource.Local && hasLocalSelection;
 
         IEnumerator LoadGameplaySelection(LocalChartEntry entry, byte[] bytes)
         {
@@ -920,6 +957,9 @@ namespace Gugarhythm
 
         void OnDestroy()
         {
+            destroying = true;
+            remoteOperationGeneration++;
+            remoteCoverGeneration++;
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
             UnsubscribeTouchCallbacks();
             presentationClock.Invalidate();
@@ -933,6 +973,7 @@ namespace Gugarhythm
             gpuRibbonRenderer?.Dispose();
             gpuRibbonRenderer = null;
             if (detailCoverTexture != null) Destroy(detailCoverTexture);
+            if (remoteCoverTexture != null) Destroy(remoteCoverTexture);
             if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
         }
 
@@ -1525,6 +1566,7 @@ namespace Gugarhythm
         {
             if (GugarhythmSceneRouter.IsLibrary)
             {
+                if (librarySource != ChartLibrarySource.Local) return;
                 if (loading || selectedLibraryEntry == null) return;
                 if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
                 {
@@ -3540,14 +3582,22 @@ namespace Gugarhythm
 
             var brand = Label("GUGARHYTHM", library, 19); brand.color = new Color(.68f, .68f, .68f); brand.alignment = TextAnchor.MiddleLeft; brand.rectTransform.sizeDelta = new Vector2(260, 36); PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -34));
             var heading = Label("譜面保管庫", library, 30); heading.alignment = TextAnchor.MiddleLeft; heading.rectTransform.sizeDelta = new Vector2(270, 50); PinToAnchor(heading.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -74));
+            localLibrarySourceButton = MakeFlatButton("本機", library, Vector2.zero,
+                () => SelectLibrarySource(ChartLibrarySource.Local), new Vector2(146, 42), new Color(.10f, .34f, .50f));
+            PinToAnchor(localLibrarySourceButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
+                new Vector2(34, -132));
+            onlineLibrarySourceButton = MakeFlatButton("線上", library, Vector2.zero,
+                () => SelectLibrarySource(ChartLibrarySource.Online), new Vector2(146, 42), new Color(.20f, .20f, .20f));
+            PinToAnchor(onlineLibrarySourceButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
+                new Vector2(190, -132));
             var countBadge = Panel("Chart Count Badge", library, new Color(.24f, .24f, .24f), new Vector2(42, 42), Vector2.zero);
             PinToAnchor(countBadge, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-38, -42));
             var countBadgeText = Label("", countBadge, 18); Fill(countBadgeText.rectTransform); libraryCountLabel = countBadgeText;
             librarySearchInput = MakeInputField("搜尋", library, Vector2.zero, new Vector2(0, 56));
-            var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -204); searchRect.offsetMax = new Vector2(-22, -148);
+            var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -252); searchRect.offsetMax = new Vector2(-22, -196);
             librarySearchInput.onValueChanged.AddListener(_ => RefreshLibraryUI());
             const int libraryHeaderFontSize = 22;
-            const float librarySortCenterY = -250;
+            const float librarySortCenterY = -294;
             librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46); PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, librarySortCenterY));
             librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, librarySortCenterY));
             MakeInvisibleButton(librarySortModeLabel.rectTransform, CycleLibrarySort);
@@ -3557,15 +3607,24 @@ namespace Gugarhythm
             AddSortArrowIcon(libraryDirectionIcon);
             MakeInvisibleButton(libraryDirectionIcon, () =>
             {
-                librarySortAscending = !librarySortAscending;
-                LibrarySortPreferences.Save(librarySort, librarySortAscending);
+                if (librarySource == ChartLibrarySource.Online)
+                    remoteLibrarySortAscending = !remoteLibrarySortAscending;
+                else
+                {
+                    librarySortAscending = !librarySortAscending;
+                    LibrarySortPreferences.Save(librarySort, librarySortAscending);
+                }
                 RefreshLibraryUI();
             });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
-            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -300);
+            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -344);
 
-            var importButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
-            var importRect = importButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
+            importLibraryButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
+            var importRect = importLibraryButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
+            refreshRemoteLibraryButton = MakeOutlinedButton("↻ 重新整理線上譜面", library, Vector2.zero,
+                () => StartCoroutine(RefreshRemoteCatalog(true)), new Vector2(0, 64));
+            var refreshRemoteRect = refreshRemoteLibraryButton.GetComponent<RectTransform>(); refreshRemoteRect.anchorMin = new Vector2(0, 0); refreshRemoteRect.anchorMax = new Vector2(1, 0); refreshRemoteRect.pivot = new Vector2(.5f, 0); refreshRemoteRect.offsetMin = new Vector2(22, 22); refreshRemoteRect.offsetMax = new Vector2(-22, 86);
+            refreshRemoteLibraryButton.gameObject.SetActive(false);
 
             var breadcrumb = Label("LIBRARY   /   CHART DETAIL", detail, 18); breadcrumb.color = new Color(.64f, .64f, .64f); breadcrumb.alignment = TextAnchor.MiddleLeft; breadcrumb.rectTransform.sizeDelta = new Vector2(480, 38); PinToAnchor(breadcrumb.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(80, -52));
             var gear = MakeOutlinedButton("", detail, Vector2.zero, OpenSettings, new Vector2(66, 66));
@@ -3609,9 +3668,18 @@ namespace Gugarhythm
             difficultyButtonContent.anchoredPosition = new Vector2(0, -26);
             difficultyButtonContent.anchorMin = difficultyButtonContent.anchorMax = new Vector2(.51f, .5f);
             detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(460, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
+            loadStatus = Label(string.Empty, detail, 15);
+            loadStatus.color = new Color(.68f, .68f, .68f);
+            loadStatus.alignment = TextAnchor.MiddleLeft;
+            var statusRect = loadStatus.rectTransform; statusRect.anchorMin = new Vector2(.51f, .5f); statusRect.anchorMax = new Vector2(.94f, .5f); statusRect.pivot = new Vector2(.5f, .5f); statusRect.offsetMin = new Vector2(0, -211); statusRect.offsetMax = new Vector2(0, -187);
             startButton = MakeFlatButton("▶  開始遊戲", detail, Vector2.zero, StartGame, new Vector2(0, 82), new Color(.06f, .58f, .96f));
             var startRect = startButton.GetComponent<RectTransform>(); startRect.anchorMin = new Vector2(.51f, .5f); startRect.anchorMax = new Vector2(.94f, .5f); startRect.pivot = new Vector2(.5f, .5f); startRect.offsetMin = new Vector2(0, -300.5f); startRect.offsetMax = new Vector2(0, -218.5f);
             startButton.interactable = false;
+            downloadRemoteChartButton = MakeFlatButton("下載到本機", detail, Vector2.zero,
+                () => StartCoroutine(DownloadSelectedRemoteChart()), new Vector2(0, 82), new Color(.06f, .58f, .96f));
+            var downloadRemoteRect = downloadRemoteChartButton.GetComponent<RectTransform>(); downloadRemoteRect.anchorMin = new Vector2(.51f, .5f); downloadRemoteRect.anchorMax = new Vector2(.94f, .5f); downloadRemoteRect.pivot = new Vector2(.5f, .5f); downloadRemoteRect.offsetMin = new Vector2(0, -300.5f); downloadRemoteRect.offsetMax = new Vector2(0, -218.5f);
+            downloadRemoteChartButton.gameObject.SetActive(false);
+            RefreshLibrarySourceControls();
             RefreshLibraryUI();
         }
 
@@ -3978,8 +4046,207 @@ namespace Gugarhythm
 
         void ReturnFromChartEditor() => GugarhythmSceneRouter.OpenLibrary();
 
+        void SelectLibrarySource(ChartLibrarySource source)
+        {
+            if (source != ChartLibrarySource.Local && source != ChartLibrarySource.Online) return;
+            if (librarySource == source)
+            {
+                RefreshLibraryUI();
+                return;
+            }
+
+            librarySource = source;
+            if (source == ChartLibrarySource.Local)
+            {
+                remoteCoverGeneration++;
+                ClearRemoteCoverTexture();
+                RefreshLibraryUI();
+                return;
+            }
+
+            RefreshDetailCover(null);
+            if (!remoteCatalogCacheLoaded)
+            {
+                remoteCatalogCacheLoaded = true;
+                if (remoteCatalogCache != null && remoteCatalogCache.TryLoad(out var cachedCatalog))
+                {
+                    remoteCatalog = cachedCatalog;
+                    SetStatus("已載入線上快取（" + FormatRemoteCatalogTimestamp(cachedCatalog.CachedAtUnixMilliseconds) + "）。");
+                }
+                else
+                {
+                    SetStatus("尚無線上譜面快取，正在取得公開清單。");
+                }
+            }
+
+            RefreshLibraryUI();
+            if (ShouldFetchRemoteCatalogOnSourceChange(source, remoteCatalogRequested))
+                StartCoroutine(RefreshRemoteCatalog(false));
+        }
+
+        void RefreshLibrarySourceControls()
+        {
+            var online = librarySource == ChartLibrarySource.Online;
+            if (localLibrarySourceButton != null)
+                localLibrarySourceButton.image.color = online ? new Color(.20f, .20f, .20f) : new Color(.10f, .34f, .50f);
+            if (onlineLibrarySourceButton != null)
+                onlineLibrarySourceButton.image.color = online ? new Color(.10f, .34f, .50f) : new Color(.20f, .20f, .20f);
+            if (importLibraryButton != null) importLibraryButton.gameObject.SetActive(!online);
+            if (refreshRemoteLibraryButton != null)
+            {
+                refreshRemoteLibraryButton.gameObject.SetActive(online);
+                refreshRemoteLibraryButton.interactable = online && !remoteCatalogLoading;
+            }
+            if (difficultyButtonContent != null) difficultyButtonContent.gameObject.SetActive(!online);
+            if (startButton != null)
+            {
+                startButton.gameObject.SetActive(!online);
+                startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
+            }
+            if (downloadRemoteChartButton != null)
+            {
+                downloadRemoteChartButton.gameObject.SetActive(online);
+                downloadRemoteChartButton.interactable = online && selectedRemoteChart != null && !remoteChartDownloading;
+            }
+        }
+
+        IEnumerator RefreshRemoteCatalog(bool userInitiated)
+        {
+            if (librarySource != ChartLibrarySource.Online || remoteCatalogLoading) yield break;
+            remoteCatalogLoading = true;
+            remoteCatalogRequested = true;
+            var generation = remoteOperationGeneration;
+            RefreshLibrarySourceControls();
+            SetStatus(userInitiated ? "正在重新整理線上譜面…" : "正在取得線上譜面…");
+
+            var resultReceived = false;
+            var result = default(ChartVaultCatalogResult);
+            IEnumerator operation = null;
+            try
+            {
+                operation = chartVaultClient?.FetchPublicCatalog(value =>
+                {
+                    if (destroying || generation != remoteOperationGeneration || resultReceived) return;
+                    result = value;
+                    resultReceived = true;
+                });
+            }
+            catch (Exception)
+            {
+                operation = null;
+            }
+
+            var operationFailed = operation == null;
+            var operationCompleted = false;
+            try
+            {
+                while (!operationFailed && !operationCompleted)
+                {
+                    if (!TryAdvanceRemoteOperation(operation, out var hasNext, out var current))
+                    {
+                        operationFailed = true;
+                        break;
+                    }
+                    if (!hasNext)
+                    {
+                        operationCompleted = true;
+                        break;
+                    }
+                    yield return current;
+                }
+            }
+            finally
+            {
+                DisposeRemoteOperation(operation);
+            }
+
+            if (destroying || generation != remoteOperationGeneration) yield break;
+            remoteCatalogLoading = false;
+            RefreshLibrarySourceControls();
+            if (operationFailed || !resultReceived || !result.Success)
+            {
+                if (librarySource == ChartLibrarySource.Online)
+                {
+                    RefreshRemoteLibraryUI();
+                    SetStatus("線上譜面清單更新失敗，快取內容已保留；請按重新整理後再試。");
+                }
+                yield break;
+            }
+
+            ReconcileRemoteSelection(result.Catalog);
+            remoteCatalog = result.Catalog;
+            var cacheSaved = true;
+            try
+            {
+                remoteCatalogCache?.Save(remoteCatalog);
+            }
+            catch (Exception)
+            {
+                cacheSaved = false;
+            }
+            if (librarySource == ChartLibrarySource.Online)
+            {
+                RefreshRemoteLibraryUI();
+                SetStatus(cacheSaved
+                    ? "線上譜面已更新（" + FormatRemoteCatalogTimestamp(remoteCatalog.CachedAtUnixMilliseconds) + "）。"
+                    : "線上譜面已更新，但這次無法寫入本機快取。");
+            }
+        }
+
+        static bool TryAdvanceRemoteOperation(IEnumerator operation, out bool hasNext, out object current)
+        {
+            hasNext = false;
+            current = null;
+            if (operation == null) return false;
+            try
+            {
+                hasNext = operation.MoveNext();
+                if (hasNext) current = operation.Current;
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        static void DisposeRemoteOperation(IEnumerator operation)
+        {
+            if (operation is not IDisposable disposable) return;
+            try
+            {
+                disposable.Dispose();
+            }
+            catch (Exception)
+            {
+                // Remote UI failures remain retryable and never surface transport internals.
+            }
+        }
+
+        static string FormatRemoteCatalogTimestamp(long unixMilliseconds)
+        {
+            if (unixMilliseconds <= 0) return "時間未知";
+            try
+            {
+                return DateTimeOffset.FromUnixTimeMilliseconds(unixMilliseconds).ToLocalTime()
+                    .ToString("yyyy-MM-dd HH:mm");
+            }
+            catch (ArgumentOutOfRangeException)
+            {
+                return "時間未知";
+            }
+        }
+
         void CycleLibrarySort()
         {
+            if (librarySource == ChartLibrarySource.Online)
+            {
+                remoteLibrarySort = remoteLibrarySort == ChartLibrarySort.Title
+                    ? ChartLibrarySort.Difficulty
+                    : ChartLibrarySort.Title;
+                RefreshRemoteLibraryUI();
+                return;
+            }
             librarySort = librarySort == ChartLibrarySort.Accuracy ? ChartLibrarySort.Difficulty :
                 librarySort == ChartLibrarySort.Difficulty ? ChartLibrarySort.Title : ChartLibrarySort.Accuracy;
             LibrarySortPreferences.Save(librarySort, librarySortAscending);
@@ -3987,6 +4254,15 @@ namespace Gugarhythm
         }
 
         void RefreshLibraryUI()
+        {
+            RefreshLibrarySourceControls();
+            if (librarySource == ChartLibrarySource.Online)
+                RefreshRemoteLibraryUI();
+            else
+                RefreshLocalLibraryUI();
+        }
+
+        void RefreshLocalLibraryUI()
         {
             if (libraryListContent == null) return;
             var libraryScroll = libraryListContent.parent == null ? null : libraryListContent.parent.GetComponent<ScrollRect>();
@@ -4040,7 +4316,340 @@ namespace Gugarhythm
             Canvas.ForceUpdateCanvases();
             LayoutRebuilder.ForceRebuildLayoutImmediate(libraryListContent);
             libraryScrollPositionInitialized = true;
+            if (startButton != null)
+                startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
         }
+
+        void RefreshRemoteLibraryUI()
+        {
+            if (libraryListContent == null) return;
+            RefreshLibrarySourceControls();
+            var libraryScroll = libraryListContent.parent == null ? null : libraryListContent.parent.GetComponent<ScrollRect>();
+            var restoreScrollPosition = remoteLibraryScrollPositionInitialized && libraryScroll != null;
+            var preservedScrollPosition = restoreScrollPosition ? libraryScroll.verticalNormalizedPosition : 1f;
+            var charts = remoteCatalog?.Charts == null
+                ? new List<RemoteChartSummary>()
+                : remoteCatalog.Charts.Where(chart => chart != null).ToList();
+            var filter = librarySearchInput == null ? string.Empty : librarySearchInput.text.Trim();
+            if (!string.IsNullOrEmpty(filter))
+            {
+                charts = charts.Where(chart =>
+                    ContainsIgnoreCase(chart.Title, filter) ||
+                    ContainsIgnoreCase(chart.Artist, filter) ||
+                    ContainsIgnoreCase(chart.Author, filter) ||
+                    ContainsIgnoreCase(chart.Difficulty, filter)).ToList();
+            }
+
+            if (remoteLibrarySort == ChartLibrarySort.Difficulty)
+            {
+                charts = (remoteLibrarySortAscending
+                        ? charts.OrderBy(chart => chart.Rating)
+                            .ThenBy(chart => chart.Difficulty, StringComparer.OrdinalIgnoreCase)
+                            .ThenBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                        : charts.OrderByDescending(chart => chart.Rating)
+                            .ThenByDescending(chart => chart.Difficulty, StringComparer.OrdinalIgnoreCase)
+                            .ThenByDescending(chart => chart.Title, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+            }
+            else
+            {
+                charts = (remoteLibrarySortAscending
+                        ? charts.OrderBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                            .ThenBy(chart => chart.Rating)
+                        : charts.OrderByDescending(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                            .ThenByDescending(chart => chart.Rating))
+                    .ToList();
+            }
+
+            libraryCountLabel.text = charts.Count.ToString();
+            librarySortModeLabel.text = remoteLibrarySort == ChartLibrarySort.Difficulty ? "難度" : "曲名";
+            libraryDirectionIcon.localRotation = Quaternion.Euler(0, 0, remoteLibrarySortAscending ? 180 : 0);
+            ClearChildren(libraryListContent);
+            const float rowHeight = 118f;
+            var contentSize = libraryListContent.sizeDelta;
+            contentSize.y = Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height,
+                charts.Count * rowHeight + 8);
+            libraryListContent.sizeDelta = contentSize;
+            for (var index = 0; index < charts.Count; index++) BuildRemoteLibraryRow(charts[index], index, rowHeight);
+            RefreshRemoteDetailUI();
+
+            if (restoreScrollPosition)
+            {
+                Canvas.ForceUpdateCanvases();
+                libraryScroll.verticalNormalizedPosition = preservedScrollPosition;
+            }
+            Canvas.ForceUpdateCanvases();
+            LayoutRebuilder.ForceRebuildLayoutImmediate(libraryListContent);
+            remoteLibraryScrollPositionInitialized = true;
+        }
+
+        void BuildRemoteLibraryRow(RemoteChartSummary chart, int index, float rowHeight)
+        {
+            var selected = SameRemoteChart(selectedRemoteChart, chart);
+            var row = Panel("Remote Chart Row", libraryListContent,
+                selected ? new Color(.12f, .25f, .36f) : new Color(.16f, .16f, .16f),
+                new Vector2(0, rowHeight - 2), Vector2.zero);
+            row.anchorMin = new Vector2(0, 1);
+            row.anchorMax = new Vector2(1, 1);
+            row.pivot = new Vector2(.5f, 1);
+            var rowHorizontalInset = selected ? LibraryDividerHorizontalInset : 0f;
+            row.offsetMin = new Vector2(rowHorizontalInset, -rowHeight * (index + 1));
+            row.offsetMax = new Vector2(-rowHorizontalInset, -rowHeight * index);
+            if (index > 0)
+            {
+                var divider = Panel("Remote Chart Divider", row, new Color(.27f, .27f, .27f, .72f),
+                    new Vector2(0, PersistentGrayDividerThickness), Vector2.zero);
+                var dividerHorizontalInset = selected ? 0f : LibraryDividerHorizontalInset;
+                divider.anchorMin = new Vector2(0, 1);
+                divider.anchorMax = new Vector2(1, 1);
+                divider.offsetMin = new Vector2(dividerHorizontalInset, -PersistentGrayDividerThickness);
+                divider.offsetMax = new Vector2(-dividerHorizontalInset, 0);
+                divider.GetComponent<Image>().raycastTarget = false;
+            }
+            var title = Label(RemoteText(chart.Title), row, 20);
+            title.alignment = TextAnchor.MiddleLeft;
+            title.rectTransform.anchorMin = new Vector2(0, 1);
+            title.rectTransform.anchorMax = new Vector2(1, 1);
+            title.rectTransform.pivot = new Vector2(0, 1);
+            title.rectTransform.offsetMin = new Vector2(24, -46);
+            title.rectTransform.offsetMax = new Vector2(-24, -14);
+            var artist = Label(RemoteText(chart.Artist) + " · " + RemoteText(chart.Author), row, 15);
+            artist.alignment = TextAnchor.MiddleLeft;
+            artist.color = new Color(.67f, .67f, .67f);
+            artist.rectTransform.anchorMin = new Vector2(0, 1);
+            artist.rectTransform.anchorMax = new Vector2(1, 1);
+            artist.rectTransform.pivot = new Vector2(0, 1);
+            artist.rectTransform.offsetMin = new Vector2(24, -76);
+            artist.rectTransform.offsetMax = new Vector2(-24, -48);
+            var metadata = Label(FormatRemoteDifficulty(chart) + " · v" + chart.Version + " · 公開", row, 14);
+            metadata.alignment = TextAnchor.MiddleLeft;
+            metadata.color = new Color(.52f, .76f, .92f);
+            metadata.rectTransform.anchorMin = new Vector2(0, 1);
+            metadata.rectTransform.anchorMax = new Vector2(1, 1);
+            metadata.rectTransform.pivot = new Vector2(0, 1);
+            metadata.rectTransform.offsetMin = new Vector2(24, -106);
+            metadata.rectTransform.offsetMax = new Vector2(-24, -78);
+            MakeInvisibleButton(row, () => SelectRemoteChart(chart));
+        }
+
+        void RefreshRemoteDetailUI()
+        {
+            if (selectedRemoteChart == null)
+            {
+                SetDetailTitle("選擇一份線上譜面");
+                detailArtistLabel.text = string.Empty;
+                detailDifficultyLabel.text = "選擇後可下載到本機";
+                detailAccuracyLabel.text = "PUBLIC CHART\n<size=52>—</size>";
+                ShowRemoteCover(null);
+            }
+            else
+            {
+                SetDetailTitle(RemoteText(selectedRemoteChart.Title));
+                detailArtistLabel.text = RemoteText(selectedRemoteChart.Artist) + " · 譜師 " +
+                    RemoteText(selectedRemoteChart.Author);
+                detailDifficultyLabel.text = FormatRemoteDifficulty(selectedRemoteChart) + " · v" +
+                    selectedRemoteChart.Version + " · 公開";
+                detailAccuracyLabel.text = "PUBLIC CHART\n<size=52>公開</size>";
+                ShowRemoteCover(remoteCoverTexture);
+            }
+            if (downloadRemoteChartButton != null)
+                downloadRemoteChartButton.interactable = selectedRemoteChart != null && !remoteChartDownloading;
+        }
+
+        void SelectRemoteChart(RemoteChartSummary chart)
+        {
+            if (librarySource != ChartLibrarySource.Online || chart == null || remoteCatalog?.Charts == null) return;
+            var current = remoteCatalog.Charts.FirstOrDefault(candidate => SameRemoteChart(candidate, chart));
+            if (current == null) return;
+            selectedRemoteChart = current;
+            remoteCoverGeneration++;
+            ClearRemoteCoverTexture();
+            RefreshRemoteLibraryUI();
+            if (current.CoverUrl != null)
+                StartCoroutine(DownloadRemoteCover(current, remoteCoverGeneration));
+        }
+
+        IEnumerator DownloadRemoteCover(RemoteChartSummary chart, int coverGeneration)
+        {
+            Texture2D downloadedTexture = null;
+            var resultReceived = false;
+            var operationGeneration = remoteOperationGeneration;
+            IEnumerator operation = null;
+            try
+            {
+                operation = chartVaultClient?.DownloadCover(chart, (texture, _) =>
+                {
+                    if (destroying || operationGeneration != remoteOperationGeneration ||
+                        coverGeneration != remoteCoverGeneration || !SameRemoteChart(selectedRemoteChart, chart))
+                    {
+                        if (texture != null) Destroy(texture);
+                        return;
+                    }
+                    if (resultReceived)
+                    {
+                        if (texture != null) Destroy(texture);
+                        return;
+                    }
+                    downloadedTexture = texture;
+                    resultReceived = true;
+                });
+            }
+            catch (Exception)
+            {
+                operation = null;
+            }
+
+            var operationFailed = operation == null;
+            var operationCompleted = false;
+            try
+            {
+                while (!operationFailed && !operationCompleted)
+                {
+                    if (!TryAdvanceRemoteOperation(operation, out var hasNext, out var current))
+                    {
+                        operationFailed = true;
+                        break;
+                    }
+                    if (!hasNext)
+                    {
+                        operationCompleted = true;
+                        break;
+                    }
+                    yield return current;
+                }
+            }
+            finally
+            {
+                DisposeRemoteOperation(operation);
+            }
+
+            if (destroying || operationGeneration != remoteOperationGeneration ||
+                coverGeneration != remoteCoverGeneration || !SameRemoteChart(selectedRemoteChart, chart))
+            {
+                if (downloadedTexture != null) Destroy(downloadedTexture);
+                yield break;
+            }
+            if (operationFailed || !resultReceived || downloadedTexture == null) yield break;
+            ClearRemoteCoverTexture();
+            remoteCoverTexture = downloadedTexture;
+            if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(remoteCoverTexture);
+        }
+
+        IEnumerator DownloadSelectedRemoteChart()
+        {
+            if (librarySource != ChartLibrarySource.Online || selectedRemoteChart == null || remoteChartDownloading)
+                yield break;
+            remoteChartDownloading = true;
+            var chartToDownload = selectedRemoteChart;
+            var generation = remoteOperationGeneration;
+            RefreshLibrarySourceControls();
+            SetStatus("正在下載「" + RemoteText(chartToDownload.Title) + "」…");
+
+            var resultReceived = false;
+            var result = default(RemoteChartImportResult);
+            IEnumerator operation = null;
+            try
+            {
+                operation = remoteChartDownloadService?.DownloadAndImport(chartToDownload, value =>
+                {
+                    if (destroying || generation != remoteOperationGeneration || resultReceived) return;
+                    result = value;
+                    resultReceived = true;
+                });
+            }
+            catch (Exception)
+            {
+                operation = null;
+            }
+
+            var operationFailed = operation == null;
+            var operationCompleted = false;
+            try
+            {
+                while (!operationFailed && !operationCompleted)
+                {
+                    if (!TryAdvanceRemoteOperation(operation, out var hasNext, out var current))
+                    {
+                        operationFailed = true;
+                        break;
+                    }
+                    if (!hasNext)
+                    {
+                        operationCompleted = true;
+                        break;
+                    }
+                    yield return current;
+                }
+            }
+            finally
+            {
+                DisposeRemoteOperation(operation);
+            }
+
+            if (destroying || generation != remoteOperationGeneration) yield break;
+            remoteChartDownloading = false;
+            RefreshLibrarySourceControls();
+            if (operationFailed || !resultReceived || !result.Success || result.LocalEntry == null)
+            {
+                if (librarySource == ChartLibrarySource.Online)
+                {
+                    RefreshRemoteLibraryUI();
+                    SetStatus("下載到本機失敗，線上清單與選取已保留；請稍後重試。");
+                }
+                yield break;
+            }
+
+            selectedLibraryEntry = result.LocalEntry;
+            currentLibraryEntry = result.LocalEntry;
+            selectedDifficultyName = result.LocalEntry.DifficultyName ?? string.Empty;
+            SelectLibrarySource(ChartLibrarySource.Local);
+            SetStatus("已加入本機");
+            if (startButton != null)
+                startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
+        }
+
+        void ReconcileRemoteSelection(RemoteChartCatalog catalog)
+        {
+            if (selectedRemoteChart == null) return;
+            var replacement = catalog?.Charts?.FirstOrDefault(chart => SameRemoteChart(chart, selectedRemoteChart));
+            if (replacement != null)
+            {
+                selectedRemoteChart = replacement;
+                return;
+            }
+            selectedRemoteChart = null;
+            remoteCoverGeneration++;
+            ClearRemoteCoverTexture();
+        }
+
+        void ClearRemoteCoverTexture()
+        {
+            if (remoteCoverTexture != null) Destroy(remoteCoverTexture);
+            remoteCoverTexture = null;
+            if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(null);
+        }
+
+        void ShowRemoteCover(Texture2D texture)
+        {
+            if (detailCoverImage == null || detailCoverFallback == null) return;
+            var hasCover = texture != null;
+            detailCoverImage.texture = texture;
+            detailCoverImage.uvRect = new Rect(0, 0, 1, 1);
+            detailCoverImage.gameObject.SetActive(hasCover);
+            detailCoverFallback.gameObject.SetActive(!hasCover);
+            if (hasCover && detailCoverImage.TryGetComponent<AspectRatioFitter>(out var aspect))
+                aspect.aspectRatio = Mathf.Max(.01f, (float)texture.width / texture.height);
+        }
+
+        static bool SameRemoteChart(RemoteChartSummary left, RemoteChartSummary right) =>
+            left != null && right != null && left.Version == right.Version &&
+            string.Equals(left.ChartId, right.ChartId, StringComparison.Ordinal);
+
+        static string RemoteText(string value) => string.IsNullOrWhiteSpace(value) ? "—" : value.Trim();
+
+        static string FormatRemoteDifficulty(RemoteChartSummary chart) => chart == null
+            ? "—"
+            : RemoteText(chart.Difficulty) + " " + chart.Rating.ToString("0.##");
 
         void BuildLibraryRow(LocalChartGroup group, int index, float rowHeight)
         {

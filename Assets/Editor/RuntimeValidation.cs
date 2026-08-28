@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.IO.Compression;
@@ -130,6 +131,11 @@ public static class RuntimeValidation
         ValidateNoteRenderVisibilityWindow();
         ValidateLibrarySelectionFrameGeometry();
         ValidateLibraryDataRefreshContracts();
+        ValidateOnlineLibraryEntryContracts();
+        ValidateChartVaultContracts();
+        ValidateChartVaultClientBoundaries();
+        ValidateRemoteCatalogPersistence();
+        ValidateRemoteChartDownloadPipeline();
         ValidateCoverPresentationContracts();
         ValidateNoteSurfaceProjection();
         ValidateHeadlessHoldRendering();
@@ -1578,6 +1584,683 @@ public static class RuntimeValidation
             "Native picker must preserve every selected file path");
     }
 
+    static void ValidateOnlineLibraryEntryContracts()
+    {
+        const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance;
+        var controller = typeof(SonolusLandscapePrototype);
+        Require(controller.GetMethod("SelectLibrarySource", flags, null,
+                    new[] { typeof(ChartLibrarySource) }, null)?.ReturnType == typeof(void),
+            "Online library integration must expose the exact source-selection entry point");
+        Require(controller.GetMethod("RefreshRemoteCatalog", flags, null,
+                    new[] { typeof(bool) }, null)?.ReturnType == typeof(IEnumerator),
+            "Online library integration must expose the exact catalog-refresh coroutine");
+        Require(controller.GetMethod("RefreshRemoteLibraryUI", flags, null,
+                    Type.EmptyTypes, null)?.ReturnType == typeof(void),
+            "Online library integration must expose the exact remote-list refresh entry point");
+        Require(controller.GetMethod("SelectRemoteChart", flags, null,
+                    new[] { typeof(RemoteChartSummary) }, null)?.ReturnType == typeof(void),
+            "Online library integration must expose the exact remote-selection entry point");
+        Require(controller.GetMethod("DownloadSelectedRemoteChart", flags, null,
+                    Type.EmptyTypes, null)?.ReturnType == typeof(IEnumerator),
+            "Online library integration must expose the exact remote-download coroutine");
+
+        Require(!SonolusLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
+                ChartLibrarySource.Local, false),
+            "Selecting Local must never fetch the public catalog");
+        Require(SonolusLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
+                ChartLibrarySource.Online, false),
+            "The first Online selection must fetch the public catalog");
+        Require(!SonolusLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
+                ChartLibrarySource.Online, true),
+            "Returning to Online after its first request must reuse memory or cache");
+        Require(SonolusLandscapePrototype.ShouldEnableLibraryStartButton(
+                ChartLibrarySource.Local, true) &&
+                !SonolusLandscapePrototype.ShouldEnableLibraryStartButton(
+                    ChartLibrarySource.Local, false),
+            "Local start availability must continue to follow local selection");
+        Require(!SonolusLandscapePrototype.ShouldEnableLibraryStartButton(
+                ChartLibrarySource.Online, true),
+            "Online selection must never enable the local Start button");
+        Debug.Log("GUGARHYTHM_ONLINE_LIBRARY_CONTRACTS_VALIDATION_OK");
+    }
+
+    static void ValidateChartVaultContracts()
+    {
+        const string sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string json = "{\"charts\":[{\"chartId\":\"chart_a\",\"version\":1," +
+            "\"title\":\"Test\",\"artist\":\"Artist\",\"author\":\"Author\",\"difficulty\":\"MASTER\"," +
+            "\"rating\":15,\"offset\":0,\"updatedAt\":\"2026-08-27T00:00:00.000Z\"," +
+            "\"sha256\":\"" + sha256 + "\",\"sizeBytes\":123456,\"coverUrl\":null," +
+            "\"downloadUrl\":\"/api/v1/charts/chart_a/versions/1/ggr\",\"futureField\":true}]," +
+            "\"nextCursor\":null,\"cachedAtUnixMilliseconds\":999,\"futureCatalogField\":true}";
+        Require(RemoteChartCatalogCodec.TryParse(json, out var catalog, out var error), error);
+        Require(catalog.Charts.Count == 1, "Public catalog parsing must retain every chart");
+        var chart = catalog.Charts[0];
+        Require(chart.ChartId == "chart_a" && chart.Version == 1 &&
+                chart.Title == "Test" && chart.Artist == "Artist" && chart.Author == "Author" &&
+                chart.Difficulty == "MASTER" && Math.Abs(chart.Rating - 15f) < .0001f &&
+                Math.Abs(chart.Offset) < .0001d &&
+                chart.UpdatedAt == "2026-08-27T00:00:00.000Z" && chart.Sha256 == sha256 &&
+                chart.SizeBytes == 123456 && chart.CoverUrl == null &&
+                chart.DownloadUrl == "/api/v1/charts/chart_a/versions/1/ggr" && catalog.NextCursor == null &&
+                catalog.CachedAtUnixMilliseconds == 0,
+            "Public catalog parsing must retain documented chart metadata while ignoring unknown fields");
+        Require(ChartVaultApiSettings.TryResolveApiPath(
+                "/api/v1/charts?scope=public&limit=30", out var catalogUri) &&
+                catalogUri.AbsoluteUri == "https://gugarhythm.luecat.com/api/v1/charts?scope=public&limit=30",
+            "Catalog paths under the configured API root must resolve");
+
+        foreach (var unsafePath in new[]
+                 {
+                     "https://evil.invalid/a",
+                     "//evil.invalid/a",
+                     "/api/v1/../session",
+                     "/api/v1/charts#fragment",
+                     "https://user@gugarhythm.luecat.com/api/v1/charts",
+                 })
+            Require(!ChartVaultApiSettings.TryResolveApiPath(unsafePath, out _),
+                "Chart Vault must reject unsafe API path: " + unsafePath);
+
+        var overLimit = json.Replace("\"sizeBytes\":123456",
+            "\"sizeBytes\":" + (ChartVaultApiSettings.MaxGgrBytes + 1));
+        Require(!RemoteChartCatalogCodec.TryParse(overLimit, out _, out _),
+            "Catalog parsing must reject GGR files over 48 MiB");
+        var badHash = json.Replace(sha256,
+            "Aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
+        Require(!RemoteChartCatalogCodec.TryParse(badHash, out _, out _),
+            "Catalog parsing must reject non-lowercase SHA-256 values");
+        var unsafeDownload = json.Replace("/api/v1/charts/chart_a/versions/1/ggr", "https://evil.invalid/a.ggr");
+        Require(!RemoteChartCatalogCodec.TryParse(unsafeDownload, out _, out _),
+            "Catalog parsing must reject unsafe download paths");
+        Require(RemoteChartCatalogCodec.TryParse("{\"nextCursor\":null}", out var emptyCatalog, out error) &&
+                emptyCatalog.Charts.Count == 0,
+            "An omitted charts field must produce an empty catalog");
+        Require(!RemoteChartCatalogCodec.TryParse("{\"charts\":null}", out _, out _),
+            "An explicit null charts field must be rejected");
+    }
+
+    static void ValidateChartVaultClientBoundaries()
+    {
+        const string sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        var destinationPath = Path.Combine(Application.temporaryCachePath,
+            "chart-vault-client-validation.ggr");
+
+        RemoteChartSummary Summary() => new()
+        {
+            ChartId = "chart_boundary",
+            Version = 3,
+            Title = "Boundary",
+            Artist = "Artist",
+            Author = "Author",
+            Difficulty = "MASTER",
+            Rating = 15,
+            Offset = 0,
+            UpdatedAt = "2026-08-28T00:00:00.000Z",
+            Sha256 = sha256,
+            SizeBytes = 4096,
+            CoverUrl = null,
+            DownloadUrl = "/api/v1/charts/chart_boundary/versions/3/ggr",
+        };
+
+        var valid = Summary();
+        Require(ChartVaultClient.TryPrepareDownload(valid, destinationPath, out var uri, out var error) &&
+                uri.AbsoluteUri == ChartVaultApiSettings.ApiOrigin + valid.DownloadUrl &&
+                string.IsNullOrEmpty(error),
+            "Chart Vault client must accept the exact same-origin public GGR path and a nonempty destination");
+
+        foreach (var unsafePath in new[]
+                 {
+                     "http://gugarhythm.luecat.com/api/v1/charts/chart_boundary/versions/3/ggr",
+                     "https://evil.invalid/api/v1/charts/chart_boundary/versions/3/ggr",
+                     "//evil.invalid/api/v1/charts/chart_boundary/versions/3/ggr",
+                     "/api/v1/charts/../charts/chart_boundary/versions/3/ggr",
+                 })
+        {
+            var unsafeChart = Summary();
+            unsafeChart.DownloadUrl = unsafePath;
+            Require(!ChartVaultClient.TryPrepareDownload(unsafeChart, destinationPath, out _, out error) &&
+                    !string.IsNullOrWhiteSpace(error),
+                "Chart Vault client must reject unsafe download paths before request construction");
+        }
+
+        foreach (var invalidDestination in new[] { null, string.Empty, "   " })
+            Require(!ChartVaultClient.TryPrepareDownload(Summary(), invalidDestination, out _, out error) &&
+                    !string.IsNullOrWhiteSpace(error),
+                "Chart Vault client must reject an empty destination before request construction");
+
+        var overLimit = Summary();
+        overLimit.SizeBytes = ChartVaultApiSettings.MaxGgrBytes + 1;
+        Require(!ChartVaultClient.TryPrepareDownload(overLimit, destinationPath, out _, out error) &&
+                !string.IsNullOrWhiteSpace(error),
+            "Chart Vault client must reject an over-limit GGR before request construction");
+
+        var negativeSize = Summary();
+        negativeSize.SizeBytes = -1;
+        Require(!ChartVaultClient.TryPrepareDownload(negativeSize, destinationPath, out _, out error),
+            "Chart Vault client must reject a negative GGR size");
+
+        var wrongVersion = Summary();
+        wrongVersion.Version = 4;
+        Require(!ChartVaultClient.TryPrepareDownload(wrongVersion, destinationPath, out _, out error),
+            "Chart Vault client must reject a path that does not match the chart version");
+
+        var wrongResource = Summary();
+        wrongResource.DownloadUrl = "/api/v1/charts/chart_boundary/versions/3/cover";
+        Require(!ChartVaultClient.TryPrepareDownload(wrongResource, destinationPath, out _, out error),
+            "Chart Vault client must reject a non-GGR resource path");
+
+        var invalidHash = Summary();
+        invalidHash.Sha256 = sha256.ToUpperInvariant();
+        Require(!ChartVaultClient.TryPrepareDownload(invalidHash, destinationPath, out _, out error),
+            "Chart Vault client must reject a noncanonical SHA-256");
+
+        var invalidId = Summary();
+        invalidId.ChartId = "chart_bad/id";
+        Require(!ChartVaultClient.TryPrepareDownload(invalidId, destinationPath, out _, out error),
+            "Chart Vault client must reject an invalid chart ID");
+        Require(!ChartVaultClient.TryPrepareDownload(null, destinationPath, out _, out error),
+            "Chart Vault client must reject a null chart");
+    }
+
+    static void ValidateRemoteCatalogPersistence()
+    {
+        const string hashA = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        const string hashB = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        var root = Path.Combine(Application.temporaryCachePath,
+            "chart-vault-persistence-validation-" + Guid.NewGuid().ToString("N"));
+        var catalogPath = Path.Combine(root, "remote-catalog.json");
+        var linksPath = Path.Combine(root, "remote-chart-links.json");
+
+        try
+        {
+            var expectedCachedAt = 1772064000123L;
+            var cache = new RemoteChartCatalogCache(catalogPath);
+            cache.Save(new RemoteChartCatalog
+            {
+                CachedAtUnixMilliseconds = expectedCachedAt,
+                Charts = new List<RemoteChartSummary>
+                {
+                    new()
+                    {
+                        ChartId = "chart_a",
+                        Version = 1,
+                        Title = "Test",
+                        Artist = "Artist",
+                        Author = "Author",
+                        Difficulty = "MASTER",
+                        Rating = 15,
+                        Offset = 0,
+                        UpdatedAt = "2026-08-27T00:00:00.000Z",
+                        Sha256 = hashA,
+                        SizeBytes = 123456,
+                        CoverUrl = null,
+                        DownloadUrl = "/api/v1/charts/chart_a/versions/1/ggr",
+                    },
+                },
+            });
+            Require(cache.TryLoad(out var reloadedCatalog) && reloadedCatalog.Charts.Count == 1 &&
+                    reloadedCatalog.Charts[0].ChartId == "chart_a" &&
+                    reloadedCatalog.CachedAtUnixMilliseconds == expectedCachedAt,
+                "Remote catalog cache must restore chart data and the exact local cache timestamp");
+
+            var store = new RemoteChartLinkStore(linksPath);
+            store.Upsert(new RemoteChartLink
+            {
+                ChartId = "chart_a", Version = 1, Sha256 = hashA, LocalEntryId = "local_a",
+                DownloadedAtUnixMilliseconds = expectedCachedAt,
+            });
+            store.Upsert(new RemoteChartLink
+            {
+                ChartId = "chart_a", Version = 1, Sha256 = hashB, LocalEntryId = "local_b",
+                DownloadedAtUnixMilliseconds = expectedCachedAt + 1,
+            });
+            Require(store.TryGet("chart_a", 1, out var link) && link.LocalEntryId == "local_b" &&
+                    link.Sha256 == hashB,
+                "Writing the same remote chart/version must replace its link instead of creating a duplicate");
+            Require(store.Load().Count == 1,
+                "Remote link persistence must key links by chart ID and version");
+
+            File.WriteAllText(catalogPath, "{ malformed");
+            File.WriteAllText(linksPath, "{ malformed");
+            Require(!cache.TryLoad(out _), "Malformed catalog sidecars must be ignored");
+            Require(store.Load().Count == 0, "Malformed remote-link sidecars must produce an empty snapshot");
+
+            var createdFiles = Directory.GetFiles(root).Select(Path.GetFileName).OrderBy(value => value).ToArray();
+            Require(createdFiles.SequenceEqual(new[] { "remote-catalog.json", "remote-chart-links.json" }),
+                "Remote persistence validation must create only its two sidecars and no GGR, library manifest, or temp residue");
+            Require(Directory.GetDirectories(root).Length == 0,
+                "Remote persistence validation must not create a local chart-library directory");
+        }
+        finally
+        {
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
+    static void ValidateRemoteChartDownloadPipeline()
+    {
+        const string testGgrSha256 = "200f4d01039be173ae10d7eeacc45182dfb2706f082d4a8e47a89d7b1ab056b5";
+        const long testGgrSize = 1773750;
+        const long downloadedAt = 1772064000123L;
+        var fixturePath = Path.Combine(Application.dataPath, "StreamingAssets", "BundledCharts", "Test.ggr");
+        var fixtureBytes = File.ReadAllBytes(fixturePath);
+        Require(fixtureBytes.LongLength == testGgrSize,
+            "The production Test.ggr fixture size changed; update the literal Chart Vault contract deliberately");
+
+        var files = new RemoteDownloadValidationFileStore();
+        var client = new RemoteDownloadValidationClient(files, fixtureBytes,
+            new ChartVaultDownloadResult(string.Empty, testGgrSize, testGgrSha256));
+        var importer = new CountingChartImporter(new GgrChartImporter());
+        var library = new RemoteDownloadValidationLibrary
+        {
+            MatchingTitle = "Test",
+            MatchingArtist = "GUGArhythm",
+            MatchingGroupId = "existing-test-group",
+            SaveEntryId = testGgrSha256,
+        };
+        var links = new RemoteDownloadValidationLinkStore();
+        var service = new RemoteChartDownloadService(client, files, importer, library, links, () => downloadedAt);
+        var summary = RemoteDownloadValidationSummary(testGgrSize, testGgrSha256);
+        var success = RunRemoteChartDownload(service, summary, out var successCallbacks);
+
+        Require(successCallbacks == 1 && success.Success && success.LocalEntry != null &&
+                !success.AlreadyDownloaded && client.DownloadCalls == 1 && importer.ImportCalls == 1 &&
+                library.SaveCalls == 1 && links.UpsertCalls == 1,
+            "A hash-valid production GGR must be imported, saved, linked, and completed exactly once");
+        Require(library.LastFindTitle == "Test" && library.LastFindArtist == "GUGArhythm" &&
+                library.LastSavedGroupId == "existing-test-group" && library.NewGroupCalls == 0,
+            "A matching imported title and artist must reuse the pre-existing local group ID");
+        Require(links.LastUpsert != null && links.LastUpsert.LocalEntryId == testGgrSha256 &&
+                links.LastUpsert.DownloadedAtUnixMilliseconds == downloadedAt,
+            "A successful save must write the exact remote-to-local link and injected timestamp");
+        Require(files.CreatedPaths == 1 && files.DeleteCalls == 1 && files.LivePaths == 0,
+            "A successful remote import must delete its temporary GGR");
+
+        var retry = RunRemoteChartDownload(service, summary, out var retryCallbacks);
+        Require(retryCallbacks == 1 && retry.Success && retry.AlreadyDownloaded &&
+                retry.LocalEntry.Id == testGgrSha256 && client.DownloadCalls == 1 &&
+                importer.ImportCalls == 1 && library.SaveCalls == 1 && links.UpsertCalls == 1,
+            "Retrying the same remote chart/version with a matching live local entry must not download or save a duplicate");
+        Require(files.CreatedPaths == 1 && files.DeleteCalls == 1 && files.LivePaths == 0,
+            "An already-downloaded retry must not create a temporary GGR");
+
+        ValidateRemoteDownloadRejections(fixtureBytes, testGgrSize, testGgrSha256);
+
+        var invalidBytes = new byte[] { 0 };
+        const string invalidSha256 = "6e340b9cffb37a989ca544e6bb780a2c78901d3fb33738768511a30617afa01d";
+        var invalidFiles = new RemoteDownloadValidationFileStore();
+        var invalidClient = new RemoteDownloadValidationClient(invalidFiles, invalidBytes,
+            new ChartVaultDownloadResult(string.Empty, 1, invalidSha256));
+        var invalidImporter = new CountingChartImporter(new GgrChartImporter());
+        var invalidLibrary = new RemoteDownloadValidationLibrary { SaveEntryId = invalidSha256 };
+        var invalidLinks = new RemoteDownloadValidationLinkStore();
+        var invalidService = new RemoteChartDownloadService(invalidClient, invalidFiles, invalidImporter,
+            invalidLibrary, invalidLinks, () => downloadedAt);
+        var invalidResult = RunRemoteChartDownload(invalidService,
+            RemoteDownloadValidationSummary(1, invalidSha256), out var invalidCallbacks);
+        Require(invalidCallbacks == 1 && !invalidResult.Success && invalidImporter.ImportCalls == 1 &&
+                invalidLibrary.SaveCalls == 0 && invalidLinks.UpsertCalls == 0,
+            "An invalid GGR accepted by all transport checks must never save or link a local chart");
+        Require(invalidFiles.CreatedPaths == 1 && invalidFiles.DeleteCalls == 1 && invalidFiles.LivePaths == 0,
+            "An importer rejection must delete its temporary GGR");
+        RequireUserDisplayableRemoteError(invalidResult, "invalid GGR");
+
+        var staleFiles = new RemoteDownloadValidationFileStore();
+        var staleClient = new RemoteDownloadValidationClient(staleFiles, fixtureBytes,
+            new ChartVaultDownloadResult(string.Empty, testGgrSize, testGgrSha256));
+        var staleImporter = new CountingChartImporter(new GgrChartImporter());
+        var staleLibrary = new RemoteDownloadValidationLibrary { SaveEntryId = testGgrSha256 };
+        var staleLinks = new RemoteDownloadValidationLinkStore();
+        staleLinks.Seed(new RemoteChartLink
+        {
+            ChartId = "chart_test",
+            Version = 1,
+            Sha256 = testGgrSha256,
+            LocalEntryId = testGgrSha256,
+            DownloadedAtUnixMilliseconds = downloadedAt - 1,
+        });
+        var staleService = new RemoteChartDownloadService(staleClient, staleFiles, staleImporter,
+            staleLibrary, staleLinks, () => downloadedAt);
+        var staleResult = RunRemoteChartDownload(staleService, summary, out var staleCallbacks);
+        Require(staleCallbacks == 1 && staleResult.Success && !staleResult.AlreadyDownloaded &&
+                staleClient.DownloadCalls == 1 && staleImporter.ImportCalls == 1 &&
+                staleLibrary.SaveCalls == 1 && staleLinks.UpsertCalls == 1,
+            "A matching remote link whose local entry is missing must redownload, save, and replace the link");
+        Require(staleFiles.CreatedPaths == 1 && staleFiles.DeleteCalls == 1 && staleFiles.LivePaths == 0,
+            "A stale-link redownload must delete its temporary GGR");
+
+        var overLimitFiles = new RemoteDownloadValidationFileStore();
+        var overLimitClient = new RemoteDownloadValidationClient(overLimitFiles, fixtureBytes,
+            new ChartVaultDownloadResult(string.Empty, testGgrSize, testGgrSha256));
+        var overLimitImporter = new CountingChartImporter(new GgrChartImporter());
+        var overLimitLibrary = new RemoteDownloadValidationLibrary { SaveEntryId = testGgrSha256 };
+        var overLimitLinks = new RemoteDownloadValidationLinkStore();
+        var overLimitService = new RemoteChartDownloadService(overLimitClient, overLimitFiles,
+            overLimitImporter, overLimitLibrary, overLimitLinks, () => downloadedAt);
+        var overLimitResult = RunRemoteChartDownload(overLimitService,
+            RemoteDownloadValidationSummary(ChartVaultApiSettings.MaxGgrBytes + 1, testGgrSha256),
+            out var overLimitCallbacks);
+        Require(overLimitCallbacks == 1 && !overLimitResult.Success && overLimitClient.DownloadCalls == 0 &&
+                overLimitImporter.ImportCalls == 0 && overLimitLibrary.SaveCalls == 0 &&
+                overLimitLinks.UpsertCalls == 0 && overLimitFiles.CreatedPaths == 0,
+            "An over-limit catalog entry must fail before client download or temporary-file creation");
+        RequireUserDisplayableRemoteError(overLimitResult, "over-limit catalog entry");
+
+        Debug.Log("GUGARHYTHM_REMOTE_CHART_DOWNLOAD_VALIDATION_OK");
+    }
+
+    static void ValidateRemoteDownloadRejections(byte[] fixtureBytes, long fixtureSize, string fixtureSha256)
+    {
+        const string otherSha256 = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+        const string uppercaseSha256 = "200F4D01039BE173AE10D7EEACC45182DFB2706F082D4A8E47A89D7B1AB056B5";
+        var shorter = new byte[fixtureBytes.Length - 1];
+        Buffer.BlockCopy(fixtureBytes, 0, shorter, 0, shorter.Length);
+        var longer = new byte[fixtureBytes.Length + 1];
+        Buffer.BlockCopy(fixtureBytes, 0, longer, 0, fixtureBytes.Length);
+        longer[longer.Length - 1] = 0x5a;
+
+        var cases = new[]
+        {
+            new RemoteDownloadRejectionCase("missing content length", fixtureBytes, -1, fixtureSha256, fixtureSha256),
+            new RemoteDownloadRejectionCase("mismatched content length", fixtureBytes, fixtureSize + 1, fixtureSha256, fixtureSha256),
+            new RemoteDownloadRejectionCase("missing response hash", fixtureBytes, fixtureSize, null, fixtureSha256),
+            new RemoteDownloadRejectionCase("non-canonical response hash", fixtureBytes, fixtureSize, uppercaseSha256, fixtureSha256),
+            new RemoteDownloadRejectionCase("catalog/header hash mismatch", fixtureBytes, fixtureSize, otherSha256, fixtureSha256),
+            new RemoteDownloadRejectionCase("catalog/file hash mismatch", fixtureBytes, fixtureSize, otherSha256, otherSha256),
+            new RemoteDownloadRejectionCase("shorter downloaded file", shorter, fixtureSize, fixtureSha256, fixtureSha256),
+            new RemoteDownloadRejectionCase("longer downloaded file", longer, fixtureSize, fixtureSha256, fixtureSha256),
+        };
+
+        foreach (var testCase in cases)
+        {
+            var files = new RemoteDownloadValidationFileStore();
+            var client = new RemoteDownloadValidationClient(files, testCase.Payload,
+                new ChartVaultDownloadResult(string.Empty, testCase.ContentLength, testCase.ResponseSha256));
+            var importer = new CountingChartImporter(new GgrChartImporter());
+            var library = new RemoteDownloadValidationLibrary { SaveEntryId = testCase.CatalogSha256 };
+            var links = new RemoteDownloadValidationLinkStore();
+            var service = new RemoteChartDownloadService(client, files, importer, library, links, () => 1772064000123L);
+            var result = RunRemoteChartDownload(service,
+                RemoteDownloadValidationSummary(fixtureSize, testCase.CatalogSha256), out var callbacks);
+            Require(callbacks == 1 && !result.Success && client.DownloadCalls == 1 &&
+                    importer.ImportCalls == 0 && library.SaveCalls == 0 && links.UpsertCalls == 0,
+                "Rejected remote download must stop before import/save/link: " + testCase.Name);
+            Require(files.CreatedPaths == 1 && files.DeleteCalls == 1 && files.LivePaths == 0,
+                "Rejected remote download must delete its temporary GGR: " + testCase.Name);
+            RequireUserDisplayableRemoteError(result, testCase.Name);
+        }
+    }
+
+    static RemoteChartSummary RemoteDownloadValidationSummary(long sizeBytes, string sha256) => new()
+    {
+        ChartId = "chart_test",
+        Version = 1,
+        Title = "Test",
+        Artist = "GUGArhythm",
+        Author = "Aurora",
+        Difficulty = "TEST",
+        Rating = 1,
+        Offset = 0,
+        UpdatedAt = "2026-08-27T00:00:00.000Z",
+        Sha256 = sha256,
+        SizeBytes = sizeBytes,
+        CoverUrl = null,
+        DownloadUrl = "/api/v1/charts/chart_test/versions/1/ggr",
+    };
+
+    static RemoteChartImportResult RunRemoteChartDownload(RemoteChartDownloadService service,
+        RemoteChartSummary chart, out int callbackCount)
+    {
+        var result = default(RemoteChartImportResult);
+        var calls = 0;
+        RunRemoteChartCoroutine(service.DownloadAndImport(chart, value =>
+        {
+            calls++;
+            result = value;
+        }));
+        callbackCount = calls;
+        return result;
+    }
+
+    static void RunRemoteChartCoroutine(IEnumerator routine)
+    {
+        Require(routine != null, "Remote chart validation coroutine must exist");
+        var stack = new Stack<IEnumerator>();
+        stack.Push(routine);
+        var steps = 0;
+        while (stack.Count > 0)
+        {
+            Require(++steps <= 10000, "Remote chart validation coroutine did not complete");
+            var current = stack.Peek();
+            if (current.MoveNext())
+            {
+                if (current.Current is IEnumerator nested) stack.Push(nested);
+                continue;
+            }
+            (current as IDisposable)?.Dispose();
+            stack.Pop();
+        }
+    }
+
+    static void RequireUserDisplayableRemoteError(RemoteChartImportResult result, string caseName)
+    {
+        Require(!string.IsNullOrWhiteSpace(result.Error) &&
+                result.Error.IndexOf("memory://", StringComparison.OrdinalIgnoreCase) < 0 &&
+                result.Error.IndexOf("System.", StringComparison.Ordinal) < 0 &&
+                result.Error.IndexOf(" at ", StringComparison.Ordinal) < 0,
+            "Remote chart failure must expose a user-displayable error without paths or stack text: " + caseName);
+    }
+
+    sealed class RemoteDownloadRejectionCase
+    {
+        public readonly string Name;
+        public readonly byte[] Payload;
+        public readonly long ContentLength;
+        public readonly string ResponseSha256;
+        public readonly string CatalogSha256;
+
+        public RemoteDownloadRejectionCase(string name, byte[] payload, long contentLength,
+            string responseSha256, string catalogSha256)
+        {
+            Name = name;
+            Payload = payload;
+            ContentLength = contentLength;
+            ResponseSha256 = responseSha256;
+            CatalogSha256 = catalogSha256;
+        }
+    }
+
+    sealed class RemoteDownloadValidationClient : IChartVaultClient
+    {
+        readonly RemoteDownloadValidationFileStore files;
+        readonly byte[] payload;
+        readonly ChartVaultDownloadResult response;
+
+        public int DownloadCalls;
+
+        public RemoteDownloadValidationClient(RemoteDownloadValidationFileStore files, byte[] payload,
+            ChartVaultDownloadResult response)
+        {
+            this.files = files;
+            this.payload = payload;
+            this.response = response;
+        }
+
+        public IEnumerator FetchPublicCatalog(Action<ChartVaultCatalogResult> complete)
+        {
+            complete?.Invoke(new ChartVaultCatalogResult(null, "unused"));
+            yield break;
+        }
+
+        public IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
+            Action<ChartVaultDownloadResult> complete)
+        {
+            DownloadCalls++;
+            yield return null;
+            files.Write(destinationPath, payload);
+            complete?.Invoke(response);
+        }
+
+        public IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete)
+        {
+            complete?.Invoke(null, "unused");
+            yield break;
+        }
+    }
+
+    sealed class RemoteDownloadValidationFileStore : IChartVaultFileStore
+    {
+        readonly Dictionary<string, byte[]> stored = new(StringComparer.Ordinal);
+        readonly HashSet<string> active = new(StringComparer.Ordinal);
+
+        public int CreatedPaths;
+        public int DeleteCalls;
+        public int LivePaths => active.Count;
+
+        public string CreateTemporaryPath(string extension)
+        {
+            CreatedPaths++;
+            var path = "memory://chart-vault-" + CreatedPaths + extension;
+            active.Add(path);
+            return path;
+        }
+
+        public void Write(string path, byte[] bytes)
+        {
+            if (!active.Contains(path)) throw new InvalidOperationException("Unknown validation temp path.");
+            stored[path] = bytes == null ? Array.Empty<byte>() : (byte[])bytes.Clone();
+        }
+
+        public bool TryGetLength(string path, out long length)
+        {
+            if (stored.TryGetValue(path, out var bytes))
+            {
+                length = bytes.LongLength;
+                return true;
+            }
+            length = 0;
+            return false;
+        }
+
+        public bool TryComputeSha256(string path, out string sha256)
+        {
+            sha256 = null;
+            if (!stored.TryGetValue(path, out var bytes)) return false;
+            using var algorithm = SHA256.Create();
+            sha256 = string.Concat(algorithm.ComputeHash(bytes).Select(value => value.ToString("x2")));
+            return true;
+        }
+
+        public bool TryReadAllBytes(string path, out byte[] bytes)
+        {
+            bytes = null;
+            if (!stored.TryGetValue(path, out var value)) return false;
+            bytes = (byte[])value.Clone();
+            return true;
+        }
+
+        public void DeleteIfExists(string path)
+        {
+            DeleteCalls++;
+            active.Remove(path);
+            stored.Remove(path);
+        }
+    }
+
+    sealed class CountingChartImporter : IChartImporter
+    {
+        readonly IChartImporter inner;
+        public int ImportCalls;
+
+        public CountingChartImporter(IChartImporter inner) => this.inner = inner;
+
+        public bool CanImport(string fileName, byte[] header) => inner.CanImport(fileName, header);
+
+        public ImportResult Import(string fileName, byte[] data,
+            IReadOnlyDictionary<string, byte[]> companionFiles = null)
+        {
+            ImportCalls++;
+            return inner.Import(fileName, data, companionFiles);
+        }
+    }
+
+    sealed class RemoteDownloadValidationLibrary : ILocalChartLibraryGateway
+    {
+        readonly List<LocalChartEntry> entries = new();
+
+        public string MatchingTitle;
+        public string MatchingArtist;
+        public string MatchingGroupId;
+        public string SaveEntryId;
+        public int SaveCalls;
+        public int NewGroupCalls;
+        public string LastFindTitle;
+        public string LastFindArtist;
+        public string LastSavedGroupId;
+
+        public IReadOnlyList<LocalChartEntry> Load() => entries;
+
+        public string FindMatchingGroupId(string title, string artist)
+        {
+            LastFindTitle = title;
+            LastFindArtist = artist;
+            return string.Equals(title, MatchingTitle, StringComparison.Ordinal) &&
+                   string.Equals(artist, MatchingArtist, StringComparison.Ordinal)
+                ? MatchingGroupId
+                : null;
+        }
+
+        public string NewGroupId()
+        {
+            NewGroupCalls++;
+            return "new-validation-group";
+        }
+
+        public LocalChartEntry Save(string fileName, byte[] bytes, RuntimeChart chart, string groupId)
+        {
+            SaveCalls++;
+            LastSavedGroupId = groupId;
+            var entry = new LocalChartEntry
+            {
+                Id = SaveEntryId,
+                Title = chart.Title,
+                Artist = chart.Artist,
+                Author = chart.Author,
+                DifficultyName = chart.DifficultyName,
+                DifficultyLevel = chart.DifficultyLevel,
+                GroupId = groupId,
+                Format = chart.SourceFormat,
+                NoteCount = chart.PlayableCount,
+            };
+            entries.RemoveAll(candidate => candidate.Id == entry.Id);
+            entries.Add(entry);
+            return entry;
+        }
+    }
+
+    sealed class RemoteDownloadValidationLinkStore : IRemoteChartLinkStore
+    {
+        readonly Dictionary<string, RemoteChartLink> stored = new(StringComparer.Ordinal);
+
+        public int UpsertCalls;
+        public RemoteChartLink LastUpsert;
+
+        public bool TryGet(string chartId, int version, out RemoteChartLink link) =>
+            stored.TryGetValue(Key(chartId, version), out link);
+
+        public void Upsert(RemoteChartLink link)
+        {
+            UpsertCalls++;
+            LastUpsert = link;
+            stored[Key(link.ChartId, link.Version)] = link;
+        }
+
+        public void Seed(RemoteChartLink link) => stored[Key(link.ChartId, link.Version)] = link;
+
+        static string Key(string chartId, int version) => chartId + "\u001f" + version;
+    }
+
     static void ValidateCoverPresentationContracts()
     {
         var source = new Texture2D(2, 2, TextureFormat.RGBA32, false);
@@ -1695,12 +2378,13 @@ public static class RuntimeValidation
 
     static void ValidateLibrarySelectionRestore()
     {
-        var method = typeof(SonolusLandscapePrototype).GetMethod(
-            "ShouldEnableLibraryStartButton", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+        var method = typeof(SonolusLandscapePrototype).GetMethod("ShouldEnableLibraryStartButton",
+            System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static, null,
+            new[] { typeof(ChartLibrarySource), typeof(bool) }, null);
         Require(method != null, "Library selection restore must expose its start-button state rule");
-        Require((bool)method.Invoke(null, new object[] { true }),
+        Require((bool)method.Invoke(null, new object[] { ChartLibrarySource.Local, true }),
             "A restored library selection must enable the start button");
-        Require(!(bool)method.Invoke(null, new object[] { false }),
+        Require(!(bool)method.Invoke(null, new object[] { ChartLibrarySource.Local, false }),
             "The start button must remain disabled without a restored selection");
         Debug.Log("GUGARHYTHM_LIBRARY_SELECTION_RESTORE_VALIDATION_OK");
     }
