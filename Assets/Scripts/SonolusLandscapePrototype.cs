@@ -169,7 +169,7 @@ namespace Gugarhythm
         }
     }
 
-    public sealed class SonolusLandscapePrototype : MonoBehaviour
+    public sealed partial class SonolusLandscapePrototype : MonoBehaviour
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         static readonly ProfilerMarker GameplayFrameProfiler = new("Gugarhythm.GameplayFrame");
@@ -690,8 +690,10 @@ namespace Gugarhythm
             var hitY = canvasHeight * .5f - HitSourceY / LaneTextureHeight * canvasHeight;
             return hitY + JudgmentInputBandHeight(canvasHeight) * .5f;
         }
+        public static float JudgmentInputGridCoordinate(float canvasY, float canvasHeight) =>
+            (canvasY - JudgmentInputGridStripTop(canvasHeight)) / JudgmentInputBandHeight(canvasHeight);
         public static int JudgmentInputGridRow(float canvasY, float canvasHeight) =>
-            Mathf.FloorToInt((canvasY - JudgmentInputGridStripTop(canvasHeight)) / JudgmentInputBandHeight(canvasHeight));
+            Mathf.FloorToInt(JudgmentInputGridCoordinate(canvasY, canvasHeight));
         public static float InputLaneAtCanvasX(float canvasX) => Mathf.Clamp(
             ScreenXToLane(canvasX, 1f), VirtualSliderInput.MinimumLane, VirtualSliderInput.MaximumLane);
         // Gray input feedback deliberately stops at the visible central track.
@@ -930,6 +932,8 @@ namespace Gugarhythm
             if (!result.Success)
             {
                 Debug.LogError("無法載入跨場景選取的譜面：" + result.Error);
+                if (InputDiagnosticsSession.IsDebugEntry(entry))
+                    EndInputDiagnosticsRun("chart-import-failed", true);
                 GugarhythmSceneRouter.OpenLibrary();
                 yield break;
             }
@@ -945,6 +949,8 @@ namespace Gugarhythm
             if (!musicLoadSucceeded)
             {
                 Debug.LogError("跨場景選取的 GGR 音樂無法解碼。");
+                if (InputDiagnosticsSession.IsDebugEntry(entry))
+                    EndInputDiagnosticsRun("audio-load-failed", true);
                 GugarhythmSceneRouter.OpenLibrary();
                 yield break;
             }
@@ -959,6 +965,8 @@ namespace Gugarhythm
 
         void OnDestroy()
         {
+            if (InputDiagnosticsSession.CaptureActive)
+                EndInputDiagnosticsRun("scene-destroyed", true);
             destroying = true;
             remoteOperationGeneration++;
             remoteCoverGeneration++;
@@ -1013,6 +1021,8 @@ namespace Gugarhythm
             if (!running || paused || finger == null) return;
             var touch = finger.lastTouch;
             if (!touch.valid) return;
+            InputDiagnosticsSession.RecordTouchQueued(touch.touchId, touch.time,
+                touch.screenPosition, touch.phase);
             touchInputBuffer.Enqueue(touch.touchId, touch.time, touch.screenPosition, touch.phase);
         }
 
@@ -1042,6 +1052,7 @@ namespace Gugarhythm
             if (running && !paused && chart != null && judgmentEngine != null)
                 UpdateGameplayFrame(measurePerformance, gameplayTimingStart);
             UpdatePerformanceHud();
+            UpdateInputDiagnosticsHud();
             PollNativeImport();
             UpdateSafeAreaLayout();
             UpdateInputLaneFeedback();
@@ -1075,7 +1086,9 @@ namespace Gugarhythm
             // beneath the button rather than input feedback.
             var judgmentTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             judgmentEngine.ProcessInto(authoritativeSongTime, inputBatch, contacts, contactPaths,
-                autoPlayEnabled, judgmentEvents);
+                autoPlayEnabled, judgmentEvents,
+                InputDiagnosticsSession.CaptureActive ? inputDiagnosticsDecisions : null);
+            RecordInputDiagnosticsDecisions();
             if (measurePerformance)
                 RecordFramePacingDiagnostics(rawDspTime, presentationDspTime,
                     MillisecondsBetween(judgmentTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
@@ -1312,6 +1325,7 @@ namespace Gugarhythm
         void ShowSettingsAudio()
         {
             if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            HideInputDiagnosticsSettings();
             settingsAudioPanel.gameObject.SetActive(true);
             settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
@@ -1323,6 +1337,7 @@ namespace Gugarhythm
         void ShowSettingsGame()
         {
             if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            HideInputDiagnosticsSettings();
             settingsAudioPanel.gameObject.SetActive(false);
             settingsGamePanel.gameObject.SetActive(true);
             settingsTagsPanel.gameObject.SetActive(false);
@@ -1334,6 +1349,7 @@ namespace Gugarhythm
         void ShowSettingsTags()
         {
             if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            HideInputDiagnosticsSettings();
             settingsAudioPanel.gameObject.SetActive(false);
             settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(true);
@@ -1619,6 +1635,7 @@ namespace Gugarhythm
             if (loading || chart == null || music.clip == null) return;
             CancelResumeCountdown();
             presentationClock.Invalidate();
+            BeginInputDiagnosticsRunIfNeeded();
             ResetRuntime();
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
@@ -1809,6 +1826,7 @@ namespace Gugarhythm
             resultPanel.gameObject.SetActive(false);
             RefreshHud();
             ClearJudgment();
+            EndInputDiagnosticsRun("returned-to-library", true);
             GugarhythmSceneRouter.OpenLibrary();
         }
 
@@ -1828,6 +1846,7 @@ namespace Gugarhythm
             scoreState.Reset();
             judgmentTimingStatistics.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
+            ConfigureInputDiagnosticsJudgmentEngine();
             judgmentEvents.Clear();
             contactCleanupBuffers.BeginFrame();
             hudState.Invalidate();
@@ -1937,10 +1956,21 @@ namespace Gugarhythm
             for (var index = 0; index < bufferedTouchSamples.Count; index++)
             {
                 var sample = bufferedTouchSamples[index];
+                var queueMilliseconds = Math.Max(0, InputState.currentTime - sample.Time) * 1000d;
                 if (performanceDiagnosticsEnabled)
                     inputQueueDelaySamples.AddSample(
-                        (float)(Math.Max(0, InputState.currentTime - sample.Time) * 1000d), Time.unscaledDeltaTime);
+                        (float)queueMilliseconds, Time.unscaledDeltaTime);
+                var tokenStart = inputBatch.Count;
+                var inInputBand = TryScreenToLane(sample.ScreenPosition, out var diagnosticLane, out _);
+                if (!inInputBand)
+                    diagnosticLane = InputLaneAtCanvasX(ScreenToCanvasX(sample.ScreenPosition.x));
+                var eventSongTime = InputEventSongTime(sample.Time);
                 ProcessBufferedTouchSample(sample);
+                if (!InputDiagnosticsSession.CaptureActive) continue;
+                InputDiagnosticsSession.RecordTouchProcessed(sample.FingerId, eventSongTime,
+                    diagnosticLane, inInputBand, queueMilliseconds, inputBatch.Count - tokenStart);
+                for (var tokenIndex = tokenStart; tokenIndex < inputBatch.Count; tokenIndex++)
+                    InputDiagnosticsSession.RecordToken(inputBatch[tokenIndex]);
             }
 #if UNITY_EDITOR || UNITY_STANDALONE
             contactCleanupBuffers.BeginFrame();
@@ -1961,7 +1991,7 @@ namespace Gugarhythm
         {
             var id = sample.FingerId;
             var eventTime = InputEventSongTime(sample.Time);
-            var isInInputBand = TryScreenToLane(sample.ScreenPosition, out var lane, out var gridRow);
+            var isInInputBand = TryScreenToLane(sample.ScreenPosition, out var lane, out var gridCoordinate);
             var wasTracking = touches.TryGetValue(id, out var memory);
             if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) return;
 
@@ -1994,7 +2024,6 @@ namespace Gugarhythm
                 memory = new TouchMemory
                 {
                     Lane = lane,
-                    GridRow = gridRow,
                     EventTime = eventTime,
                     StartTime = eventTime,
                     LastInputRecordTime = double.NegativeInfinity,
@@ -2011,20 +2040,17 @@ namespace Gugarhythm
                 return;
             }
             if (entering || sample.Phase == UnityEngine.InputSystem.TouchPhase.Began)
-                virtualSlider.Begin(id, eventTime, lane, inputBatch);
+                virtualSlider.Begin(id, eventTime, lane, gridCoordinate, inputBatch);
             else if (sample.Phase == UnityEngine.InputSystem.TouchPhase.Moved &&
                      Vector2.SqrMagnitude(sample.ScreenPosition - memory.ScreenPosition) > .01f)
             {
-                virtualSlider.Move(id, eventTime, lane, inputBatch);
-                if (memory.GridRow != gridRow)
-                    inputBatch.Add(new InputToken(id, RuntimeNoteKind.Tap, eventTime, lane));
+                virtualSlider.Move(id, eventTime, lane, gridCoordinate, inputBatch);
                 contactPaths.Add(new ContactPathSegment(id, memory.EventTime, eventTime,
                     memory.Lane, lane, false));
             }
             memory.LastInputRecordTime = sample.Time;
             memory.EventTime = eventTime;
             memory.Lane = lane;
-            memory.GridRow = gridRow;
             memory.ScreenPosition = sample.ScreenPosition;
             touches[id] = memory;
         }
@@ -2051,7 +2077,7 @@ namespace Gugarhythm
 
             var position = mouse.position.ReadValue();
             var eventTime = CurrentSongTime();
-            var isInInputBand = TryScreenToLane(position, out var lane, out var gridRow);
+            var isInInputBand = TryScreenToLane(position, out var lane, out var gridCoordinate);
             var wasTracking = touches.TryGetValue(MouseContactId, out var memory);
             if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) return;
             if (!isInInputBand)
@@ -2093,23 +2119,19 @@ namespace Gugarhythm
                 memory = new TouchMemory
                 {
                     Lane = lane,
-                    GridRow = gridRow,
                     ScreenPosition = position,
                     EventTime = eventTime,
                     StartTime = eventTime,
                     LastInputRecordTime = eventTime,
                 };
-                virtualSlider.Begin(MouseContactId, eventTime, lane, inputBatch);
+                virtualSlider.Begin(MouseContactId, eventTime, lane, gridCoordinate, inputBatch);
             }
             else if (Vector2.SqrMagnitude(position - memory.ScreenPosition) > .01f)
             {
-                virtualSlider.Move(MouseContactId, eventTime, lane, inputBatch);
-                if (memory.GridRow != gridRow)
-                    inputBatch.Add(new InputToken(MouseContactId, RuntimeNoteKind.Tap, eventTime, lane));
+                virtualSlider.Move(MouseContactId, eventTime, lane, gridCoordinate, inputBatch);
                 contactPaths.Add(new ContactPathSegment(MouseContactId, memory.EventTime, eventTime,
                     memory.Lane, lane, false));
                 memory.Lane = lane;
-                memory.GridRow = gridRow;
                 memory.ScreenPosition = position;
                 memory.EventTime = eventTime;
                 memory.LastInputRecordTime = eventTime;
@@ -2131,25 +2153,26 @@ namespace Gugarhythm
         static float ScreenToCanvasY(float screenY) => (screenY / Math.Max(1, Screen.height) - .5f) * CanvasHeight;
         static float ScreenToCanvasX(float screenX) => (screenX / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
 
-        bool TryScreenToLane(Vector2 screenPosition, out float lane, out int gridRow)
+        bool TryScreenToLane(Vector2 screenPosition, out float lane, out float gridCoordinate)
         {
             var canvasY = ScreenToCanvasY(screenPosition.y);
             if (!IsJudgmentInputBand(canvasY, CanvasHeight))
             {
                 lane = default;
-                gridRow = default;
+                gridCoordinate = default;
                 return false;
             }
             // The visible input region intentionally fills the canvas width:
             // canvas left/right are the two outer virtual-slider lanes.
             var canvasX = ScreenToCanvasX(screenPosition.x);
             lane = InputLaneAtCanvasX(canvasX);
-            gridRow = JudgmentInputGridRow(canvasY, CanvasHeight);
+            gridCoordinate = JudgmentInputGridCoordinate(canvasY, CanvasHeight);
             return true;
         }
 
         void OnJudgment(JudgmentEvent judgment)
         {
+            InputDiagnosticsSession.RecordJudgment(judgment);
             var timing = judgmentTimingStatistics.Register(judgment);
             ShowJudgment(judgment.Grade);
             ShowJudgmentTiming(timing);
@@ -2161,6 +2184,7 @@ namespace Gugarhythm
             {
                 SpawnHitParticle(judgment.Note);
             }
+            InputDiagnosticsSession.RecordHitFeedback(judgment, judgment.Grade != JudgmentGrade.Miss);
         }
 
         void PlayJudgmentSound(JudgmentEvent judgment)
@@ -3073,7 +3097,9 @@ namespace Gugarhythm
             pauseButton.gameObject.SetActive(false);
             ReleaseAllViews();
             RefreshHud();
-            if (currentLibraryEntry != null)
+            var wasInputDiagnostics = InputDiagnosticsSession.IsDebugEntry(currentLibraryEntry);
+            EndInputDiagnosticsRun("chart-completed", true);
+            if (currentLibraryEntry != null && !wasInputDiagnostics)
                 LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
             resultPanel.gameObject.SetActive(true);
             resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}\n\nFAST      LATE\n{judgmentTimingStatistics.Fast:N0}          {judgmentTimingStatistics.Late:N0}";
@@ -3218,6 +3244,7 @@ namespace Gugarhythm
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
             BuildPerformanceHud(safeAreaRoot);
+            BuildInputDiagnosticsHud(safeAreaRoot);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
             BuildLatencyCalibration(safeAreaRoot);
@@ -3832,6 +3859,7 @@ namespace Gugarhythm
             MakeOutlinedButton("取消", difficultyTagConfirmationPanel, new Vector2(-120, -82), CancelDifficultyTagDelete, new Vector2(160, 54));
             difficultyTagConfirmationPanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
+            BuildInputDiagnosticsSettingsSection(navigation);
             settingsPanel.gameObject.SetActive(false);
         }
 
@@ -5677,6 +5705,6 @@ namespace Gugarhythm
 
         static void Fill(RectTransform rect) { rect.anchorMin = Vector2.zero; rect.anchorMax = Vector2.one; rect.offsetMin = Vector2.zero; rect.offsetMax = Vector2.zero; }
         static void Outline(GameObject go, Color color, int width) { var outline = go.AddComponent<Outline>(); outline.effectColor = color; outline.effectDistance = new Vector2(width, -width); }
-        struct TouchMemory { public float Lane; public int GridRow; public Vector2 ScreenPosition; public double EventTime; public double StartTime; public double LastInputRecordTime; }
+        struct TouchMemory { public float Lane; public Vector2 ScreenPosition; public double EventTime; public double StartTime; public double LastInputRecordTime; }
     }
 }

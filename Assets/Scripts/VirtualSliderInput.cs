@@ -19,57 +19,60 @@ namespace Gugarhythm
         public const float MaximumLane = 6f;
         public const int CellCount = 24;
         public const float CellWidth = (MaximumLane - MinimumLane) / CellCount;
+        public const float TapDragActivationDistance = CellWidth;
         public const float FlickActivationDistance = .35f;
 
         readonly Dictionary<int, ContactState> contacts = new();
 
         public void Reset() => contacts.Clear();
 
-        public void Begin(int fingerId, double time, float lane, ICollection<InputToken> output)
+        public void Begin(int fingerId, double time, float lane, ICollection<InputToken> output) =>
+            Begin(fingerId, time, lane, float.NaN, output);
+
+        public void Begin(int fingerId, double time, float lane, float gridCoordinate,
+            ICollection<InputToken> output)
         {
-            var state = new ContactState(lane, time);
+            var state = new ContactState(lane, time, gridCoordinate);
             contacts[fingerId] = state;
             EmitCell(fingerId, CellAt(lane), time, state, output);
         }
 
-        public void Move(int fingerId, double time, float lane, ICollection<InputToken> output)
+        public void Move(int fingerId, double time, float lane, ICollection<InputToken> output) =>
+            Move(fingerId, time, lane, float.NaN, output);
+
+        public void Move(int fingerId, double time, float lane, float gridCoordinate,
+            ICollection<InputToken> output)
         {
             if (!contacts.TryGetValue(fingerId, out var state))
             {
-                Begin(fingerId, time, lane, output);
+                Begin(fingerId, time, lane, gridCoordinate, output);
                 return;
             }
 
             var previousLane = state.Lane;
             var previousTime = state.Time;
-            var direction = Math.Sign(lane - previousLane);
-            var previousCell = CellAt(previousLane);
-            var currentCell = CellAt(lane);
-            if (direction > 0)
+            var emittedTap = false;
+            if (state.TapDragActive)
+                emittedTap = EmitCrossedCells(
+                    fingerId, previousLane, previousTime, lane, time, state, output);
+            else if (Math.Abs(lane - state.StartLane) + .00001f >= TapDragActivationDistance)
             {
-                var first = previousCell + 1;
-                var last = currentCell;
-                for (var cell = first; cell <= last; cell++)
-                {
-                    var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
-                    EmitCell(fingerId, cell, crossingTime, state, output);
-                }
-            }
-            else if (direction < 0)
-            {
-                var first = previousCell - 1;
-                var last = currentCell;
-                for (var cell = first; cell >= last; cell--)
-                {
-                    var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
-                    EmitCell(fingerId, cell, crossingTime, state, output);
-                }
+                // Touch centroids can cross a cell boundary by a few pixels
+                // during an otherwise stationary Tap. Wait for one full cell
+                // of travel before treating Move samples as intentional rub,
+                // then replay every crossing from the original contact point.
+                state.TapDragActive = true;
+                emittedTap = EmitCrossedCells(
+                    fingerId, state.StartLane, state.StartTime, lane, time, state, output);
             }
 
+            if (ShouldEmitGridRowTap(state, gridCoordinate) && !emittedTap && output != null)
+                output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, lane));
             EmitFlicks(fingerId, lane, time, state, output);
 
             state.Lane = lane;
             state.Time = time;
+            state.GridCoordinate = gridCoordinate;
         }
 
         /// <summary>
@@ -88,6 +91,58 @@ namespace Gugarhythm
         }
 
         public static float CellCenter(int cell) => MinimumLane + (cell + .5f) * CellWidth;
+
+        static bool EmitCrossedCells(int fingerId, float previousLane, double previousTime,
+            float lane, double time, ContactState state, ICollection<InputToken> output)
+        {
+            var emitted = false;
+            var direction = Math.Sign(lane - previousLane);
+            var previousCell = CellAt(previousLane);
+            var currentCell = CellAt(lane);
+            if (direction > 0)
+            {
+                var first = previousCell + 1;
+                var last = currentCell;
+                for (var cell = first; cell <= last; cell++)
+                {
+                    var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
+                    EmitCell(fingerId, cell, crossingTime, state, output);
+                    emitted = true;
+                }
+            }
+            else if (direction < 0)
+            {
+                var first = previousCell - 1;
+                var last = currentCell;
+                for (var cell = first; cell >= last; cell--)
+                {
+                    var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
+                    EmitCell(fingerId, cell, crossingTime, state, output);
+                    emitted = true;
+                }
+            }
+            return emitted;
+        }
+
+        static bool ShouldEmitGridRowTap(ContactState state, float gridCoordinate)
+        {
+            if (!float.IsFinite(state.StartGridCoordinate) || !float.IsFinite(state.GridCoordinate) ||
+                !float.IsFinite(gridCoordinate))
+                return false;
+
+            // Starting close to a row boundary must not turn ordinary Tap
+            // centroid jitter into another Tap. Once a finger has travelled a
+            // complete row from its contact point, subsequent row crossings
+            // remain intentional rub activations until the contact ends.
+            if (!state.GridRowTapActive)
+            {
+                if (Math.Abs(gridCoordinate - state.StartGridCoordinate) + .00001f < 1f)
+                    return false;
+                state.GridRowTapActive = true;
+                return (int)Math.Floor(state.StartGridCoordinate) != (int)Math.Floor(gridCoordinate);
+            }
+            return (int)Math.Floor(state.GridCoordinate) != (int)Math.Floor(gridCoordinate);
+        }
 
         static double CrossingTime(float previousLane, double previousTime, float lane, double time, int enteredCell, int direction)
         {
@@ -133,15 +188,25 @@ namespace Gugarhythm
 
         sealed class ContactState
         {
+            public readonly float StartLane;
+            public readonly double StartTime;
+            public readonly float StartGridCoordinate;
             public float Lane;
             public double Time;
+            public float GridCoordinate;
             public float FlickAnchorLane;
             public double FlickAnchorTime;
+            public bool TapDragActive;
+            public bool GridRowTapActive;
 
-            public ContactState(float lane, double time)
+            public ContactState(float lane, double time, float gridCoordinate)
             {
+                StartLane = lane;
+                StartTime = time;
+                StartGridCoordinate = gridCoordinate;
                 Lane = lane;
                 Time = time;
+                GridCoordinate = gridCoordinate;
                 FlickAnchorLane = lane;
                 FlickAnchorTime = time;
             }

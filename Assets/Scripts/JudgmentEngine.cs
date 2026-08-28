@@ -72,6 +72,35 @@ namespace Gugarhythm
         }
     }
 
+    public enum JudgmentInputDisposition
+    {
+        Unmatched,
+        ProtectionBlocked,
+        Matched,
+    }
+
+    public readonly struct JudgmentInputDiagnostic
+    {
+        public readonly InputToken Input;
+        public readonly RuntimeNote Note;
+        public readonly JudgmentInputDisposition Disposition;
+        public readonly JudgmentGrade CandidateGrade;
+        public readonly double EventTime;
+        public readonly double Delta;
+
+        public JudgmentInputDiagnostic(InputToken input, RuntimeNote note,
+            JudgmentInputDisposition disposition, JudgmentGrade candidateGrade,
+            double eventTime, double delta)
+        {
+            Input = input;
+            Note = note;
+            Disposition = disposition;
+            CandidateGrade = candidateGrade;
+            EventTime = eventTime;
+            Delta = delta;
+        }
+    }
+
     public enum JudgmentTiming { None, Fast, Late }
 
     public static class JudgmentTimingClassifier
@@ -258,16 +287,22 @@ namespace Gugarhythm
 
         public void ProcessInto(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
             IReadOnlyList<ContactPathSegment> contactPaths, bool autoPlay, List<JudgmentEvent> output)
+            => ProcessInto(songTime, inputBatch, contacts, contactPaths, autoPlay, output, null);
+
+        public void ProcessInto(double songTime, IReadOnlyList<InputToken> inputBatch, IReadOnlyList<ActiveContact> contacts,
+            IReadOnlyList<ContactPathSegment> contactPaths, bool autoPlay, List<JudgmentEvent> output,
+            List<JudgmentInputDiagnostic> inputDiagnostics)
         {
             if (output == null) throw new ArgumentNullException(nameof(output));
             output.Clear();
+            inputDiagnostics?.Clear();
             if (autoPlay)
             {
                 ResolveAutoPlay(songTime, output);
                 return;
             }
             RecordContactPaths(songTime, contactPaths);
-            MatchDiscreteInputs(inputBatch, output);
+            MatchDiscreteInputs(inputBatch, output, inputDiagnostics);
             ResolveContactNotes(songTime, contacts, contactPaths, output);
             CommitMisses(songTime, output);
         }
@@ -289,10 +324,18 @@ namespace Gugarhythm
             }
         }
 
-        void MatchDiscreteInputs(IReadOnlyList<InputToken> inputs, List<JudgmentEvent> output)
+        void MatchDiscreteInputs(IReadOnlyList<InputToken> inputs, List<JudgmentEvent> output,
+            List<JudgmentInputDiagnostic> inputDiagnostics)
         {
             if (inputs == null || inputs.Count == 0) return;
             PrepareInputWorkspaces(inputs.Count);
+            if (inputDiagnostics != null)
+            {
+                for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
+                    inputDiagnostics.Add(new JudgmentInputDiagnostic(inputs[inputIndex], null,
+                        JudgmentInputDisposition.Unmatched, JudgmentGrade.Pending,
+                        inputs[inputIndex].Time, double.NaN));
+            }
             for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
             {
                 var input = inputs[inputIndex];
@@ -305,7 +348,17 @@ namespace Gugarhythm
                 for (var noteIndex = first; noteIndex < end; noteIndex++)
                 {
                     var note = indexedNotes[noteIndex];
-                    if (note.Kind != input.Kind || !TryCreateEdge(inputIndex, input, note, out var edge)) continue;
+                    if (note.Kind != input.Kind) continue;
+                    if (!TryCreateEdge(inputIndex, input, note, out var edge,
+                            out var blockedNote, out var blockedGrade, out var blockedEventTime))
+                    {
+                        if (inputDiagnostics != null && blockedNote != null &&
+                            inputDiagnostics[inputIndex].Disposition == JudgmentInputDisposition.Unmatched)
+                            inputDiagnostics[inputIndex] = new JudgmentInputDiagnostic(input, blockedNote,
+                                JudgmentInputDisposition.ProtectionBlocked, blockedGrade,
+                                blockedEventTime, blockedEventTime - blockedNote.Time);
+                        continue;
+                    }
                     edgeWorkspace.Add(edge);
                 }
             }
@@ -357,6 +410,18 @@ namespace Gugarhythm
                 TryAugment(inputOrderWorkspace[orderIndex]);
             }
 
+            if (inputDiagnostics != null)
+            {
+                for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
+                {
+                    if (!hasMatchedInputWorkspace[inputIndex]) continue;
+                    var matched = matchedByInputWorkspace[inputIndex];
+                    inputDiagnostics[inputIndex] = new JudgmentInputDiagnostic(inputs[inputIndex], matched.Note,
+                        JudgmentInputDisposition.Matched, matched.Grade, matched.EventTime,
+                        matched.EventTime - matched.Note.Time);
+                }
+            }
+
             registrationBestByNoteWorkspace.Clear();
             for (var inputIndex = 0; inputIndex < inputs.Count; inputIndex++)
             {
@@ -397,8 +462,15 @@ namespace Gugarhythm
         }
 
         bool TryCreateEdge(int inputIndex, InputToken input, RuntimeNote note, out Edge edge)
+            => TryCreateEdge(inputIndex, input, note, out edge, out _, out _, out _);
+
+        bool TryCreateEdge(int inputIndex, InputToken input, RuntimeNote note, out Edge edge,
+            out RuntimeNote blockedNote, out JudgmentGrade blockedGrade, out double blockedEventTime)
         {
             edge = default;
+            blockedNote = null;
+            blockedGrade = JudgmentGrade.Pending;
+            blockedEventTime = double.NaN;
             if (note.Grade != JudgmentGrade.Pending || IsContactNote(note)) return false;
             if (input.Kind != RuntimeNoteKind.Flick && !LaneMatches(note, input.Lane)) return false;
             var protectionLane = input.Lane;
@@ -408,7 +480,13 @@ namespace Gugarhythm
             if (!eventTime.HasValue) return false;
             var grade = GradeFor(note, eventTime.Value - note.Time);
             if (grade == JudgmentGrade.Pending) return false;
-            if (JudgmentProtectionEnabled && IsProtectedCandidate(note, eventTime.Value, protectionLane)) return false;
+            if (JudgmentProtectionEnabled && IsProtectedCandidate(note, eventTime.Value, protectionLane))
+            {
+                blockedNote = note;
+                blockedGrade = grade;
+                blockedEventTime = eventTime.Value;
+                return false;
+            }
             var spatial = Math.Abs(input.Lane - note.Lane);
             edge = new Edge(inputIndex, note, eventTime.Value, grade,
                 Math.Abs(eventTime.Value - note.Time), spatial);
