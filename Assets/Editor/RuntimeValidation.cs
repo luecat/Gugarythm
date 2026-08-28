@@ -59,6 +59,16 @@ public static class RuntimeValidation
         ValidateBundledChartManifest();
     }
 
+    [MenuItem("Gugarhythm/Validate Chart Vault")]
+    public static void ValidateChartVaultOnly()
+    {
+        ValidateChartVaultContracts();
+        ValidateChartVaultClientBoundaries();
+        ValidateRemoteCatalogPersistence();
+        ValidateRemoteChartDownloadPipeline();
+        Debug.Log("GUGARHYTHM_CHART_VAULT_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Validate iOS Presentation")]
     public static void ValidateIosPresentationOnly()
     {
@@ -1711,6 +1721,9 @@ public static class RuntimeValidation
                 uri.AbsoluteUri == ChartVaultApiSettings.ApiOrigin + valid.DownloadUrl &&
                 string.IsNullOrEmpty(error),
             "Chart Vault client must accept the exact same-origin public GGR path and a nonempty destination");
+        Require(ChartVaultClient.TryParseGgrSizeHeaders(null, "2476208", out var fallbackSize) &&
+                fallbackSize == 2476208,
+            "Chart Vault client must accept the canonical X-GGR-Size fallback when Content-Length is absent");
 
         foreach (var unsafePath in new[]
                  {

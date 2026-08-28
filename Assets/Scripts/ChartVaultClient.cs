@@ -203,8 +203,9 @@ namespace Gugarhythm
             try
             {
                 if (!RequestSucceeded(request)) return DownloadFailure(GgrDownloadError);
-                var contentLength = TryParseCanonicalContentLength(
-                    request.GetResponseHeader("Content-Length"), out var parsedLength)
+                var contentLength = TryParseGgrSizeHeaders(
+                    request.GetResponseHeader("Content-Length"), request.GetResponseHeader("X-GGR-Size"),
+                    out var parsedLength)
                     ? parsedLength
                     : -1;
                 return new ChartVaultDownloadResult(string.Empty, contentLength,
@@ -268,6 +269,21 @@ namespace Gugarhythm
                 parsed = parsed * 10 + digit;
             }
             length = parsed;
+            return true;
+        }
+
+        internal static bool TryParseGgrSizeHeaders(string contentLength, string ggrSize, out long length)
+        {
+            length = -1;
+            if (string.IsNullOrEmpty(contentLength))
+                return TryParseCanonicalContentLength(ggrSize, out length);
+            if (!TryParseCanonicalContentLength(contentLength, out var standardLength))
+                return false;
+            if (!string.IsNullOrEmpty(ggrSize) &&
+                (!TryParseCanonicalContentLength(ggrSize, out var fallbackLength) ||
+                 fallbackLength != standardLength))
+                return false;
+            length = standardLength;
             return true;
         }
 
