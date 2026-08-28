@@ -288,6 +288,7 @@ namespace Gugarhythm
         const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
         const float UpperHiddenBarBoundaryInset = 20f;
+        const float UpperHiddenBarHorizontalOverscan = 256f;
         // The authored playable surface spans exactly -6 through +6. Hold
         // heads include transparent sprite padding, so their rendered quad
         // must still be clipped to these visible track edges.
@@ -1183,9 +1184,6 @@ namespace Gugarhythm
         public static float UpperHiddenBarEdgeInset(float fullWidth) =>
             Mathf.Clamp(UpperHiddenBarBoundaryInset, 0f, Mathf.Max(0f, fullWidth) * .5f);
 
-        static float UpperHiddenBarMaskOutset(float screenProgress) =>
-            NoteSurfaceHeight(screenProgress) * NormalButtonVisibleEdgePaddingPixels / NoteTextureHeight;
-
         public static Color UpperHiddenBarMaskColor => new(.01f, .02f, .06f, 1f);
 
         static void ConfigureUpperHiddenBarMask(TaperedConnectorGraphic mask)
@@ -1217,20 +1215,13 @@ namespace Gugarhythm
         {
             if (upperHiddenMask == null || upperHiddenBarPercent <= .0001f) return;
             var screenProgress = UpperHiddenBarScreenProgress(upperHiddenBarPercent);
-            var topLeft = X(-VisibleTrackLaneEdge, 0f);
-            var topRight = X(VisibleTrackLaneEdge, 0f);
             var bottomLeft = X(-VisibleTrackLaneEdge, screenProgress);
             var bottomRight = X(VisibleTrackLaneEdge, screenProgress);
-            // The blue boundary keeps a small authored inset, but the opaque
-            // fill must extend past the playable edges far enough to cover the
-            // widest key texture padding at every perspective depth.
-            var topOutset = UpperHiddenBarMaskOutset(0f);
-            var bottomOutset = UpperHiddenBarMaskOutset(screenProgress);
+            var maskWidth = ReferenceWidth + UpperHiddenBarHorizontalOverscan * 2f;
             upperHiddenMask.SetGeometry(
-                new Vector2((topLeft + topRight) * .5f, TopY),
-                new Vector2((bottomLeft + bottomRight) * .5f, ScreenY(screenProgress)),
-                topRight - topLeft + topOutset * 2f,
-                bottomRight - bottomLeft + bottomOutset * 2f);
+                new Vector2(0f, TopY),
+                new Vector2(0f, ScreenY(screenProgress)),
+                maskWidth, maskWidth);
             if (upperHiddenBoundary == null) return;
             var boundaryInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
             var boundaryLeft = bottomLeft + boundaryInset;
@@ -3223,9 +3214,6 @@ namespace Gugarhythm
             Fill(upperHiddenMaskRect);
             upperHiddenMask = upperHiddenMaskObject.GetComponent<TaperedConnectorGraphic>();
             ConfigureUpperHiddenBarMask(upperHiddenMask);
-            upperHiddenBoundary = Panel("Upper Hidden Boundary", stage, new Color(.35f, .72f, 1f, .78f),
-                Vector2.zero, Vector2.zero);
-            upperHiddenBoundary.GetComponent<Image>().raycastTarget = false;
             SetUpperHiddenBarPercent(upperHiddenBarPercent);
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
