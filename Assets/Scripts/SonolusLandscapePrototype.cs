@@ -1183,6 +1183,9 @@ namespace Gugarhythm
         public static float UpperHiddenBarEdgeInset(float fullWidth) =>
             Mathf.Clamp(UpperHiddenBarBoundaryInset, 0f, Mathf.Max(0f, fullWidth) * .5f);
 
+        static float UpperHiddenBarMaskOutset(float screenProgress) =>
+            NoteSurfaceHeight(screenProgress) * NormalButtonVisibleEdgePaddingPixels / NoteTextureHeight;
+
         public static Color UpperHiddenBarMaskColor => new(.01f, .02f, .06f, 1f);
 
         static void ConfigureUpperHiddenBarMask(TaperedConnectorGraphic mask)
@@ -1218,19 +1221,22 @@ namespace Gugarhythm
             var topRight = X(VisibleTrackLaneEdge, 0f);
             var bottomLeft = X(-VisibleTrackLaneEdge, screenProgress);
             var bottomRight = X(VisibleTrackLaneEdge, screenProgress);
-            var topInset = UpperHiddenBarEdgeInset(topRight - topLeft);
-            var bottomInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
-            topLeft += topInset;
-            topRight -= topInset;
-            bottomLeft += bottomInset;
-            bottomRight -= bottomInset;
+            // The blue boundary keeps a small authored inset, but the opaque
+            // fill must extend past the playable edges far enough to cover the
+            // widest key texture padding at every perspective depth.
+            var topOutset = UpperHiddenBarMaskOutset(0f);
+            var bottomOutset = UpperHiddenBarMaskOutset(screenProgress);
             upperHiddenMask.SetGeometry(
                 new Vector2((topLeft + topRight) * .5f, TopY),
                 new Vector2((bottomLeft + bottomRight) * .5f, ScreenY(screenProgress)),
-                topRight - topLeft, bottomRight - bottomLeft);
+                topRight - topLeft + topOutset * 2f,
+                bottomRight - bottomLeft + bottomOutset * 2f);
             if (upperHiddenBoundary == null) return;
-            upperHiddenBoundary.sizeDelta = new Vector2(bottomRight - bottomLeft, 4);
-            upperHiddenBoundary.anchoredPosition = new Vector2((bottomLeft + bottomRight) * .5f,
+            var boundaryInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
+            var boundaryLeft = bottomLeft + boundaryInset;
+            var boundaryRight = bottomRight - boundaryInset;
+            upperHiddenBoundary.sizeDelta = new Vector2(boundaryRight - boundaryLeft, 4);
+            upperHiddenBoundary.anchoredPosition = new Vector2((boundaryLeft + boundaryRight) * .5f,
                 ScreenY(screenProgress));
         }
 

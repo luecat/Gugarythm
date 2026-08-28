@@ -2371,11 +2371,11 @@ public static class RuntimeValidation
             "Upper hidden bar depth must use the clamped percentage");
         var insetMethod = typeof(SonolusLandscapePrototype).GetMethod(
             "UpperHiddenBarEdgeInset", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-        Require(insetMethod != null, "Upper hidden bar settings must keep its fill inside the track boundaries");
+        Require(insetMethod != null, "Upper hidden bar settings must expose its blue-boundary inset rule");
         Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 80f }) - 20f) < .0001f,
-            "Upper hidden bar must inset a normal-width track edge");
+            "Upper hidden bar blue boundary must inset a normal-width track edge");
         Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 20f }) - 10f) < .0001f,
-            "Upper hidden bar must never invert a narrow track");
+            "Upper hidden bar blue boundary must never invert on a narrow track");
         var refreshMethod = typeof(SonolusLandscapePrototype).GetMethod(
             "ShouldRefreshUpperHiddenBarLayout", System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.Static);
@@ -2400,6 +2400,11 @@ public static class RuntimeValidation
             System.Reflection.BindingFlags.Static);
         Require(configureMethod != null,
             "Upper hidden bar must configure its runtime graphic through one validated path");
+        var refreshGeometryMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "RefreshUpperHiddenBarGeometry", System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance);
+        Require(refreshGeometryMethod != null,
+            "Upper hidden bar must expose its runtime geometry refresh path");
         var populateMesh = typeof(TaperedConnectorGraphic).GetMethod(
             "OnPopulateMesh", System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Instance, null, new[] { typeof(VertexHelper) }, null);
@@ -2407,21 +2412,90 @@ public static class RuntimeValidation
             "Upper hidden bar graphic must expose its uGUI mesh population path");
         var maskObject = new GameObject("Upper hidden bar opacity validation", typeof(RectTransform),
             typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
+        var boundaryObject = new GameObject("Upper hidden bar boundary validation", typeof(RectTransform));
+        var prototypeObject = new GameObject("Upper hidden bar coverage validation");
+        prototypeObject.SetActive(false);
+        var prototype = prototypeObject.AddComponent<SonolusLandscapePrototype>();
         var mesh = new Mesh { name = "Upper hidden bar opacity validation mesh" };
         try
         {
             var mask = maskObject.GetComponent<TaperedConnectorGraphic>();
             configureMethod.Invoke(null, new object[] { mask });
-            mask.SetGeometry(new Vector2(0, 100), Vector2.zero, 100, 200);
+            var maskField = typeof(SonolusLandscapePrototype).GetField(
+                "upperHiddenMask", System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+            var boundaryField = typeof(SonolusLandscapePrototype).GetField(
+                "upperHiddenBoundary", System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+            var percentField = typeof(SonolusLandscapePrototype).GetField(
+                "upperHiddenBarPercent", System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+            Require(maskField != null && boundaryField != null && percentField != null,
+                "Upper hidden bar coverage validation must reach the runtime geometry state");
+            maskField.SetValue(prototype, mask);
+            boundaryField.SetValue(prototype, boundaryObject.GetComponent<RectTransform>());
+            percentField.SetValue(prototype, 50f);
+            refreshGeometryMethod.Invoke(prototype, null);
             using var helper = new VertexHelper();
             populateMesh.Invoke(mask, new object[] { helper });
             helper.FillMesh(mesh);
             Require(mesh.colors32.Length > 0 && mesh.colors32.All(value => value.a == byte.MaxValue),
                 "Upper hidden bar rendered fill must remain fully opaque");
+
+            var vertices = mesh.vertices;
+            Require(vertices.Length >= 4,
+                "Upper hidden bar coverage validation must produce a visible mesh");
+            var topY = vertices.Max(value => value.y);
+            var bottomY = vertices.Min(value => value.y);
+            var topLeft = vertices.Where(value => Math.Abs(value.y - topY) < .01f).Min(value => value.x);
+            var topRight = vertices.Where(value => Math.Abs(value.y - topY) < .01f).Max(value => value.x);
+            var bottomLeft = vertices.Where(value => Math.Abs(value.y - bottomY) < .01f).Min(value => value.x);
+            var bottomRight = vertices.Where(value => Math.Abs(value.y - bottomY) < .01f).Max(value => value.x);
+
+            bool IsCoveredByMask(Vector2 point)
+            {
+                var progress = Mathf.InverseLerp(topY, bottomY, point.y);
+                var left = Mathf.Lerp(topLeft, bottomLeft, progress);
+                var right = Mathf.Lerp(topRight, bottomRight, progress);
+                return point.x >= left - .01f && point.x <= right + .01f;
+            }
+
+            SonolusLandscapePrototype.NoteSurfaceQuad RenderedOuterNote(float lane)
+            {
+                const float screenProgress = .25f;
+                var note = new RuntimeNote
+                {
+                    Index = lane < 0 ? 1 : 2,
+                    Lane = lane,
+                    Size = 1f,
+                    Kind = RuntimeNoteKind.Tap,
+                };
+                var height = SonolusLandscapePrototype.NoteSurfaceHeight(screenProgress);
+                var body = SonolusLandscapePrototype.BuildNoteSurfaceQuad(
+                    note.Lane, note.Size, screenProgress, height);
+                var bodyWidth = ((body.UpperRight.x - body.UpperLeft.x) +
+                                 (body.LowerRight.x - body.LowerLeft.x)) * .5f;
+                var renderWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(bodyWidth, height, note);
+                var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
+                return SonolusLandscapePrototype.BuildNoteSurfaceQuad(
+                    note.Lane, renderSize, screenProgress, height);
+            }
+
+            var leftNote = RenderedOuterNote(-5f);
+            var rightNote = RenderedOuterNote(5f);
+            var outerNoteCorners = new[]
+            {
+                leftNote.UpperLeft, leftNote.UpperRight, leftNote.LowerRight, leftNote.LowerLeft,
+                rightNote.UpperLeft, rightNote.UpperRight, rightNote.LowerRight, rightNote.LowerLeft,
+            };
+            Require(outerNoteCorners.All(IsCoveredByMask),
+                "Upper hidden bar black fill must cover complete outer-lane key quads above its boundary");
         }
         finally
         {
             UnityEngine.Object.DestroyImmediate(mesh);
+            UnityEngine.Object.DestroyImmediate(prototypeObject);
+            UnityEngine.Object.DestroyImmediate(boundaryObject);
             UnityEngine.Object.DestroyImmediate(maskObject);
         }
         Debug.Log("GUGARHYTHM_UPPER_HIDDEN_BAR_VALIDATION_OK");
