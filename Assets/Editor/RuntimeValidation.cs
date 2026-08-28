@@ -71,6 +71,9 @@ public static class RuntimeValidation
 
     public static void ValidateLandscapeAutorotationOnly() => ValidateLandscapeAutorotation();
 
+    [MenuItem("Gugarhythm/Validate Upper Hidden Bar")]
+    public static void ValidateUpperHiddenBarOnly() => ValidateUpperHiddenBarSettings();
+
     [MenuItem("Gugarhythm/Validate Repository Cleanup")]
     public static void ValidateRepositoryCleanup()
     {
@@ -2373,6 +2376,54 @@ public static class RuntimeValidation
             "Upper hidden bar must inset a normal-width track edge");
         Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 20f }) - 10f) < .0001f,
             "Upper hidden bar must never invert a narrow track");
+        var refreshMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "ShouldRefreshUpperHiddenBarLayout", System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.Static);
+        Require(refreshMethod != null,
+            "Upper hidden bar must expose its viewport-layout refresh rule");
+        Require((bool)refreshMethod.Invoke(null, new object[] { float.NaN, 1080f }),
+            "Upper hidden bar must lay itself out on its first valid canvas size");
+        Require(!(bool)refreshMethod.Invoke(null, new object[] { 1080f, 1080f }),
+            "Upper hidden bar must not rebuild for an unchanged canvas height");
+        Require((bool)refreshMethod.Invoke(null, new object[] { 1080f, 1440f }),
+            "Upper hidden bar must rebuild when an iPad aspect ratio changes the canvas height");
+        var colorProperty = typeof(SonolusLandscapePrototype).GetProperty(
+            "UpperHiddenBarMaskColor", System.Reflection.BindingFlags.Public |
+            System.Reflection.BindingFlags.Static);
+        Require(colorProperty != null,
+            "Upper hidden bar must expose the mask color used by its runtime graphic");
+        var maskColor = (Color)colorProperty.GetValue(null);
+        Require(Math.Abs(maskColor.a - 1f) < .0001f,
+            "Upper hidden bar black fill must be fully opaque");
+        var configureMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            "ConfigureUpperHiddenBarMask", System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Static);
+        Require(configureMethod != null,
+            "Upper hidden bar must configure its runtime graphic through one validated path");
+        var populateMesh = typeof(TaperedConnectorGraphic).GetMethod(
+            "OnPopulateMesh", System.Reflection.BindingFlags.NonPublic |
+            System.Reflection.BindingFlags.Instance, null, new[] { typeof(VertexHelper) }, null);
+        Require(populateMesh != null,
+            "Upper hidden bar graphic must expose its uGUI mesh population path");
+        var maskObject = new GameObject("Upper hidden bar opacity validation", typeof(RectTransform),
+            typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
+        var mesh = new Mesh { name = "Upper hidden bar opacity validation mesh" };
+        try
+        {
+            var mask = maskObject.GetComponent<TaperedConnectorGraphic>();
+            configureMethod.Invoke(null, new object[] { mask });
+            mask.SetGeometry(new Vector2(0, 100), Vector2.zero, 100, 200);
+            using var helper = new VertexHelper();
+            populateMesh.Invoke(mask, new object[] { helper });
+            helper.FillMesh(mesh);
+            Require(mesh.colors32.Length > 0 && mesh.colors32.All(value => value.a == byte.MaxValue),
+                "Upper hidden bar rendered fill must remain fully opaque");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(mesh);
+            UnityEngine.Object.DestroyImmediate(maskObject);
+        }
         Debug.Log("GUGARHYTHM_UPPER_HIDDEN_BAR_VALIDATION_OK");
     }
 

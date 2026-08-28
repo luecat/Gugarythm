@@ -611,6 +611,7 @@ namespace Gugarhythm
         Coroutine holdFadeCoroutine;
         readonly GameplayPresentationClock presentationClock = new();
         Rect appliedSafeArea = new(-1, -1, -1, -1);
+        float upperHiddenBarLayoutCanvasHeight = float.NaN;
         double scheduledDsp;
         double pauseDsp;
         double accumulatedPause;
@@ -1031,6 +1032,7 @@ namespace Gugarhythm
             // gameplay converts it to touch semantics in CollectMouseAsTouch.
             EnsureDesktopMouseAvailable();
 #endif
+            RefreshUpperHiddenBarLayoutIfNeeded();
             if (Interlocked.Exchange(ref audioDeviceChangePending, 0) != 0)
             {
                 if (ShouldPauseForAudioConfigurationChange(true, running, paused)) PauseForAudioDeviceChange();
@@ -1181,6 +1183,57 @@ namespace Gugarhythm
         public static float UpperHiddenBarEdgeInset(float fullWidth) =>
             Mathf.Clamp(UpperHiddenBarBoundaryInset, 0f, Mathf.Max(0f, fullWidth) * .5f);
 
+        public static Color UpperHiddenBarMaskColor => new(.01f, .02f, .06f, 1f);
+
+        static void ConfigureUpperHiddenBarMask(TaperedConnectorGraphic mask)
+        {
+            mask.raycastTarget = false;
+            mask.color = UpperHiddenBarMaskColor;
+            mask.drawGlow = false;
+            mask.drawEdges = false;
+            mask.fillAlphaScale = 1f;
+            mask.fillAlphaLimit = 1f;
+        }
+
+        // iPad autorotation can settle after Awake, so cached mask vertices
+        // must follow the live logical canvas height instead of startup dimensions.
+        public static bool ShouldRefreshUpperHiddenBarLayout(float previousCanvasHeight, float currentCanvasHeight) =>
+            float.IsFinite(currentCanvasHeight) && currentCanvasHeight > 0f &&
+            (!float.IsFinite(previousCanvasHeight) ||
+             !Mathf.Approximately(previousCanvasHeight, currentCanvasHeight));
+
+        void RefreshUpperHiddenBarLayoutIfNeeded()
+        {
+            var currentCanvasHeight = CanvasHeight;
+            if (!ShouldRefreshUpperHiddenBarLayout(upperHiddenBarLayoutCanvasHeight, currentCanvasHeight)) return;
+            upperHiddenBarLayoutCanvasHeight = currentCanvasHeight;
+            RefreshUpperHiddenBarGeometry();
+        }
+
+        void RefreshUpperHiddenBarGeometry()
+        {
+            if (upperHiddenMask == null || upperHiddenBarPercent <= .0001f) return;
+            var screenProgress = UpperHiddenBarScreenProgress(upperHiddenBarPercent);
+            var topLeft = X(-VisibleTrackLaneEdge, 0f);
+            var topRight = X(VisibleTrackLaneEdge, 0f);
+            var bottomLeft = X(-VisibleTrackLaneEdge, screenProgress);
+            var bottomRight = X(VisibleTrackLaneEdge, screenProgress);
+            var topInset = UpperHiddenBarEdgeInset(topRight - topLeft);
+            var bottomInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
+            topLeft += topInset;
+            topRight -= topInset;
+            bottomLeft += bottomInset;
+            bottomRight -= bottomInset;
+            upperHiddenMask.SetGeometry(
+                new Vector2((topLeft + topRight) * .5f, TopY),
+                new Vector2((bottomLeft + bottomRight) * .5f, ScreenY(screenProgress)),
+                topRight - topLeft, bottomRight - bottomLeft);
+            if (upperHiddenBoundary == null) return;
+            upperHiddenBoundary.sizeDelta = new Vector2(bottomRight - bottomLeft, 4);
+            upperHiddenBoundary.anchoredPosition = new Vector2((bottomLeft + bottomRight) * .5f,
+                ScreenY(screenProgress));
+        }
+
         void SetUpperHiddenBarPercent(float value)
         {
             upperHiddenBarPercent = ClampUpperHiddenBarPercent(value);
@@ -1195,30 +1248,7 @@ namespace Gugarhythm
                     upperHiddenMask.gameObject.SetActive(visible);
                 if (upperHiddenBoundary != null && upperHiddenBoundary.gameObject.activeSelf != visible)
                     upperHiddenBoundary.gameObject.SetActive(visible);
-                if (visible)
-                {
-                    var screenProgress = UpperHiddenBarScreenProgress(upperHiddenBarPercent);
-                    var topLeft = X(-VisibleTrackLaneEdge, 0f);
-                    var topRight = X(VisibleTrackLaneEdge, 0f);
-                    var bottomLeft = X(-VisibleTrackLaneEdge, screenProgress);
-                    var bottomRight = X(VisibleTrackLaneEdge, screenProgress);
-                    var topInset = UpperHiddenBarEdgeInset(topRight - topLeft);
-                    var bottomInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
-                    topLeft += topInset;
-                    topRight -= topInset;
-                    bottomLeft += bottomInset;
-                    bottomRight -= bottomInset;
-                    upperHiddenMask.SetGeometry(
-                        new Vector2((topLeft + topRight) * .5f, TopY),
-                        new Vector2((bottomLeft + bottomRight) * .5f, ScreenY(screenProgress)),
-                        topRight - topLeft, bottomRight - bottomLeft);
-                    if (upperHiddenBoundary != null)
-                    {
-                        upperHiddenBoundary.sizeDelta = new Vector2(bottomRight - bottomLeft, 4);
-                        upperHiddenBoundary.anchoredPosition = new Vector2((bottomLeft + bottomRight) * .5f,
-                            ScreenY(screenProgress));
-                    }
-                }
+                if (visible) RefreshUpperHiddenBarGeometry();
             }
             PlayerPrefs.SetFloat("gugarhythm-upper-hidden-bar-percent", upperHiddenBarPercent);
         }
@@ -3186,12 +3216,7 @@ namespace Gugarhythm
             upperHiddenMaskRect.SetParent(stage, false);
             Fill(upperHiddenMaskRect);
             upperHiddenMask = upperHiddenMaskObject.GetComponent<TaperedConnectorGraphic>();
-            upperHiddenMask.raycastTarget = false;
-            upperHiddenMask.color = new Color(.01f, .02f, .06f, .96f);
-            upperHiddenMask.drawGlow = false;
-            upperHiddenMask.drawEdges = false;
-            upperHiddenMask.fillAlphaScale = 1f;
-            upperHiddenMask.fillAlphaLimit = 1f;
+            ConfigureUpperHiddenBarMask(upperHiddenMask);
             upperHiddenBoundary = Panel("Upper Hidden Boundary", stage, new Color(.35f, .72f, 1f, .78f),
                 Vector2.zero, Vector2.zero);
             upperHiddenBoundary.GetComponent<Image>().raycastTarget = false;
