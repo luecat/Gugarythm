@@ -353,6 +353,7 @@ namespace Gugarhythm
         public const float FastLateDisplayWidth = SettingsSliderWidth * .5f - 24f;
         const string FastLateDisplayPreferenceKey = "gugarhythm-fast-late-display";
         const string AutoPlayPreferenceKey = "gugarhythm-auto-play";
+        const string HitParticleEffectPreferenceKey = "gugarhythm-hit-particle-effect";
         public const float InputLaneFeedbackDuration = .12f;
         const int InputLaneFeedbackGridCellCount = VirtualSliderInput.CellCount / 2;
         const float HoldLoopVolume = .55f;
@@ -593,6 +594,7 @@ namespace Gugarhythm
         readonly bool[] calibrationRoundSucceeded = new bool[CalibrationRoundCount];
         Toggle autoPlayToggle;
         Toggle fastLateDisplayToggle;
+        readonly Button[] hitParticleEffectButtons = new Button[3];
         Slider speedSlider;
         Slider upperHiddenBarSlider;
         Slider settingsMusicVolumeSlider;
@@ -630,6 +632,7 @@ namespace Gugarhythm
         float upperHiddenBarPercent;
         bool fastLateDisplayEnabled;
         bool autoPlayEnabled;
+        HitParticleEffectMode hitParticleEffectMode;
         bool touchCallbacksSubscribed;
         float judgmentHideAt = -1f;
         float nextPerformanceHudRefresh;
@@ -801,6 +804,8 @@ namespace Gugarhythm
                 PlayerPrefs.GetFloat("gugarhythm-upper-hidden-bar-percent", 0f));
             fastLateDisplayEnabled = PlayerPrefs.GetInt(FastLateDisplayPreferenceKey, 1) != 0;
             autoPlayEnabled = PlayerPrefs.GetInt(AutoPlayPreferenceKey, 0) != 0;
+            hitParticleEffectMode = NormalizeHitParticleEffectMode(
+                PlayerPrefs.GetInt(HitParticleEffectPreferenceKey, (int)HitParticleEffectMode.ParticleScatter));
             LibrarySortPreferences.Load(out librarySort, out librarySortAscending);
             var chartVaultStorageRoot = LocalChartLibrary.StorageDirectoryPath;
             chartVaultClient = new ChartVaultClient();
@@ -1283,6 +1288,27 @@ namespace Gugarhythm
                 autoPlayToggle.SetIsOnWithoutNotify(enabled);
             autoPlayToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
             PlayerPrefs.SetInt(AutoPlayPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        public static HitParticleEffectMode NormalizeHitParticleEffectMode(int value) =>
+            value >= (int)HitParticleEffectMode.ParticleScatter && value <= (int)HitParticleEffectMode.BrokenRing
+                ? (HitParticleEffectMode)value
+                : HitParticleEffectMode.ParticleScatter;
+
+        void SetHitParticleEffectMode(HitParticleEffectMode mode)
+        {
+            hitParticleEffectMode = NormalizeHitParticleEffectMode((int)mode);
+            for (var index = 0; index < hitParticleEffectButtons.Length; index++)
+            {
+                var button = hitParticleEffectButtons[index];
+                if (button == null) continue;
+                var selected = index == (int)hitParticleEffectMode;
+                button.targetGraphic.color = selected ? new Color(.06f, .58f, .96f) : new Color(.18f, .18f, .18f);
+                var label = button.GetComponentInChildren<Text>();
+                if (label != null) label.color = selected ? Color.white : new Color(.78f, .78f, .78f);
+            }
+            PlayerPrefs.SetInt(HitParticleEffectPreferenceKey, (int)hitParticleEffectMode);
             PlayerPrefs.Save();
         }
 
@@ -3837,6 +3863,27 @@ namespace Gugarhythm
                 FastLateDisplayWidth, autoPlayEnabled);
             autoPlayToggle.onValueChanged.AddListener(SetAutoPlayEnabled);
             SetAutoPlayEnabled(autoPlayEnabled);
+
+            var hitParticleEffectTitle = Label("粒子效果", settingsGamePanel, 24);
+            hitParticleEffectTitle.alignment = TextAnchor.MiddleLeft;
+            hitParticleEffectTitle.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 42);
+            hitParticleEffectTitle.rectTransform.anchoredPosition = new Vector2(0, -285);
+            const float HitParticleButtonWidth = 220f;
+            const float HitParticleButtonSpacing = 20f;
+            var hitParticleButtonStep = HitParticleButtonWidth + HitParticleButtonSpacing;
+            hitParticleEffectButtons[(int)HitParticleEffectMode.ParticleScatter] = MakeFlatButton(
+                "粒子飛散", settingsGamePanel, new Vector2(-hitParticleButtonStep, -335),
+                () => SetHitParticleEffectMode(HitParticleEffectMode.ParticleScatter),
+                new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
+            hitParticleEffectButtons[(int)HitParticleEffectMode.ShardBreak] = MakeFlatButton(
+                "碎片裂解", settingsGamePanel, new Vector2(0, -335),
+                () => SetHitParticleEffectMode(HitParticleEffectMode.ShardBreak),
+                new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
+            hitParticleEffectButtons[(int)HitParticleEffectMode.BrokenRing] = MakeFlatButton(
+                "斷環粒子", settingsGamePanel, new Vector2(hitParticleButtonStep, -335),
+                () => SetHitParticleEffectMode(HitParticleEffectMode.BrokenRing),
+                new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
+            SetHitParticleEffectMode(hitParticleEffectMode);
             settingsGamePanel.gameObject.SetActive(false);
 
             settingsTagsPanel = Panel("Settings Tags Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
@@ -5276,12 +5323,13 @@ namespace Gugarhythm
             var x = X(note.Lane, 1f);
             var noteWidth = Mathf.Clamp(LaneWidth(note.Lane, note.Size, 1f), 64f, 154f);
             var particleRoot = new GameObject("Judgment Pulse", typeof(RectTransform), typeof(CanvasRenderer), typeof(HitBurstGraphic)).GetComponent<RectTransform>();
-            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(310, 150); particleRoot.anchoredPosition = new Vector2(x, HitY);
+            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(360, 600); particleRoot.anchoredPosition = new Vector2(x, HitY);
             particleRoot.SetAsLastSibling();
             var burst = particleRoot.GetComponent<HitBurstGraphic>();
             burst.raycastTarget = false;
             burst.color = tint;
             burst.upperWidth = noteWidth;
+            burst.effectMode = hitParticleEffectMode;
             burst.SetProgress(0);
             StartCoroutine(AnimateHitEffect(particleRoot, burst));
         }
@@ -5313,10 +5361,9 @@ namespace Gugarhythm
 
         IEnumerator AnimateHitEffect(RectTransform particleRoot, HitBurstGraphic burst)
         {
-            const float Duration = 15f / 60f;
-            for (var elapsed = 0f; elapsed < Duration; elapsed += Time.unscaledDeltaTime)
+            for (var elapsed = 0f; elapsed < HitBurstGraphic.DurationSeconds; elapsed += Time.unscaledDeltaTime)
             {
-                burst.SetProgress(elapsed / Duration);
+                burst.SetProgress(elapsed / HitBurstGraphic.DurationSeconds);
                 yield return null;
             }
             Destroy(particleRoot.gameObject);
