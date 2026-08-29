@@ -1333,7 +1333,9 @@ namespace Gugarhythm
 
         void AdjustSettingsDelay(double delta)
         {
-            settingsDelayOffsetSeconds = SettingsDelayAdjustment.Step(settingsDelayOffsetSeconds, delta);
+            var nextOffset = SettingsDelayAdjustment.Step(settingsDelayOffsetSeconds, delta);
+            if (Math.Abs(nextOffset - settingsDelayOffsetSeconds) <= .0000001d) return;
+            settingsDelayOffsetSeconds = nextOffset;
             audioOffsetSeconds = GameplayTimingPreferences.PersistDeviceOffset(settingsDelayOffsetSeconds);
             settingsDelayOffsetSeconds = audioOffsetSeconds;
             RefreshSettingsDelayLabel();
@@ -3776,13 +3778,13 @@ namespace Gugarhythm
             delayTitle.alignment = TextAnchor.MiddleLeft;
             delayTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             delayTitle.rectTransform.anchoredPosition = new Vector2(0, -70);
-            MakeFlatButton("−1 ms", card, new Vector2(-300, -125), () => AdjustSettingsDelay(-SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            MakeDelayHoldButton("−1 ms", card, new Vector2(-300, -125), () => AdjustSettingsDelay(-SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
             Panel("Delay Value Background", card, new Color(.18f, .18f, .18f), new Vector2(180, 52), new Vector2(-100, -125));
             settingsDelayLabel = Label("", card, 20);
             settingsDelayLabel.alignment = TextAnchor.MiddleCenter;
             settingsDelayLabel.rectTransform.sizeDelta = new Vector2(180, 52);
             settingsDelayLabel.rectTransform.anchoredPosition = new Vector2(-100, -125);
-            MakeFlatButton("＋1 ms", card, new Vector2(100, -125), () => AdjustSettingsDelay(SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            MakeDelayHoldButton("＋1 ms", card, new Vector2(100, -125), () => AdjustSettingsDelay(SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
             MakeFlatButton("自動調整", card, new Vector2(300, -125), OpenAutoAdjustPanel, new Vector2(150, 52), new Color(.18f, .28f, .38f));
             var delayLateHint = Label($"−：{DelayAdjustmentTimingHint(-SettingsDelayAdjustment.StepSeconds)}", card, 17);
             delayLateHint.alignment = TextAnchor.MiddleCenter;
@@ -5438,6 +5440,15 @@ namespace Gugarhythm
             var entry = new EventTrigger.Entry { eventID = EventTriggerType.PointerDown };
             entry.callback.AddListener(_ => action());
             trigger.triggers = new List<EventTrigger.Entry> { entry };
+            return button;
+        }
+
+        static Button MakeDelayHoldButton(string text, RectTransform parent, Vector2 position, Action action,
+            Vector2 size, Color color)
+        {
+            var button = MakeFlatButton(text, parent, position, action, size, color);
+            button.onClick.RemoveAllListeners();
+            button.gameObject.AddComponent<SettingsDelayHoldButton>().Configure(action);
             return button;
         }
 

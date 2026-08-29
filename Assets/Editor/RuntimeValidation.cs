@@ -172,6 +172,7 @@ public static class RuntimeValidation
         ValidateAutoPlay();
         ValidateAudioDeviceRecovery();
         ValidateLatencyCalibrationMath();
+        ValidateSettingsDelayHoldAcceleration();
         Debug.Log("GUGARHYTHM_VALIDATION_OK scpFixture=synthetic");
     }
 
@@ -1560,6 +1561,60 @@ public static class RuntimeValidation
             "Calibration must reject a round containing an invalid tap");
         Require(!LatencyCalibrationMath.TryGetCalibrationAverage(new[] { .010d, .020d, .030d }, out _),
             "Calibration must reject an incomplete set of rounds");
+    }
+
+    static void ValidateSettingsDelayHoldAcceleration()
+    {
+        Require(Math.Abs(SettingsDelayHoldRepeater.RepeatIntervalSeconds(.5d) - .125d) < .000001d,
+            "Delay adjustment hold repeat must begin at eight steps per second");
+        Require(Math.Abs(SettingsDelayHoldRepeater.RepeatIntervalSeconds(1.5d) - .0791666667d) < .000001d,
+            "Delay adjustment hold repeat must accelerate smoothly while held");
+        Require(Math.Abs(SettingsDelayHoldRepeater.RepeatIntervalSeconds(2.5d) - (1d / 30d)) < .000001d &&
+                Math.Abs(SettingsDelayHoldRepeater.RepeatIntervalSeconds(10d) - (1d / 30d)) < .000001d,
+            "Delay adjustment hold repeat must cap at thirty steps per second");
+
+        var threshold = new SettingsDelayHoldRepeater();
+        Require(!threshold.Advance(.499d) && threshold.Advance(.001d),
+            "Delay adjustment hold repeat must wait half a second before its first repeated step");
+
+        var repeat = new SettingsDelayHoldRepeater();
+        var earlyCount = 0;
+        var lateCount = 0;
+        for (var index = 0; index < 100; index++)
+            if (repeat.Advance(.01d)) earlyCount++;
+        for (var index = 0; index < 100; index++)
+            if (repeat.Advance(.01d)) lateCount++;
+        Require(earlyCount > 0 && lateCount > earlyCount,
+            "Delay adjustment hold repeat must produce more steps as the hold duration increases");
+
+        repeat.Reset();
+        Require(!repeat.Advance(.499d),
+            "Releasing a delay adjustment button must reset its hold-repeat timing");
+
+        var buttonObject = new GameObject("Delay adjustment hold validation", typeof(RectTransform),
+            typeof(Image), typeof(Button), typeof(SettingsDelayHoldButton));
+        try
+        {
+            var stepCount = 0;
+            var holdButton = buttonObject.GetComponent<SettingsDelayHoldButton>();
+            var button = buttonObject.GetComponent<Button>();
+            holdButton.Configure(() => stepCount++);
+            holdButton.OnPointerDown(null);
+            Require(stepCount == 1,
+                "Pressing a delay adjustment button must apply one immediate millisecond step");
+            holdButton.OnPointerExit(null);
+            holdButton.OnSubmit(null);
+            Require(stepCount == 2,
+                "Keyboard or controller submit must preserve single-step delay adjustment");
+            button.interactable = false;
+            holdButton.OnPointerDown(null);
+            Require(stepCount == 2,
+                "A disabled delay adjustment button must ignore pointer input");
+        }
+        finally
+        {
+            UnityEngine.Object.DestroyImmediate(buttonObject);
+        }
     }
 
     static void ValidateLibraryDataRefreshContracts()
