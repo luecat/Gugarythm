@@ -5497,6 +5497,38 @@ public static class RuntimeValidation
         Require(oppositeFlick.Count(input => input.Kind == RuntimeNoteKind.Flick) == 1,
             "A leftward 0.35-lane motion must activate Flick without direction filtering");
 
+        var verticalFlick = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(71, 4.21, -2f, 0f, verticalFlick);
+        slider.Move(71, 4.22, -2f, .699f, verticalFlick);
+        Require(!verticalFlick.Any(input => input.Kind == RuntimeNoteKind.Flick),
+            "A vertical motion below the normalized Flick distance must not activate Flick");
+        slider.Move(71, 4.23, -2f, .7f, verticalFlick);
+        var verticalToken = verticalFlick.Single(input => input.Kind == RuntimeNoteKind.Flick);
+        Require(Math.Abs(verticalToken.Lane + 2f) < .0001f &&
+                Math.Abs(verticalToken.PreviousLane + 2f) < .0001f,
+            "A vertical motion must activate Flick without requiring horizontal lane travel");
+
+        var verticalNote = new RuntimeNote
+        {
+            Index = 71,
+            Time = verticalToken.Time,
+            Lane = -2f,
+            Size = .5f,
+            Kind = RuntimeNoteKind.Flick,
+        };
+        var verticalEngine = new JudgmentEngine(new[] { verticalNote }, new ScoreState());
+        verticalEngine.Process(verticalToken.Time, verticalFlick, Array.Empty<ActiveContact>());
+        Require(verticalNote.Grade == JudgmentGrade.Perfect,
+            "A vertical Flick token at a note lane must remain eligible for judgment");
+
+        var diagonalFlick = new List<InputToken>();
+        slider.Reset();
+        slider.Begin(72, 4.24, 0f, 0f, diagonalFlick);
+        slider.Move(72, 4.25, .21f, .56f, diagonalFlick);
+        Require(diagonalFlick.Count(input => input.Kind == RuntimeNoteKind.Flick) == 1,
+            "A diagonal motion must combine horizontal and vertical travel at the Flick threshold");
+
         var longFlick = new List<InputToken>();
         slider.Reset();
         slider.Begin(8, 4.3, -5.5f, longFlick);

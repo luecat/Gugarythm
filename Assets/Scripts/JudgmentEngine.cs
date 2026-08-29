@@ -848,7 +848,6 @@ namespace Gugarhythm
         static double? FlickIntersectionTime(InputToken input, RuntimeNote note, out float intersectionLane)
         {
             intersectionLane = input.Lane;
-            if (Math.Abs(input.Lane - input.PreviousLane) < .0001f && input.Time > input.PreviousTime) return null;
             var min = note.Lane - note.Size - LaneForgiveness;
             var max = note.Lane + note.Size + LaneForgiveness;
             var segmentMin = Math.Min(input.PreviousLane, input.Lane);

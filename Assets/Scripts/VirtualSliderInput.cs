@@ -21,6 +21,7 @@ namespace Gugarhythm
         public const float CellWidth = (MaximumLane - MinimumLane) / CellCount;
         public const float TapDragActivationDistance = CellWidth;
         public const float FlickActivationDistance = .35f;
+        public const float FlickGridRowLaneScale = CellWidth;
 
         readonly Dictionary<int, ContactState> contacts = new();
 
@@ -68,7 +69,7 @@ namespace Gugarhythm
 
             if (ShouldEmitGridRowTap(state, gridCoordinate) && !emittedTap && output != null)
                 output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, lane));
-            EmitFlicks(fingerId, lane, time, state, output);
+            EmitFlicks(fingerId, lane, gridCoordinate, time, state, output);
 
             state.Lane = lane;
             state.Time = time;
@@ -161,27 +162,39 @@ namespace Gugarhythm
             output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, CellCenter(cell)));
         }
 
-        static void EmitFlicks(int fingerId, float lane, double time, ContactState state, ICollection<InputToken> output)
+        static void EmitFlicks(int fingerId, float lane, float gridCoordinate, double time,
+            ContactState state, ICollection<InputToken> output)
         {
             if (output == null) return;
             while (true)
             {
-                var distance = lane - state.FlickAnchorLane;
-                if (Math.Abs(distance) + .00001f < FlickActivationDistance) return;
+                var laneDistance = lane - state.FlickAnchorLane;
+                var hasGridDistance = float.IsFinite(gridCoordinate) &&
+                    float.IsFinite(state.FlickAnchorGridCoordinate);
+                var gridDistance = hasGridDistance
+                    ? (gridCoordinate - state.FlickAnchorGridCoordinate) * FlickGridRowLaneScale
+                    : 0f;
+                var distance = Math.Sqrt(laneDistance * laneDistance + gridDistance * gridDistance);
+                if (distance + .00001f < FlickActivationDistance) return;
 
-                var direction = Math.Sign(distance);
-                var thresholdLane = state.FlickAnchorLane + direction * FlickActivationDistance;
-                var thresholdTime = time;
-                if (Math.Abs(lane - state.Lane) > .0001f && time > state.Time)
-                {
-                    var progress = Math.Clamp((thresholdLane - state.Lane) / (lane - state.Lane), 0, 1);
-                    thresholdTime = state.Time + (time - state.Time) * progress;
-                }
-                else thresholdTime = time;
+                // Flick direction is intentionally unrestricted. Normalize the
+                // judgment-strip row axis into lane units, then emit at the
+                // point where the two-dimensional gesture crosses the same
+                // activation distance used by horizontal flicks.
+                var progress = (float)Math.Clamp(FlickActivationDistance / distance, 0d, 1d);
+                var thresholdLane = state.FlickAnchorLane + laneDistance * progress;
+                var thresholdGridCoordinate = hasGridDistance
+                    ? state.FlickAnchorGridCoordinate +
+                      (gridCoordinate - state.FlickAnchorGridCoordinate) * progress
+                    : float.NaN;
+                var thresholdTime = time > state.FlickAnchorTime
+                    ? state.FlickAnchorTime + (time - state.FlickAnchorTime) * progress
+                    : time;
 
                 output.Add(new InputToken(fingerId, RuntimeNoteKind.Flick, thresholdTime, thresholdLane,
                     state.FlickAnchorLane, state.FlickAnchorTime));
                 state.FlickAnchorLane = thresholdLane;
+                state.FlickAnchorGridCoordinate = thresholdGridCoordinate;
                 state.FlickAnchorTime = thresholdTime;
             }
         }
@@ -195,6 +208,7 @@ namespace Gugarhythm
             public double Time;
             public float GridCoordinate;
             public float FlickAnchorLane;
+            public float FlickAnchorGridCoordinate;
             public double FlickAnchorTime;
             public bool TapDragActive;
             public bool GridRowTapActive;
@@ -208,6 +222,7 @@ namespace Gugarhythm
                 Time = time;
                 GridCoordinate = gridCoordinate;
                 FlickAnchorLane = lane;
+                FlickAnchorGridCoordinate = gridCoordinate;
                 FlickAnchorTime = time;
             }
         }
