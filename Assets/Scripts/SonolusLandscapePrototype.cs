@@ -97,6 +97,7 @@ namespace Gugarhythm
     {
         const string LegacyDeviceOffsetKey = "gugarhythm-audio-offset-seconds";
         const string SettingsDeviceOffsetKey = "gugarhythm-settings-delay-offset-seconds";
+        const string SettingsInputOffsetKey = "gugarhythm-settings-input-delay-offset-seconds";
 
         public static double LoadDeviceOffset()
         {
@@ -117,6 +118,20 @@ namespace Gugarhythm
             var resolvedOffset = GameplayTiming.ReplaceDeviceOffset(replacementOffset);
             PlayerPrefs.SetFloat(LegacyDeviceOffsetKey, (float)resolvedOffset);
             PlayerPrefs.SetFloat(SettingsDeviceOffsetKey, (float)resolvedOffset);
+            PlayerPrefs.Save();
+            return resolvedOffset;
+        }
+
+        public static double LoadInputOffset()
+        {
+            GugarhythmPreferenceMigration.Migrate();
+            return GameplayTiming.ReplaceInputOffset(PlayerPrefs.GetFloat(SettingsInputOffsetKey, 0f));
+        }
+
+        public static double PersistInputOffset(double replacementOffset)
+        {
+            var resolvedOffset = GameplayTiming.ReplaceInputOffset(replacementOffset);
+            PlayerPrefs.SetFloat(SettingsInputOffsetKey, (float)resolvedOffset);
             PlayerPrefs.Save();
             return resolvedOffset;
         }
@@ -543,6 +558,7 @@ namespace Gugarhythm
         Text settingsMusicVolumeLabel;
         Text settingsKeyVolumeLabel;
         Text settingsDelayLabel;
+        Text settingsInputDelayLabel;
         Text difficultyTagConfirmationText;
         Text calibrationLabel;
         Text chartEditorSubtitleLabel;
@@ -622,6 +638,7 @@ namespace Gugarhythm
         double interruptedSongTime;
         double audioOffsetSeconds;
         double settingsDelayOffsetSeconds;
+        double inputOffsetSeconds;
         double visualOffsetSeconds;
         double calibrationStartDsp;
         readonly List<double> calibrationOffsets = new();
@@ -820,6 +837,7 @@ namespace Gugarhythm
                 () => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             audioOffsetSeconds = GameplayTimingPreferences.LoadDeviceOffset();
             settingsDelayOffsetSeconds = audioOffsetSeconds;
+            inputOffsetSeconds = GameplayTimingPreferences.LoadInputOffset();
 #if UNITY_EDITOR || UNITY_STANDALONE
             // TouchSimulation can leave the real Mouse device disabled across
             // editor play sessions. Desktop input is adapted explicitly below.
@@ -1341,13 +1359,31 @@ namespace Gugarhythm
             RefreshSettingsDelayLabel();
         }
 
+        void AdjustSettingsInputDelay(double delta)
+        {
+            var nextOffset = SettingsDelayAdjustment.Step(inputOffsetSeconds, delta);
+            if (Math.Abs(nextOffset - inputOffsetSeconds) <= .0000001d) return;
+            inputOffsetSeconds = GameplayTimingPreferences.PersistInputOffset(nextOffset);
+            RefreshSettingsInputDelayLabel();
+        }
+
         public static string DelayAdjustmentTimingHint(double delta) =>
             delta < 0d ? "LATE" : delta > 0d ? "FAST" : string.Empty;
+
+        public static string DelayAdjustmentGuidance(double delta) =>
+            delta < 0d ? "LATE 較多：往 − 調" :
+            delta > 0d ? "FAST 較多：往 ＋ 調" : string.Empty;
 
         void RefreshSettingsDelayLabel()
         {
             if (settingsDelayLabel != null)
                 settingsDelayLabel.text = $"{settingsDelayOffsetSeconds * 1000d:+0;-0;0} ms";
+        }
+
+        void RefreshSettingsInputDelayLabel()
+        {
+            if (settingsInputDelayLabel != null)
+                settingsInputDelayLabel.text = $"{inputOffsetSeconds * 1000d:+0;-0;0} ms";
         }
 
         void ShowSettingsAudio()
@@ -1962,6 +1998,8 @@ namespace Gugarhythm
         double CurrentSongTime() => GameplayTiming.ChartTimeAtDsp(
             AudioSettings.dspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
 
+        double CurrentInputSongTime() => GameplayTiming.ApplyInputOffset(CurrentSongTime(), inputOffsetSeconds);
+
         void RefreshPresentationClockHardResetThreshold()
         {
             AudioSettings.GetDSPBufferSize(out var bufferLength, out _);
@@ -2104,7 +2142,7 @@ namespace Gugarhythm
             if (!pressed && !beganThisFrame && !endedThisFrame) return;
 
             var position = mouse.position.ReadValue();
-            var eventTime = CurrentSongTime();
+            var eventTime = CurrentInputSongTime();
             var isInInputBand = TryScreenToLane(position, out var lane, out var gridCoordinate);
             var wasTracking = touches.TryGetValue(MouseContactId, out var memory);
             if (!ShouldContinueTrackedContact(wasTracking, isInInputBand)) return;
@@ -2176,7 +2214,9 @@ namespace Gugarhythm
             AudioSettings.dspTime - (InputState.currentTime - inputTime);
 
         double InputEventSongTime(double inputTime) =>
-            GameplayTiming.ChartTimeAtDsp(InputEventDspTime(inputTime), scheduledDsp, accumulatedPause, chart.BgmOffset);
+            GameplayTiming.ApplyInputOffset(
+                GameplayTiming.ChartTimeAtDsp(InputEventDspTime(inputTime), scheduledDsp, accumulatedPause, chart.BgmOffset),
+                inputOffsetSeconds);
 
         static float ScreenToCanvasY(float screenY) => (screenY / Math.Max(1, Screen.height) - .5f) * CanvasHeight;
         static float ScreenToCanvasX(float screenX) => (screenX / Math.Max(1, Screen.width) - .5f) * ReferenceWidth;
@@ -3774,7 +3814,7 @@ namespace Gugarhythm
             var card = Panel("Settings Audio Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             settingsAudioPanel = card;
 
-            var delayTitle = Label("延遲調整", card, 24);
+            var delayTitle = Label("音訊延遲", card, 24);
             delayTitle.alignment = TextAnchor.MiddleLeft;
             delayTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             delayTitle.rectTransform.anchoredPosition = new Vector2(0, -70);
@@ -3786,17 +3826,45 @@ namespace Gugarhythm
             settingsDelayLabel.rectTransform.anchoredPosition = new Vector2(-100, -125);
             MakeDelayHoldButton("＋1 ms", card, new Vector2(100, -125), () => AdjustSettingsDelay(SettingsDelayAdjustment.StepSeconds), new Vector2(150, 52), new Color(.06f, .58f, .96f));
             MakeFlatButton("自動調整", card, new Vector2(300, -125), OpenAutoAdjustPanel, new Vector2(150, 52), new Color(.18f, .28f, .38f));
-            var delayLateHint = Label($"−：{DelayAdjustmentTimingHint(-SettingsDelayAdjustment.StepSeconds)}", card, 17);
+            var delayLateHint = Label(DelayAdjustmentGuidance(-SettingsDelayAdjustment.StepSeconds), card, 17);
             delayLateHint.alignment = TextAnchor.MiddleCenter;
             delayLateHint.color = new Color(.66f, .66f, .66f);
-            delayLateHint.rectTransform.sizeDelta = new Vector2(150, 28);
+            delayLateHint.rectTransform.sizeDelta = new Vector2(240, 28);
             delayLateHint.rectTransform.anchoredPosition = new Vector2(-300, -170);
-            var delayFastHint = Label($"＋：{DelayAdjustmentTimingHint(SettingsDelayAdjustment.StepSeconds)}", card, 17);
+            var delayFastHint = Label(DelayAdjustmentGuidance(SettingsDelayAdjustment.StepSeconds), card, 17);
             delayFastHint.alignment = TextAnchor.MiddleCenter;
             delayFastHint.color = new Color(.66f, .66f, .66f);
-            delayFastHint.rectTransform.sizeDelta = new Vector2(150, 28);
+            delayFastHint.rectTransform.sizeDelta = new Vector2(240, 28);
             delayFastHint.rectTransform.anchoredPosition = new Vector2(100, -170);
             RefreshSettingsDelayLabel();
+
+            var inputDelayTitle = Label("輸入延遲", card, 24);
+            inputDelayTitle.alignment = TextAnchor.MiddleLeft;
+            inputDelayTitle.rectTransform.sizeDelta = new Vector2(760, 42);
+            inputDelayTitle.rectTransform.anchoredPosition = new Vector2(0, -235);
+            MakeDelayHoldButton("−1 ms", card, new Vector2(-300, -290),
+                () => AdjustSettingsInputDelay(-SettingsDelayAdjustment.StepSeconds),
+                new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            Panel("Input Delay Value Background", card, new Color(.18f, .18f, .18f),
+                new Vector2(180, 52), new Vector2(-100, -290));
+            settingsInputDelayLabel = Label("", card, 20);
+            settingsInputDelayLabel.alignment = TextAnchor.MiddleCenter;
+            settingsInputDelayLabel.rectTransform.sizeDelta = new Vector2(180, 52);
+            settingsInputDelayLabel.rectTransform.anchoredPosition = new Vector2(-100, -290);
+            MakeDelayHoldButton("＋1 ms", card, new Vector2(100, -290),
+                () => AdjustSettingsInputDelay(SettingsDelayAdjustment.StepSeconds),
+                new Vector2(150, 52), new Color(.06f, .58f, .96f));
+            var inputDelayLateHint = Label(DelayAdjustmentGuidance(-SettingsDelayAdjustment.StepSeconds), card, 17);
+            inputDelayLateHint.alignment = TextAnchor.MiddleCenter;
+            inputDelayLateHint.color = new Color(.66f, .66f, .66f);
+            inputDelayLateHint.rectTransform.sizeDelta = new Vector2(240, 28);
+            inputDelayLateHint.rectTransform.anchoredPosition = new Vector2(-300, -335);
+            var inputDelayFastHint = Label(DelayAdjustmentGuidance(SettingsDelayAdjustment.StepSeconds), card, 17);
+            inputDelayFastHint.alignment = TextAnchor.MiddleCenter;
+            inputDelayFastHint.color = new Color(.66f, .66f, .66f);
+            inputDelayFastHint.rectTransform.sizeDelta = new Vector2(240, 28);
+            inputDelayFastHint.rectTransform.anchoredPosition = new Vector2(100, -335);
+            RefreshSettingsInputDelayLabel();
 
             var musicVolumeTitle = Label("音樂音量", card, 24);
             musicVolumeTitle.alignment = TextAnchor.MiddleLeft;

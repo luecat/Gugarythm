@@ -38,5 +38,11 @@ namespace Gugarhythm
 
         public static double ReplaceDeviceOffset(double replacementOffset) =>
             double.IsFinite(replacementOffset) ? Math.Clamp(replacementOffset, -.3, .3) : 0;
+
+        public static double ReplaceInputOffset(double replacementOffset) =>
+            double.IsFinite(replacementOffset) ? Math.Clamp(replacementOffset, -.3, .3) : 0;
+
+        public static double ApplyInputOffset(double rawSongTime, double inputOffset) =>
+            rawSongTime + ReplaceInputOffset(inputOffset);
     }
 }

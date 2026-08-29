@@ -53,6 +53,15 @@ public static class RuntimeValidation
         Debug.Log("GUGARHYTHM_JUDGMENT_RULES_VALIDATION_OK");
     }
 
+    [MenuItem("Gugarhythm/Validate Delay Settings")]
+    public static void ValidateDelaySettingsOnly()
+    {
+        ValidateLatencyCalibrationMath();
+        ValidateSettingsDelayHoldAcceleration();
+        ValidateInputDelayTiming();
+        Debug.Log("GUGARHYTHM_DELAY_SETTINGS_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Validate Bundled Charts")]
     public static void ValidateBundledChartsOnly()
     {
@@ -173,6 +182,7 @@ public static class RuntimeValidation
         ValidateAudioDeviceRecovery();
         ValidateLatencyCalibrationMath();
         ValidateSettingsDelayHoldAcceleration();
+        ValidateInputDelayTiming();
         Debug.Log("GUGARHYTHM_VALIDATION_OK scpFixture=synthetic");
     }
 
@@ -1547,6 +1557,9 @@ public static class RuntimeValidation
             "Negative delay adjustment must identify late input");
         Require(SonolusLandscapePrototype.DelayAdjustmentTimingHint(.001d) == "FAST",
             "Positive delay adjustment must identify fast input");
+        Require(SonolusLandscapePrototype.DelayAdjustmentGuidance(-.001d) == "LATE 較多：往 − 調" &&
+                SonolusLandscapePrototype.DelayAdjustmentGuidance(.001d) == "FAST 較多：往 ＋ 調",
+            "Delay adjustment controls must state which direction corrects predominantly LATE or FAST judgments");
         var samples = new[] { .010d, .020d, .030d, .040d };
         Require(LatencyCalibrationMath.TryGetCalibrationAverage(samples, out var average) && Math.Abs(average - .025d) < .000001d,
             "Four calibration rounds must average their valid fourth-beat taps");
@@ -1614,6 +1627,33 @@ public static class RuntimeValidation
         finally
         {
             UnityEngine.Object.DestroyImmediate(buttonObject);
+        }
+    }
+
+    static void ValidateInputDelayTiming()
+    {
+        Require(Math.Abs(GameplayTiming.ApplyInputOffset(12.5d, -.025d) - 12.475d) < .000001d &&
+                Math.Abs(GameplayTiming.ApplyInputOffset(12.5d, .040d) - 12.540d) < .000001d,
+            "Input delay must shift only the input event song time in the selected direction");
+        Require(Math.Abs(GameplayTiming.ApplyInputOffset(12.5d, 1d) - 12.8d) < .000001d &&
+                Math.Abs(GameplayTiming.ApplyInputOffset(12.5d, double.NaN) - 12.5d) < .000001d,
+            "Input delay must share the safe plus-or-minus 300 millisecond range and reject invalid values");
+
+        const string inputOffsetKey = "gugarhythm-settings-input-delay-offset-seconds";
+        var hadInputOffset = PlayerPrefs.HasKey(inputOffsetKey);
+        var originalInputOffset = PlayerPrefs.GetFloat(inputOffsetKey);
+        try
+        {
+            var persisted = GameplayTimingPreferences.PersistInputOffset(-.037d);
+            var reloaded = GameplayTimingPreferences.LoadInputOffset();
+            Require(Math.Abs(persisted + .037d) < .0001d && Math.Abs(reloaded + .037d) < .0001d,
+                "Input delay must persist independently from the audio delay setting");
+        }
+        finally
+        {
+            if (hadInputOffset) PlayerPrefs.SetFloat(inputOffsetKey, originalInputOffset);
+            else PlayerPrefs.DeleteKey(inputOffsetKey);
+            PlayerPrefs.Save();
         }
     }
 
