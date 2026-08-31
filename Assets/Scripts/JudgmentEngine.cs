@@ -4,6 +4,15 @@ using System.Linq;
 
 namespace Gugarhythm
 {
+    public enum InputTokenSource
+    {
+        Unspecified,
+        DirectPress,
+        CellCrossing,
+        GridRowCrossing,
+        FlickPath,
+    }
+
     public readonly struct InputToken
     {
         public readonly int FingerId;
@@ -12,8 +21,13 @@ namespace Gugarhythm
         public readonly float Lane;
         public readonly float PreviousLane;
         public readonly double PreviousTime;
+        public readonly InputTokenSource Source;
+        public readonly float ContactLane;
 
-        public InputToken(int fingerId, RuntimeNoteKind kind, double time, float lane, float previousLane = 0, double previousTime = 0)
+        public InputToken(int fingerId, RuntimeNoteKind kind, double time, float lane,
+            float previousLane = 0, double previousTime = 0,
+            InputTokenSource source = InputTokenSource.Unspecified,
+            float contactLane = float.NaN)
         {
             FingerId = fingerId;
             Kind = kind;
@@ -21,6 +35,8 @@ namespace Gugarhythm
             Lane = lane;
             PreviousLane = previousLane;
             PreviousTime = previousTime;
+            Source = source;
+            ContactLane = float.IsNaN(contactLane) ? lane : contactLane;
         }
     }
 
@@ -63,12 +79,14 @@ namespace Gugarhythm
         public readonly RuntimeNote Note;
         public readonly JudgmentGrade Grade;
         public readonly double Delta;
+        public readonly float? HitLane;
 
-        public JudgmentEvent(RuntimeNote note, JudgmentGrade grade, double delta)
+        public JudgmentEvent(RuntimeNote note, JudgmentGrade grade, double delta, float? hitLane = null)
         {
             Note = note;
             Grade = grade;
             Delta = delta;
+            HitLane = hitLane;
         }
     }
 
@@ -457,7 +475,7 @@ namespace Gugarhythm
             for (var edgeIndex = 0; edgeIndex < registrationWorkspace.Count; edgeIndex++)
             {
                 var edge = registrationWorkspace[edgeIndex];
-                Register(edge.Note, edge.Grade, edge.EventTime - edge.Note.Time, output);
+                Register(edge.Note, edge.Grade, edge.EventTime - edge.Note.Time, output, edge.HitLane);
             }
         }
 
@@ -480,16 +498,18 @@ namespace Gugarhythm
             if (!eventTime.HasValue) return false;
             var grade = GradeFor(note, eventTime.Value - note.Time);
             if (grade == JudgmentGrade.Pending) return false;
-            if (JudgmentProtectionEnabled && IsProtectedCandidate(note, eventTime.Value, protectionLane))
+            if (JudgmentProtectionEnabled && input.Source != InputTokenSource.DirectPress &&
+                IsProtectedCandidate(note, eventTime.Value, protectionLane))
             {
                 blockedNote = note;
                 blockedGrade = grade;
                 blockedEventTime = eventTime.Value;
                 return false;
             }
+            var hitLane = input.Kind == RuntimeNoteKind.Flick ? protectionLane : input.ContactLane;
             var spatial = Math.Abs(input.Lane - note.Lane);
             edge = new Edge(inputIndex, note, eventTime.Value, grade,
-                Math.Abs(eventTime.Value - note.Time), spatial);
+                Math.Abs(eventTime.Value - note.Time), spatial, hitLane);
             return true;
         }
 
@@ -936,9 +956,7 @@ namespace Gugarhythm
                 var wrongHalf = ReferenceEquals(note, pair.Earlier)
                     ? eventTime > pair.Boundary
                     : eventTime < pair.Boundary;
-                if (!wrongHalf) continue;
-                if (band is ProtectionBand.Justice or ProtectionBand.Attack) return true;
-                if (band == ProtectionBand.Critical && pair.ContainsSharedLane(inputLane)) return true;
+                if (wrongHalf && pair.ContainsSharedLane(inputLane)) return true;
             }
 
             return false;
@@ -979,12 +997,13 @@ namespace Gugarhythm
         static double OuterEarlyWindow(RuntimeNote note) => AttackWindow;
         static int GradeRank(JudgmentGrade grade) => grade switch { JudgmentGrade.Perfect => 0, JudgmentGrade.Great => 1, JudgmentGrade.Good => 2, _ => 3 };
 
-        void Register(RuntimeNote note, JudgmentGrade grade, double delta, List<JudgmentEvent> output)
+        void Register(RuntimeNote note, JudgmentGrade grade, double delta, List<JudgmentEvent> output,
+            float? hitLane = null)
         {
             if (note.Grade != JudgmentGrade.Pending) return;
             note.Grade = grade;
             score.Register(grade);
-            output.Add(new JudgmentEvent(note, grade, delta));
+            output.Add(new JudgmentEvent(note, grade, delta, hitLane));
         }
 
         readonly struct Edge
@@ -995,10 +1014,13 @@ namespace Gugarhythm
             public readonly JudgmentGrade Grade;
             public readonly double TimeError;
             public readonly double SpaceError;
+            public readonly float HitLane;
 
-            public Edge(int inputIndex, RuntimeNote note, double eventTime, JudgmentGrade grade, double timeError, double spaceError)
+            public Edge(int inputIndex, RuntimeNote note, double eventTime, JudgmentGrade grade,
+                double timeError, double spaceError, float hitLane)
             {
-                InputIndex = inputIndex; Note = note; EventTime = eventTime; Grade = grade; TimeError = timeError; SpaceError = spaceError;
+                InputIndex = inputIndex; Note = note; EventTime = eventTime; Grade = grade;
+                TimeError = timeError; SpaceError = spaceError; HitLane = hitLane;
             }
         }
     }

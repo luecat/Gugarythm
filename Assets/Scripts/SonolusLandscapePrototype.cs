@@ -3,6 +3,7 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Security.Cryptography;
 using System.Threading;
 using UnityEngine;
 using UnityEngine.EventSystems;
@@ -302,11 +303,9 @@ namespace Gugarhythm
         const float HitSourceY = 500f;
         const float JudgmentStripSourceHeight = 45f;
         const float CentralHalfLanes = 6f;
-        const float UpperHiddenBarBoundaryInset = 20f;
-        const float UpperHiddenBarHorizontalOverscan = 256f;
-        // The authored playable surface spans exactly -6 through +6. Hold
-        // heads include transparent sprite padding, so their rendered quad
-        // must still be clipped to these visible track edges.
+        // Keep the black fill on the authored -6 through +6 track surface;
+        // gameplay layers are clipped separately so out-of-range visuals do
+        // not require widening this shape.
         const float VisibleTrackLaneEdge = CentralHalfLanes;
         const float PerspectiveDepthRatio = 3.2f;
         public const float DefaultScrollSpeed = 4f;
@@ -503,8 +502,10 @@ namespace Gugarhythm
         RectTransform simLineLayer;
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
+        RectMask2D connectorUpperHiddenClip;
+        RectMask2D persistentHoldHeadUpperHiddenClip;
+        RectMask2D noteUpperHiddenClip;
         TaperedConnectorGraphic upperHiddenMask;
-        RectTransform upperHiddenBoundary;
         RectTransform menuPanel;
         RectTransform gameplayLoadingOverlay;
         RectTransform performanceHudPanel;
@@ -513,15 +514,21 @@ namespace Gugarhythm
         RectTransform settingsAudioPanel;
         RectTransform settingsGamePanel;
         RectTransform settingsTagsPanel;
+        RectTransform settingsAccountPanel;
         RectTransform difficultyTagConfirmationPanel;
         RectTransform chartEditorPanel;
         RectTransform deleteChartConfirmationPanel;
         RectTransform importDecisionPanel;
         RectTransform detailCoverFallback;
+        RectTransform chartPreviewBackdrop;
+        RectTransform chartPreviewPanel;
+        RectTransform chartPreviewContent;
         RectTransform pauseOverlay;
         RectTransform pauseMenuContent;
         RectTransform resultPanel;
         RectTransform calibrationBackdrop;
+        ChartDocumentPreviewGraphic chartPreviewGraphic;
+        Text chartPreviewTitle;
         Text accuracyLabel;
         Text comboLabel;
         RawImage judgmentImage;
@@ -572,9 +579,16 @@ namespace Gugarhythm
         Button settingsAudioNavigationButton;
         Button settingsGameNavigationButton;
         Button settingsTagsNavigationButton;
+        Button settingsAccountNavigationButton;
+        Button settingsAccountLoginButton;
+        Button settingsAccountLogoutButton;
+        Button remotePublicScopeButton;
+        Button remotePrivateScopeButton;
+        Text settingsAccountStatusLabel;
         Text resumeCountdownLabel;
         Text pauseTitle;
         Button startButton;
+        Button chartPreviewButton;
         Button localLibrarySourceButton;
         Button onlineLibrarySourceButton;
         Button importLibraryButton;
@@ -589,15 +603,20 @@ namespace Gugarhythm
         RemoteChartSummary selectedRemoteChart;
         Texture2D remoteCoverTexture;
         ChartLibrarySort remoteLibrarySort = ChartLibrarySort.Title;
+        RemoteChartCatalogScope remoteCatalogScope = RemoteChartCatalogScope.Public;
         bool remoteLibrarySortAscending = true;
         bool remoteLibraryScrollPositionInitialized;
         bool remoteCatalogCacheLoaded;
         bool remoteCatalogRequested;
         bool remoteCatalogLoading;
         bool remoteChartDownloading;
+        bool chartVaultLoginPending;
         bool destroying;
         int remoteOperationGeneration;
         int remoteCoverGeneration;
+        string chartVaultSessionToken;
+        string pendingChartVaultLoginState;
+        string pendingChartVaultCodeVerifier;
         LocalChartEntry chartEditorEntry;
         string selectedDifficultyName = "";
         string pendingDifficultyTagDelete;
@@ -812,6 +831,7 @@ namespace Gugarhythm
             holdPointProjector = ProjectHoldPoint;
             guideSampleProjector = ProjectGuideSample;
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
+            Application.deepLinkActivated += HandleChartVaultDeepLink;
             RefreshPresentationClockHardResetThreshold();
             Application.targetFrameRate = 120;
             LandscapeOrientation.Lock();
@@ -826,6 +846,18 @@ namespace Gugarhythm
             LibrarySortPreferences.Load(out librarySort, out librarySortAscending);
             var chartVaultStorageRoot = LocalChartLibrary.StorageDirectoryPath;
             chartVaultClient = new ChartVaultClient();
+            chartVaultSessionToken = ChartVaultSessionStore.Load();
+            if (string.IsNullOrEmpty(chartVaultSessionToken) &&
+                ChartVaultSessionStore.TryLoadPendingLogin(out var savedLoginState, out var savedLoginVerifier))
+            {
+                pendingChartVaultLoginState = savedLoginState;
+                pendingChartVaultCodeVerifier = savedLoginVerifier;
+                chartVaultLoginPending = true;
+            }
+            else
+            {
+                ChartVaultSessionStore.ClearPendingLogin();
+            }
             remoteCatalogCache = new RemoteChartCatalogCache(
                 Path.Combine(chartVaultStorageRoot, "chart-vault-public-catalog.json"));
             remoteChartDownloadService = new RemoteChartDownloadService(
@@ -847,6 +879,8 @@ namespace Gugarhythm
             SubscribeTouchCallbacks();
             LoadArtwork();
             BuildInterface();
+            if (!string.IsNullOrWhiteSpace(Application.absoluteURL))
+                HandleChartVaultDeepLink(Application.absoluteURL);
             SetPerformanceDiagnosticsEnabled(false);
             SetStatus("請匯入 GGR 封包。");
         }
@@ -994,6 +1028,7 @@ namespace Gugarhythm
             remoteOperationGeneration++;
             remoteCoverGeneration++;
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
+            Application.deepLinkActivated -= HandleChartVaultDeepLink;
             UnsubscribeTouchCallbacks();
             presentationClock.Invalidate();
             StopCalibrationTickAudio();
@@ -1075,7 +1110,6 @@ namespace Gugarhythm
             if (running && !paused && chart != null && judgmentEngine != null)
                 UpdateGameplayFrame(measurePerformance, gameplayTimingStart);
             UpdatePerformanceHud();
-            UpdateInputDiagnosticsHud();
             PollNativeImport();
             UpdateSafeAreaLayout();
             UpdateInputLaneFeedback();
@@ -1217,9 +1251,6 @@ namespace Gugarhythm
         public static float UpperHiddenBarScreenProgress(float percent) =>
             ClampUpperHiddenBarPercent(percent) / 100f;
 
-        public static float UpperHiddenBarEdgeInset(float fullWidth) =>
-            Mathf.Clamp(UpperHiddenBarBoundaryInset, 0f, Mathf.Max(0f, fullWidth) * .5f);
-
         public static Color UpperHiddenBarMaskColor => new(.01f, .02f, .06f, 1f);
 
         static void ConfigureUpperHiddenBarMask(TaperedConnectorGraphic mask)
@@ -1249,22 +1280,20 @@ namespace Gugarhythm
 
         void RefreshUpperHiddenBarGeometry()
         {
-            if (upperHiddenMask == null || upperHiddenBarPercent <= .0001f) return;
             var screenProgress = UpperHiddenBarScreenProgress(upperHiddenBarPercent);
+            var clipTopPadding = Mathf.Max(0f, TopY - ScreenY(screenProgress));
+            SetUpperHiddenClipPadding(connectorUpperHiddenClip, clipTopPadding);
+            SetUpperHiddenClipPadding(persistentHoldHeadUpperHiddenClip, clipTopPadding);
+            SetUpperHiddenClipPadding(noteUpperHiddenClip, clipTopPadding);
+            if (upperHiddenMask == null || upperHiddenBarPercent <= .0001f) return;
+            var topLeft = X(-VisibleTrackLaneEdge, 0f);
+            var topRight = X(VisibleTrackLaneEdge, 0f);
             var bottomLeft = X(-VisibleTrackLaneEdge, screenProgress);
             var bottomRight = X(VisibleTrackLaneEdge, screenProgress);
-            var maskWidth = ReferenceWidth + UpperHiddenBarHorizontalOverscan * 2f;
             upperHiddenMask.SetGeometry(
-                new Vector2(0f, TopY),
-                new Vector2(0f, ScreenY(screenProgress)),
-                maskWidth, maskWidth);
-            if (upperHiddenBoundary == null) return;
-            var boundaryInset = UpperHiddenBarEdgeInset(bottomRight - bottomLeft);
-            var boundaryLeft = bottomLeft + boundaryInset;
-            var boundaryRight = bottomRight - boundaryInset;
-            upperHiddenBoundary.sizeDelta = new Vector2(boundaryRight - boundaryLeft, 4);
-            upperHiddenBoundary.anchoredPosition = new Vector2((boundaryLeft + boundaryRight) * .5f,
-                ScreenY(screenProgress));
+                new Vector2((topLeft + topRight) * .5f, TopY),
+                new Vector2((bottomLeft + bottomRight) * .5f, ScreenY(screenProgress)),
+                topRight - topLeft, bottomRight - bottomLeft);
         }
 
         void SetUpperHiddenBarPercent(float value)
@@ -1279,11 +1308,15 @@ namespace Gugarhythm
                 var visible = upperHiddenBarPercent > .0001f;
                 if (upperHiddenMask.gameObject.activeSelf != visible)
                     upperHiddenMask.gameObject.SetActive(visible);
-                if (upperHiddenBoundary != null && upperHiddenBoundary.gameObject.activeSelf != visible)
-                    upperHiddenBoundary.gameObject.SetActive(visible);
-                if (visible) RefreshUpperHiddenBarGeometry();
             }
+            RefreshUpperHiddenBarGeometry();
             PlayerPrefs.SetFloat("gugarhythm-upper-hidden-bar-percent", upperHiddenBarPercent);
+        }
+
+        static void SetUpperHiddenClipPadding(RectMask2D clip, float topPadding)
+        {
+            if (clip == null) return;
+            clip.padding = new Vector4(0f, 0f, 0f, topPadding);
         }
 
         void SetFastLateDisplay(bool enabled)
@@ -1388,38 +1421,59 @@ namespace Gugarhythm
 
         void ShowSettingsAudio()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
             HideInputDiagnosticsSettings();
             settingsAudioPanel.gameObject.SetActive(true);
             settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
+            settingsAccountPanel.gameObject.SetActive(false);
             settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
             settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
         }
 
         void ShowSettingsGame()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
             HideInputDiagnosticsSettings();
             settingsAudioPanel.gameObject.SetActive(false);
             settingsGamePanel.gameObject.SetActive(true);
             settingsTagsPanel.gameObject.SetActive(false);
+            settingsAccountPanel.gameObject.SetActive(false);
             settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsGameNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
         }
 
         void ShowSettingsTags()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null) return;
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
             HideInputDiagnosticsSettings();
             settingsAudioPanel.gameObject.SetActive(false);
             settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(true);
+            settingsAccountPanel.gameObject.SetActive(false);
             settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
+            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+        }
+
+        void ShowSettingsAccount()
+        {
+            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
+            HideInputDiagnosticsSettings();
+            settingsAudioPanel.gameObject.SetActive(false);
+            settingsGamePanel.gameObject.SetActive(false);
+            settingsTagsPanel.gameObject.SetActive(false);
+            settingsAccountPanel.gameObject.SetActive(true);
+            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
+            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
+            RefreshAccountSettings();
         }
 
         void OpenAutoAdjustPanel()
@@ -2250,7 +2304,7 @@ namespace Gugarhythm
                     IsHoldCurrentlyMissed(judgment.Note.HoldRootIndex));
             if (judgment.Grade != JudgmentGrade.Miss)
             {
-                SpawnHitParticle(judgment.Note);
+                SpawnHitParticle(judgment);
             }
             InputDiagnosticsSession.RecordHitFeedback(judgment, judgment.Grade != JudgmentGrade.Miss);
         }
@@ -3294,13 +3348,16 @@ namespace Gugarhythm
             var guideBatchRect = guideBatchObject.GetComponent<RectTransform>(); guideBatchRect.SetParent(guideLayer, false); Fill(guideBatchRect);
             guideBatch = guideBatchObject.GetComponent<GuideBatchGraphic>(); guideBatch.raycastTarget = false; guideBatch.color = Color.white;
             connectorLayer = Layer("Hold Connectors", stage);
+            connectorUpperHiddenClip = connectorLayer.gameObject.AddComponent<RectMask2D>();
             holdGreenBatch = CreateHoldBatch("Legacy Hold Green Batch", holdGreenConnectorTexture, null);
             holdYellowBatch = CreateHoldBatch("Legacy Hold Yellow Batch", holdYellowConnectorTexture, null);
             missedHoldGreenBatch = CreateHoldBatch("Legacy Missed Hold Green Batch", holdGreenConnectorTexture, missedHoldMaterial);
             missedHoldYellowBatch = CreateHoldBatch("Legacy Missed Hold Yellow Batch", holdYellowConnectorTexture, missedHoldMaterial);
             simLineLayer = Layer("Synchronization Lines", stage);
             persistentHoldHeadLayer = Layer("Persistent Hold Heads", stage);
+            persistentHoldHeadUpperHiddenClip = persistentHoldHeadLayer.gameObject.AddComponent<RectMask2D>();
             noteLayer = Layer("Notes", stage);
+            noteUpperHiddenClip = noteLayer.gameObject.AddComponent<RectMask2D>();
             var upperHiddenMaskObject = new GameObject("Upper Hidden Bar", typeof(RectTransform),
                 typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var upperHiddenMaskRect = upperHiddenMaskObject.GetComponent<RectTransform>();
@@ -3312,7 +3369,6 @@ namespace Gugarhythm
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
             BuildPerformanceHud(safeAreaRoot);
-            BuildInputDiagnosticsHud(safeAreaRoot);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
             BuildLatencyCalibration(safeAreaRoot);
@@ -3320,6 +3376,7 @@ namespace Gugarhythm
             BuildImportDecision(safeAreaRoot);
             BuildPauseOverlay(safeAreaRoot);
             BuildResult(safeAreaRoot);
+            BuildChartPreview(safeAreaRoot);
             // The dim blue loading veil must cover the physical display,
             // including Android cutout insets, and remain above menu UI.
             BuildGameplayLoadingOverlay(root);
@@ -3650,6 +3707,7 @@ namespace Gugarhythm
             }
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
+            FitChartPreviewPanel(chartPreviewPanel, 32f);
             FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
         }
@@ -3666,6 +3724,18 @@ namespace Gugarhythm
             panel.sizeDelta = designSize;
             panel.anchoredPosition = Vector2.zero;
             panel.localScale = Vector3.one * scale;
+        }
+
+        static void FitChartPreviewPanel(RectTransform panel, float inset)
+        {
+            if (panel == null) return;
+            inset = Mathf.Max(0f, inset);
+            panel.anchorMin = Vector2.zero;
+            panel.anchorMax = Vector2.one;
+            panel.pivot = new Vector2(.5f, .5f);
+            panel.offsetMin = new Vector2(inset, inset);
+            panel.offsetMax = new Vector2(-inset, -inset);
+            panel.localScale = Vector3.one;
         }
 
         static void PinToAnchor(RectTransform rect, Vector2 anchor, Vector2 pivot, Vector2 position)
@@ -3704,14 +3774,22 @@ namespace Gugarhythm
                 () => SelectLibrarySource(ChartLibrarySource.Online), new Vector2(146, 42), new Color(.20f, .20f, .20f));
             PinToAnchor(onlineLibrarySourceButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
                 new Vector2(190, -132));
+            remotePublicScopeButton = MakeFlatButton("公開", library, Vector2.zero,
+                () => SelectRemoteCatalogScope(RemoteChartCatalogScope.Public), new Vector2(146, 42), new Color(.10f, .34f, .50f));
+            PinToAnchor(remotePublicScopeButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
+                new Vector2(34, -184));
+            remotePrivateScopeButton = MakeFlatButton("私人", library, Vector2.zero,
+                () => SelectRemoteCatalogScope(RemoteChartCatalogScope.Private), new Vector2(146, 42), new Color(.20f, .20f, .20f));
+            PinToAnchor(remotePrivateScopeButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
+                new Vector2(190, -184));
             var countBadge = Panel("Chart Count Badge", library, new Color(.24f, .24f, .24f), new Vector2(42, 42), Vector2.zero);
             PinToAnchor(countBadge, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-38, -42));
             var countBadgeText = Label("", countBadge, 18); Fill(countBadgeText.rectTransform); libraryCountLabel = countBadgeText;
             librarySearchInput = MakeInputField("搜尋", library, Vector2.zero, new Vector2(0, 56));
-            var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -252); searchRect.offsetMax = new Vector2(-22, -196);
+            var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -304); searchRect.offsetMax = new Vector2(-22, -248);
             librarySearchInput.onValueChanged.AddListener(_ => RefreshLibraryUI());
             const int libraryHeaderFontSize = 22;
-            const float librarySortCenterY = -294;
+            const float librarySortCenterY = -346;
             librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46); PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, librarySortCenterY));
             librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, librarySortCenterY));
             MakeInvisibleButton(librarySortModeLabel.rectTransform, CycleLibrarySort);
@@ -3731,7 +3809,7 @@ namespace Gugarhythm
                 RefreshLibraryUI();
             });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
-            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -344);
+            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -396);
 
             importLibraryButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
             var importRect = importLibraryButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
@@ -3789,6 +3867,16 @@ namespace Gugarhythm
             startButton = MakeFlatButton("▶  開始遊戲", detail, Vector2.zero, StartGame, new Vector2(0, 82), new Color(.06f, .58f, .96f));
             var startRect = startButton.GetComponent<RectTransform>(); startRect.anchorMin = new Vector2(.51f, .5f); startRect.anchorMax = new Vector2(.94f, .5f); startRect.pivot = new Vector2(.5f, .5f); startRect.offsetMin = new Vector2(0, -300.5f); startRect.offsetMax = new Vector2(0, -218.5f);
             startButton.interactable = false;
+            chartPreviewButton = MakeOutlinedButton("預覽", detail, Vector2.zero, OpenChartPreview, new Vector2(0, 52));
+            var previewRect = chartPreviewButton.GetComponent<RectTransform>();
+            var previewAnchorWidth = ChartPreviewLayout.PrimaryWidth(.94f - .51f);
+            var previewAnchorCenter = (.51f + .94f) * .5f;
+            previewRect.anchorMin = new Vector2(previewAnchorCenter - previewAnchorWidth * .5f, .5f);
+            previewRect.anchorMax = new Vector2(previewAnchorCenter + previewAnchorWidth * .5f, .5f);
+            previewRect.pivot = new Vector2(.5f, .5f);
+            previewRect.offsetMin = new Vector2(0, -370.5f);
+            previewRect.offsetMax = new Vector2(0, -318.5f);
+            chartPreviewButton.interactable = false;
             downloadRemoteChartButton = MakeFlatButton("下載到本機", detail, Vector2.zero,
                 () => StartCoroutine(DownloadSelectedRemoteChart()), new Vector2(0, 82), new Color(.06f, .58f, .96f));
             var downloadRemoteRect = downloadRemoteChartButton.GetComponent<RectTransform>(); downloadRemoteRect.anchorMin = new Vector2(.51f, .5f); downloadRemoteRect.anchorMax = new Vector2(.94f, .5f); downloadRemoteRect.pivot = new Vector2(.5f, .5f); downloadRemoteRect.offsetMin = new Vector2(0, -300.5f); downloadRemoteRect.offsetMax = new Vector2(0, -218.5f);
@@ -3811,6 +3899,7 @@ namespace Gugarhythm
             settingsAudioNavigationButton = MakeFlatButton("音訊", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
             settingsGameNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsAccountNavigationButton = MakeFlatButton("帳號", navigation, new Vector2(0, 45), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             var card = Panel("Settings Audio Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             settingsAudioPanel = card;
 
@@ -3976,8 +4065,258 @@ namespace Gugarhythm
             MakeOutlinedButton("取消", difficultyTagConfirmationPanel, new Vector2(-120, -82), CancelDifficultyTagDelete, new Vector2(160, 54));
             difficultyTagConfirmationPanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
+            settingsAccountPanel = Panel("Settings Account Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            var accountTitle = Label("帳號", settingsAccountPanel, 32);
+            accountTitle.alignment = TextAnchor.MiddleLeft;
+            accountTitle.rectTransform.sizeDelta = new Vector2(860, 62);
+            accountTitle.rectTransform.anchoredPosition = new Vector2(0, 290);
+            var accountDescription = Label("登入後可查看及下載只屬於你的私人譜面。", settingsAccountPanel, 22);
+            accountDescription.color = new Color(.72f, .82f, 1f, 1f);
+            accountDescription.rectTransform.sizeDelta = new Vector2(860, 46);
+            accountDescription.rectTransform.anchoredPosition = new Vector2(0, 220);
+            settingsAccountStatusLabel = Label("", settingsAccountPanel, 24);
+            settingsAccountStatusLabel.alignment = TextAnchor.MiddleLeft;
+            settingsAccountStatusLabel.rectTransform.sizeDelta = new Vector2(860, 56);
+            settingsAccountStatusLabel.rectTransform.anchoredPosition = new Vector2(0, 110);
+            settingsAccountLoginButton = MakeFlatButton("登入", settingsAccountPanel, new Vector2(-130, -5),
+                StartChartVaultLogin, new Vector2(230, 62), new Color(.06f, .58f, .96f));
+            settingsAccountLogoutButton = MakeOutlinedButton("登出", settingsAccountPanel, new Vector2(130, -5),
+                LogoutChartVault, new Vector2(230, 62));
+            settingsAccountPanel.gameObject.SetActive(false);
+            RefreshAccountSettings();
             BuildInputDiagnosticsSettingsSection(navigation);
             settingsPanel.gameObject.SetActive(false);
+        }
+
+        void RefreshAccountSettings()
+        {
+            var signedIn = !string.IsNullOrEmpty(chartVaultSessionToken);
+            if (settingsAccountStatusLabel != null)
+                settingsAccountStatusLabel.text = chartVaultLoginPending
+                    ? "正在等待登入完成；若流程已中斷，可重新登入。"
+                    : signedIn ? "已登入" : "尚未登入";
+            if (settingsAccountLoginButton != null)
+            {
+                settingsAccountLoginButton.gameObject.SetActive(!signedIn);
+                settingsAccountLoginButton.interactable = !signedIn;
+                var buttonLabel = settingsAccountLoginButton.GetComponentInChildren<Text>();
+                if (buttonLabel != null) buttonLabel.text = chartVaultLoginPending ? "重新登入" : "登入";
+            }
+            if (settingsAccountLogoutButton != null)
+                settingsAccountLogoutButton.gameObject.SetActive(signedIn);
+        }
+
+        void StartChartVaultLogin()
+        {
+            if (!string.IsNullOrEmpty(chartVaultSessionToken)) return;
+            if (chartVaultLoginPending)
+            {
+                chartVaultLoginPending = false;
+                pendingChartVaultLoginState = null;
+                pendingChartVaultCodeVerifier = null;
+                ChartVaultSessionStore.ClearPendingLogin();
+            }
+            var state = NewChartVaultToken();
+            var verifier = NewChartVaultToken();
+            var challenge = ComputeChartVaultPkceChallenge(verifier);
+            if (state == null || verifier == null || challenge == null)
+            {
+                SetStatus("目前無法開始登入，請稍後再試。");
+                return;
+            }
+            pendingChartVaultLoginState = state;
+            pendingChartVaultCodeVerifier = verifier;
+            chartVaultLoginPending = true;
+            ChartVaultSessionStore.SavePendingLogin(state, verifier);
+            RefreshAccountSettings();
+            var loginUrl = ChartVaultApiSettings.ApiOrigin + "/app-login?state=" + state + "&code_challenge=" + challenge;
+            Application.OpenURL(loginUrl);
+        }
+
+        void LogoutChartVault()
+        {
+            var tokenToRevoke = chartVaultSessionToken;
+            chartVaultSessionToken = null;
+            ChartVaultSessionStore.Clear();
+            chartVaultLoginPending = false;
+            pendingChartVaultLoginState = null;
+            pendingChartVaultCodeVerifier = null;
+            ChartVaultSessionStore.ClearPendingLogin();
+            remoteCatalogScope = RemoteChartCatalogScope.Public;
+            remoteCatalog = null;
+            selectedRemoteChart = null;
+            remoteOperationGeneration++;
+            remoteCoverGeneration++;
+            ClearRemoteCoverTexture();
+            RefreshAccountSettings();
+            RefreshLibraryUI();
+            if (!string.IsNullOrEmpty(tokenToRevoke))
+                StartCoroutine(RevokeChartVaultSession(tokenToRevoke));
+            if (librarySource == ChartLibrarySource.Online)
+                StartCoroutine(RefreshRemoteCatalog(false));
+        }
+
+        IEnumerator RevokeChartVaultSession(string token)
+        {
+            IEnumerator operation = null;
+            try
+            {
+                operation = chartVaultClient?.LogoutAppSession(token, _ => { });
+            }
+            catch (Exception) { }
+            while (operation != null)
+            {
+                object current;
+                try
+                {
+                    if (!operation.MoveNext()) break;
+                    current = operation.Current;
+                }
+                catch (Exception) { break; }
+                yield return current;
+            }
+            if (operation is IDisposable disposable)
+                try { disposable.Dispose(); } catch (Exception) { }
+        }
+
+        void HandleChartVaultDeepLink(string url)
+        {
+            if (!TryParseChartVaultCallback(url, out var code, out var state) ||
+                !chartVaultLoginPending || !FixedTimeEquals(state, pendingChartVaultLoginState) ||
+                string.IsNullOrEmpty(pendingChartVaultCodeVerifier))
+                return;
+            var verifier = pendingChartVaultCodeVerifier;
+            pendingChartVaultLoginState = null;
+            pendingChartVaultCodeVerifier = null;
+            ChartVaultSessionStore.ClearPendingLogin();
+            StartCoroutine(ExchangeChartVaultLoginCode(code, verifier));
+        }
+
+        IEnumerator ExchangeChartVaultLoginCode(string code, string verifier)
+        {
+            var completed = false;
+            var result = default(ChartVaultSessionResult);
+            IEnumerator operation = null;
+            try
+            {
+                operation = chartVaultClient?.ExchangeAppLoginHandoff(code, verifier, value =>
+                {
+                    if (destroying || completed) return;
+                    result = value;
+                    completed = true;
+                });
+            }
+            catch (Exception)
+            {
+                completed = false;
+            }
+            while (operation != null)
+            {
+                object current;
+                try
+                {
+                    if (!operation.MoveNext()) break;
+                    current = operation.Current;
+                }
+                catch (Exception)
+                {
+                    completed = false;
+                    break;
+                }
+                yield return current;
+            }
+            if (operation is IDisposable disposable)
+                try { disposable.Dispose(); } catch (Exception) { }
+
+            chartVaultLoginPending = false;
+            pendingChartVaultLoginState = null;
+            pendingChartVaultCodeVerifier = null;
+            ChartVaultSessionStore.ClearPendingLogin();
+            if (completed && result.Success)
+            {
+                chartVaultSessionToken = result.SessionToken;
+                ChartVaultSessionStore.Save(chartVaultSessionToken);
+                SetStatus("帳號已登入。");
+            }
+            else
+            {
+                SetStatus("登入失敗，請回到設定＞帳號後再試。");
+            }
+            RefreshAccountSettings();
+            RefreshLibraryUI();
+        }
+
+        static string NewChartVaultToken()
+        {
+            try
+            {
+                var bytes = new byte[32];
+                using (var random = RandomNumberGenerator.Create()) random.GetBytes(bytes);
+                return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        static string ComputeChartVaultPkceChallenge(string verifier)
+        {
+            if (!IsChartVaultToken(verifier)) return null;
+            try
+            {
+                using var sha256 = SHA256.Create();
+                var hash = sha256.ComputeHash(System.Text.Encoding.UTF8.GetBytes(verifier));
+                return Convert.ToBase64String(hash).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        static bool TryParseChartVaultCallback(string value, out string code, out string state)
+        {
+            code = null;
+            state = null;
+            if (!Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
+                !string.Equals(uri.Scheme, "com.luecat.gugarhythm", StringComparison.OrdinalIgnoreCase) ||
+                !string.IsNullOrEmpty(uri.Host) ||
+                !string.Equals(uri.AbsolutePath, "/oauth2redirect", StringComparison.Ordinal))
+                return false;
+            var rawQuery = uri.Query;
+            if (string.IsNullOrEmpty(rawQuery) || rawQuery[0] != '?') return false;
+            foreach (var pair in rawQuery.Substring(1).Split('&'))
+            {
+                var separator = pair.IndexOf('=');
+                if (separator <= 0 || separator == pair.Length - 1) return false;
+                var name = pair.Substring(0, separator);
+                var token = pair.Substring(separator + 1);
+                if (!IsChartVaultToken(token)) return false;
+                if (name == "code" && code == null) code = token;
+                else if (name == "state" && state == null) state = token;
+                else return false;
+            }
+            return IsChartVaultToken(code) && IsChartVaultToken(state);
+        }
+
+        static bool IsChartVaultToken(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 43) return false;
+            foreach (var character in value)
+                if (!(character >= 'a' && character <= 'z') &&
+                    !(character >= 'A' && character <= 'Z') &&
+                    !(character >= '0' && character <= '9') && character != '-' && character != '_')
+                    return false;
+            return true;
+        }
+
+        static bool FixedTimeEquals(string left, string right)
+        {
+            if (!IsChartVaultToken(left) || !IsChartVaultToken(right)) return false;
+            var difference = 0;
+            for (var index = 0; index < left.Length; index++) difference |= left[index] ^ right[index];
+            return difference == 0;
         }
 
         void BuildChartEditor(RectTransform root)
@@ -4229,7 +4568,7 @@ namespace Gugarhythm
             }
 
             RefreshDetailCover(null);
-            if (!remoteCatalogCacheLoaded)
+            if (remoteCatalogScope == RemoteChartCatalogScope.Public && !remoteCatalogCacheLoaded)
             {
                 remoteCatalogCacheLoaded = true;
                 if (remoteCatalogCache != null && remoteCatalogCache.TryLoad(out var cachedCatalog))
@@ -4255,6 +4594,18 @@ namespace Gugarhythm
                 localLibrarySourceButton.image.color = online ? new Color(.20f, .20f, .20f) : new Color(.10f, .34f, .50f);
             if (onlineLibrarySourceButton != null)
                 onlineLibrarySourceButton.image.color = online ? new Color(.10f, .34f, .50f) : new Color(.20f, .20f, .20f);
+            if (remotePublicScopeButton != null)
+            {
+                remotePublicScopeButton.gameObject.SetActive(online);
+                remotePublicScopeButton.image.color = remoteCatalogScope == RemoteChartCatalogScope.Public
+                    ? new Color(.10f, .34f, .50f) : new Color(.20f, .20f, .20f);
+            }
+            if (remotePrivateScopeButton != null)
+            {
+                remotePrivateScopeButton.gameObject.SetActive(online);
+                remotePrivateScopeButton.image.color = remoteCatalogScope == RemoteChartCatalogScope.Private
+                    ? new Color(.10f, .34f, .50f) : new Color(.20f, .20f, .20f);
+            }
             if (importLibraryButton != null) importLibraryButton.gameObject.SetActive(!online);
             if (refreshRemoteLibraryButton != null)
             {
@@ -4267,6 +4618,11 @@ namespace Gugarhythm
                 startButton.gameObject.SetActive(!online);
                 startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
             }
+            if (chartPreviewButton != null)
+            {
+                chartPreviewButton.gameObject.SetActive(!online);
+                chartPreviewButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
+            }
             if (downloadRemoteChartButton != null)
             {
                 downloadRemoteChartButton.gameObject.SetActive(online);
@@ -4274,9 +4630,38 @@ namespace Gugarhythm
             }
         }
 
+        void SelectRemoteCatalogScope(RemoteChartCatalogScope scope)
+        {
+            if (librarySource != ChartLibrarySource.Online) return;
+            if (scope == RemoteChartCatalogScope.Private && string.IsNullOrEmpty(chartVaultSessionToken))
+            {
+                SetStatus("請先到設定＞帳號登入，才能查看私人譜面。");
+                return;
+            }
+            if (remoteCatalogScope == scope)
+            {
+                RefreshLibraryUI();
+                return;
+            }
+            remoteCatalogScope = scope;
+            remoteOperationGeneration++;
+            remoteCoverGeneration++;
+            ClearRemoteCoverTexture();
+            selectedRemoteChart = null;
+            remoteCatalog = null;
+            remoteCatalogRequested = false;
+            RefreshLibraryUI();
+            StartCoroutine(RefreshRemoteCatalog(false));
+        }
+
         IEnumerator RefreshRemoteCatalog(bool userInitiated)
         {
             if (librarySource != ChartLibrarySource.Online || remoteCatalogLoading) yield break;
+            if (remoteCatalogScope == RemoteChartCatalogScope.Private && string.IsNullOrEmpty(chartVaultSessionToken))
+            {
+                SetStatus("請先到設定＞帳號登入，才能查看私人譜面。");
+                yield break;
+            }
             remoteCatalogLoading = true;
             remoteCatalogRequested = true;
             var generation = remoteOperationGeneration;
@@ -4288,12 +4673,12 @@ namespace Gugarhythm
             IEnumerator operation = null;
             try
             {
-                operation = chartVaultClient?.FetchPublicCatalog(value =>
+                operation = chartVaultClient?.FetchCatalog(remoteCatalogScope, value =>
                 {
                     if (destroying || generation != remoteOperationGeneration || resultReceived) return;
                     result = value;
                     resultReceived = true;
-                });
+                }, chartVaultSessionToken);
             }
             catch (Exception)
             {
@@ -4339,20 +4724,25 @@ namespace Gugarhythm
 
             ReconcileRemoteSelection(result.Catalog);
             remoteCatalog = result.Catalog;
-            var cacheSaved = true;
-            try
+            var cacheSaved = remoteCatalogScope != RemoteChartCatalogScope.Public;
+            if (remoteCatalogScope == RemoteChartCatalogScope.Public)
             {
-                remoteCatalogCache?.Save(remoteCatalog);
-            }
-            catch (Exception)
-            {
-                cacheSaved = false;
+                try
+                {
+                    remoteCatalogCache?.Save(remoteCatalog);
+                }
+                catch (Exception)
+                {
+                    cacheSaved = false;
+                }
             }
             if (librarySource == ChartLibrarySource.Online)
             {
                 RefreshRemoteLibraryUI();
                 SetStatus(cacheSaved
-                    ? "線上譜面已更新（" + FormatRemoteCatalogTimestamp(remoteCatalog.CachedAtUnixMilliseconds) + "）。"
+                    ? (remoteCatalogScope == RemoteChartCatalogScope.Private
+                        ? "私人譜面已更新。"
+                        : "線上譜面已更新（" + FormatRemoteCatalogTimestamp(remoteCatalog.CachedAtUnixMilliseconds) + "）。")
                     : "線上譜面已更新，但這次無法寫入本機快取。");
             }
         }
@@ -4482,6 +4872,8 @@ namespace Gugarhythm
             libraryScrollPositionInitialized = true;
             if (startButton != null)
                 startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
+            if (chartPreviewButton != null)
+                chartPreviewButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
         }
 
         void RefreshRemoteLibraryUI()
@@ -4570,29 +4962,25 @@ namespace Gugarhythm
                 divider.offsetMax = new Vector2(-dividerHorizontalInset, 0);
                 divider.GetComponent<Image>().raycastTarget = false;
             }
-            var title = Label(RemoteText(chart.Title), row, 20);
+            var title = Label(RemoteText(chart.Title), row, 21);
             title.alignment = TextAnchor.MiddleLeft;
             title.rectTransform.anchorMin = new Vector2(0, 1);
             title.rectTransform.anchorMax = new Vector2(1, 1);
             title.rectTransform.pivot = new Vector2(0, 1);
-            title.rectTransform.offsetMin = new Vector2(24, -46);
-            title.rectTransform.offsetMax = new Vector2(-24, -14);
-            var artist = Label(RemoteText(chart.Artist) + " · " + RemoteText(chart.Author), row, 15);
+            title.rectTransform.offsetMin = new Vector2(24, -58);
+            title.rectTransform.offsetMax = new Vector2(-78, -24);
+            var artist = Label(RemoteText(chart.Artist) + " · " + RemoteText(chart.Author), row, 16);
             artist.alignment = TextAnchor.MiddleLeft;
             artist.color = new Color(.67f, .67f, .67f);
             artist.rectTransform.anchorMin = new Vector2(0, 1);
             artist.rectTransform.anchorMax = new Vector2(1, 1);
             artist.rectTransform.pivot = new Vector2(0, 1);
-            artist.rectTransform.offsetMin = new Vector2(24, -76);
-            artist.rectTransform.offsetMax = new Vector2(-24, -48);
-            var metadata = Label(FormatRemoteDifficulty(chart) + " · v" + chart.Version + " · 公開", row, 14);
-            metadata.alignment = TextAnchor.MiddleLeft;
-            metadata.color = new Color(.52f, .76f, .92f);
-            metadata.rectTransform.anchorMin = new Vector2(0, 1);
-            metadata.rectTransform.anchorMax = new Vector2(1, 1);
-            metadata.rectTransform.pivot = new Vector2(0, 1);
-            metadata.rectTransform.offsetMin = new Vector2(24, -106);
-            metadata.rectTransform.offsetMax = new Vector2(-24, -78);
+            artist.rectTransform.offsetMin = new Vector2(24, -88);
+            artist.rectTransform.offsetMax = new Vector2(-78, -59);
+            var level = Label(chart.Rating.ToString("0.##"), row, 20);
+            level.color = new Color(.78f, .78f, .78f);
+            level.rectTransform.sizeDelta = new Vector2(62, 50);
+            PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-18, 0));
             MakeInvisibleButton(row, () => SelectRemoteChart(chart));
         }
 
@@ -4603,7 +4991,7 @@ namespace Gugarhythm
                 SetDetailTitle("選擇一份線上譜面");
                 detailArtistLabel.text = string.Empty;
                 detailDifficultyLabel.text = "選擇後可下載到本機";
-                detailAccuracyLabel.text = "PUBLIC CHART\n<size=52>—</size>";
+                detailAccuracyLabel.text = string.Empty;
                 ShowRemoteCover(null);
             }
             else
@@ -4613,7 +5001,7 @@ namespace Gugarhythm
                     RemoteText(selectedRemoteChart.Author);
                 detailDifficultyLabel.text = FormatRemoteDifficulty(selectedRemoteChart) + " · v" +
                     selectedRemoteChart.Version + " · 公開";
-                detailAccuracyLabel.text = "PUBLIC CHART\n<size=52>公開</size>";
+                detailAccuracyLabel.text = string.Empty;
                 ShowRemoteCover(remoteCoverTexture);
             }
             if (downloadRemoteChartButton != null)
@@ -4656,7 +5044,7 @@ namespace Gugarhythm
                     }
                     downloadedTexture = texture;
                     resultReceived = true;
-                });
+                }, chartVaultSessionToken);
             }
             catch (Exception)
             {
@@ -4719,7 +5107,7 @@ namespace Gugarhythm
                     if (destroying || generation != remoteOperationGeneration || resultReceived) return;
                     result = value;
                     resultReceived = true;
-                });
+                }, chartVaultSessionToken);
             }
             catch (Exception)
             {
@@ -4811,9 +5199,12 @@ namespace Gugarhythm
 
         static string RemoteText(string value) => string.IsNullOrWhiteSpace(value) ? "—" : value.Trim();
 
-        static string FormatRemoteDifficulty(RemoteChartSummary chart) => chart == null
-            ? "—"
-            : RemoteText(chart.Difficulty) + " " + chart.Rating.ToString("0.##");
+        static string FormatRemoteDifficulty(RemoteChartSummary chart)
+        {
+            if (chart == null) return "未標示";
+            var difficulty = string.IsNullOrWhiteSpace(chart.Difficulty) ? "未標示" : chart.Difficulty.Trim();
+            return difficulty + " " + chart.Rating.ToString("0.##");
+        }
 
         void BuildLibraryRow(LocalChartGroup group, int index, float rowHeight)
         {
@@ -5117,6 +5508,91 @@ namespace Gugarhythm
             resultPanel.gameObject.SetActive(false);
         }
 
+        void BuildChartPreview(RectTransform root)
+        {
+            const float previewInset = 32f;
+            chartPreviewBackdrop = Panel("Chart Preview Backdrop", root, new Color(0, 0, 0, .68f), Vector2.zero, Vector2.zero, true);
+            MakeInvisibleButton(chartPreviewBackdrop, CloseChartPreview);
+            chartPreviewPanel = Panel("Chart Preview Dialog", root, new Color(.11f, .12f, .15f, .99f), new Vector2(1120, 820), Vector2.zero);
+            Outline(chartPreviewPanel.gameObject, new Color(.30f, .65f, .94f, .9f), 2);
+            chartPreviewTitle = Label("譜面預覽", chartPreviewPanel, 30);
+            chartPreviewTitle.alignment = TextAnchor.MiddleLeft;
+            chartPreviewTitle.rectTransform.anchorMin = new Vector2(0, 1);
+            chartPreviewTitle.rectTransform.anchorMax = new Vector2(1, 1);
+            chartPreviewTitle.rectTransform.pivot = new Vector2(0, 1);
+            chartPreviewTitle.rectTransform.offsetMin = new Vector2(previewInset, -80);
+            chartPreviewTitle.rectTransform.offsetMax = new Vector2(-192, -24);
+            var close = MakeOutlinedButton("關閉", chartPreviewPanel, Vector2.zero, CloseChartPreview, new Vector2(120, 48));
+            var closeRect = close.GetComponent<RectTransform>();
+            PinToAnchor(closeRect, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-previewInset, -24));
+            close.GetComponentInChildren<Text>().alignment = TextAnchor.MiddleCenter;
+            var divider = Panel("Chart Preview Divider", chartPreviewPanel, new Color(.30f, .34f, .40f), Vector2.zero, Vector2.zero);
+            divider.anchorMin = new Vector2(0, 1);
+            divider.anchorMax = new Vector2(1, 1);
+            divider.offsetMin = new Vector2(previewInset, -96);
+            divider.offsetMax = new Vector2(-previewInset, -94);
+            divider.GetComponent<Image>().raycastTarget = false;
+            chartPreviewContent = MakeHorizontalScroll("Chart Preview Scroll", chartPreviewPanel, Vector2.zero, Vector2.zero);
+            var scrollRoot = chartPreviewContent.parent.GetComponent<RectTransform>();
+            scrollRoot.anchorMin = Vector2.zero;
+            scrollRoot.anchorMax = Vector2.one;
+            scrollRoot.offsetMin = new Vector2(previewInset, previewInset);
+            scrollRoot.offsetMax = new Vector2(-previewInset, -112);
+            var documentObject = new GameObject("Chart Document", typeof(RectTransform), typeof(CanvasRenderer), typeof(ChartDocumentPreviewGraphic));
+            var document = documentObject.GetComponent<RectTransform>();
+            document.SetParent(chartPreviewContent, false);
+            document.anchorMin = Vector2.zero;
+            document.anchorMax = Vector2.one;
+            document.pivot = new Vector2(.5f, .5f);
+            document.offsetMin = Vector2.zero;
+            document.offsetMax = Vector2.zero;
+            chartPreviewGraphic = documentObject.GetComponent<ChartDocumentPreviewGraphic>();
+            chartPreviewGraphic.color = Color.white;
+            chartPreviewGraphic.raycastTarget = false;
+            chartPreviewBackdrop.gameObject.SetActive(false);
+            chartPreviewPanel.gameObject.SetActive(false);
+        }
+
+        void OpenChartPreview()
+        {
+            if (librarySource != ChartLibrarySource.Local || selectedLibraryEntry == null || chartPreviewGraphic == null) return;
+            if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
+            {
+                SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。");
+                return;
+            }
+            var result = new GgrChartImporter().Import(selectedLibraryEntry.SourceFile, bytes, null);
+            if (!result.Success || result.Chart == null)
+            {
+                SetStatus("譜面預覽載入失敗：" + (result.Error ?? "不支援的譜面內容。"));
+                return;
+            }
+            chartPreviewBackdrop.gameObject.SetActive(true);
+            chartPreviewPanel.gameObject.SetActive(true);
+            chartPreviewTitle.text = string.IsNullOrWhiteSpace(result.Chart.Title) ? selectedLibraryEntry.Title : result.Chart.Title;
+            chartPreviewGraphic.SetChart(result.Chart);
+            Canvas.ForceUpdateCanvases();
+            var scroll = chartPreviewContent == null ? null : chartPreviewContent.parent.GetComponent<ScrollRect>();
+            var viewportWidth = scroll?.viewport == null ? 0f : scroll.viewport.rect.width;
+            var previewContentWidth = Mathf.Max(chartPreviewGraphic.ContentWidth, viewportWidth);
+            var previewContentSize = chartPreviewContent.sizeDelta;
+            previewContentSize.x = previewContentWidth;
+            chartPreviewContent.sizeDelta = previewContentSize;
+            chartPreviewGraphic.rectTransform.offsetMin = Vector2.zero;
+            chartPreviewGraphic.rectTransform.offsetMax = Vector2.zero;
+            Canvas.ForceUpdateCanvases();
+            chartPreviewGraphic.RefreshArtwork();
+            Canvas.ForceUpdateCanvases();
+            if (scroll != null) scroll.horizontalNormalizedPosition = 0f;
+        }
+
+        void CloseChartPreview()
+        {
+            if (chartPreviewBackdrop != null) chartPreviewBackdrop.gameObject.SetActive(false);
+            if (chartPreviewPanel != null) chartPreviewPanel.gameObject.SetActive(false);
+            chartPreviewGraphic?.ClearChart();
+        }
+
         void BuildPauseOverlay(RectTransform root)
         {
             pauseOverlay = Panel("Pause Overlay", root, new Color(0, 0, 0, .72f), Vector2.zero, Vector2.zero, true);
@@ -5387,10 +5863,11 @@ namespace Gugarhythm
                 if (guideViews.TryGetValue(guide, out var line)) ReleaseGuide(guide, line);
         }
 
-        void SpawnHitParticle(RuntimeNote note)
+        void SpawnHitParticle(JudgmentEvent judgment)
         {
+            var note = judgment.Note;
             var tint = ResolveHitEffectColor(note);
-            var x = X(note.Lane, 1f);
+            var x = X(ResolveHitEffectLane(judgment), 1f);
             var noteWidth = Mathf.Clamp(LaneWidth(note.Lane, note.Size, 1f), 64f, 154f);
             var particleRoot = new GameObject("Judgment Pulse", typeof(RectTransform), typeof(CanvasRenderer), typeof(HitBurstGraphic)).GetComponent<RectTransform>();
             particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(360, 600); particleRoot.anchoredPosition = new Vector2(x, HitY);
@@ -5403,6 +5880,9 @@ namespace Gugarhythm
             burst.SetProgress(0);
             StartCoroutine(AnimateHitEffect(particleRoot, burst));
         }
+
+        public static float ResolveHitEffectLane(JudgmentEvent judgment) =>
+            judgment.HitLane ?? judgment.Note?.Lane ?? 0f;
 
         public static Color ResolveHitEffectColor(RuntimeNote note)
         {
@@ -5716,6 +6196,58 @@ namespace Gugarhythm
             // Unity expands the handle to the full track and it looks like a
             // non-draggable decoration rather than a scroll thumb.
             scroll.verticalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
+            return content;
+        }
+
+        static RectTransform MakeHorizontalScroll(string name, RectTransform parent, Vector2 position, Vector2 size)
+        {
+            var root = Panel(name, parent, new Color(.12f, .12f, .12f), size, position);
+            var mask = root.gameObject.AddComponent<Mask>();
+            mask.showMaskGraphic = false;
+            var content = new GameObject("Content", typeof(RectTransform)).GetComponent<RectTransform>();
+            content.SetParent(root, false);
+            content.anchorMin = new Vector2(0, 0);
+            content.anchorMax = new Vector2(0, 1);
+            content.pivot = new Vector2(0, .5f);
+            content.anchoredPosition = Vector2.zero;
+            content.sizeDelta = new Vector2(size.x, 0);
+            var scroll = root.gameObject.AddComponent<ScrollRect>();
+            scroll.viewport = root;
+            scroll.content = content;
+            scroll.horizontal = true;
+            scroll.vertical = false;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.inertia = true;
+            scroll.decelerationRate = .135f;
+            scroll.scrollSensitivity = 28;
+            var track = Panel("Scroll Track", root, new Color(.35f, .35f, .35f, .34f), Vector2.zero, Vector2.zero);
+            track.anchorMin = new Vector2(0, 0);
+            track.anchorMax = new Vector2(1, 0);
+            track.pivot = new Vector2(.5f, 0);
+            track.offsetMin = new Vector2(10, 7);
+            track.offsetMax = new Vector2(-10, 13);
+            var handle = Panel("Scroll Handle", track, new Color(1f, 1f, 1f, .9f), new Vector2(40, 6), Vector2.zero);
+            handle.anchorMin = new Vector2(0, 0);
+            handle.anchorMax = new Vector2(0, 1);
+            handle.pivot = new Vector2(0, .5f);
+            handle.offsetMin = Vector2.zero;
+            handle.offsetMax = new Vector2(40, 0);
+            var scrollbar = track.gameObject.AddComponent<Scrollbar>();
+            scrollbar.handleRect = handle;
+            scrollbar.direction = Scrollbar.Direction.LeftToRight;
+            scrollbar.targetGraphic = handle.GetComponent<Image>();
+            scrollbar.colors = new ColorBlock
+            {
+                normalColor = new Color(1f, 1f, 1f, .9f),
+                highlightedColor = Color.white,
+                pressedColor = Color.white,
+                selectedColor = Color.white,
+                disabledColor = new Color(1f, 1f, 1f, .4f),
+                colorMultiplier = 1,
+                fadeDuration = .1f,
+            };
+            scroll.horizontalScrollbar = scrollbar;
+            scroll.horizontalScrollbarVisibility = ScrollRect.ScrollbarVisibility.AutoHide;
             return content;
         }
 

@@ -10,18 +10,17 @@ namespace Gugarhythm
     {
         readonly List<JudgmentInputDiagnostic> inputDiagnosticsDecisions = new(32);
         RectTransform settingsDebugPanel;
-        RectTransform inputDiagnosticsHudPanel;
-        Text inputDiagnosticsHudLabel;
         Text inputDiagnosticsStatusLabel;
         Button settingsDebugNavigationButton;
         Button inputDiagnosticsStartButton;
         Toggle inputDiagnosticsProtectionToggle;
         bool inputDiagnosticsLoading;
-        float nextInputDiagnosticsHudRefresh;
 
         void BuildInputDiagnosticsSettingsSection(RectTransform navigation)
         {
-            settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, 45),
+            // Keep DEBUG below the player-facing account menu; the previous
+            // shared position constructed DEBUG last and made 帳號 impossible to see or press.
+            settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, -35),
                 ShowSettingsDebug, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsDebugPanel = Panel("Settings Debug Panel", settingsPanel,
                 new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
@@ -32,30 +31,36 @@ namespace Gugarhythm
             title.rectTransform.anchoredPosition = new Vector2(0, 315);
 
             var description = Label(
-                "實體裝置專用測試：追蹤 Touch callback → queue → lane/token → 判定 → hit feedback。\n" +
-                "譜面包含孤立 Tap、鄰近 Tap、停留按壓與同指滑動。結束或返回時自動匯出 JSONL。",
+                "追蹤 Touch callback → queue → lane/token → 判定 → hit feedback。\n" +
+                "開啟全譜面記錄後，所有譜面會在背景輸出 JSONL；報告仍在此頁複製。",
                 settingsDebugPanel, 20);
             description.alignment = TextAnchor.UpperLeft;
             description.color = new Color(.75f, .82f, .92f);
             description.rectTransform.sizeDelta = new Vector2(900, 100);
             description.rectTransform.anchoredPosition = new Vector2(0, 235);
 
+            var inputDiagnosticsRecordAllChartsToggle = MakeFigmaSlidingToggle("全譜面記錄",
+                settingsDebugPanel, new Vector2(0, 145), SettingsSliderWidth,
+                InputDiagnosticsSession.RecordAllChartsEnabled);
+            inputDiagnosticsRecordAllChartsToggle.onValueChanged.AddListener(
+                InputDiagnosticsSession.SetRecordAllChartsEnabled);
+
             inputDiagnosticsProtectionToggle = MakeFigmaSlidingToggle("Judgment Protection",
-                settingsDebugPanel, new Vector2(0, 115), SettingsSliderWidth,
-                PlayerPrefs.GetInt("gugarhythm-input-diagnostics-protection", 1) != 0);
+                settingsDebugPanel, new Vector2(0, 75), SettingsSliderWidth,
+                InputDiagnosticsSession.JudgmentProtectionEnabled);
             inputDiagnosticsProtectionToggle.onValueChanged.AddListener(enabled =>
             {
-                PlayerPrefs.SetInt("gugarhythm-input-diagnostics-protection", enabled ? 1 : 0);
-                PlayerPrefs.Save();
+                InputDiagnosticsSession.SetJudgmentProtectionEnabled(enabled);
+                ConfigureInputDiagnosticsJudgmentEngine();
             });
 
             inputDiagnosticsStartButton = MakeFlatButton("載入並開始測試譜面", settingsDebugPanel,
-                new Vector2(0, 25), () => StartCoroutine(StartInputDiagnosticsChart()),
+                new Vector2(0, -15), () => StartCoroutine(StartInputDiagnosticsChart()),
                 new Vector2(700, 68), new Color(.06f, .58f, .96f));
 
-            MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -75),
+            MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -115),
                 CopyLastInputDiagnosticsReport, new Vector2(320, 58));
-            MakeOutlinedButton("刪除上次報告", settingsDebugPanel, new Vector2(180, -75),
+            MakeOutlinedButton("刪除上次報告", settingsDebugPanel, new Vector2(180, -115),
                 ClearLastInputDiagnosticsReport, new Vector2(320, 58));
 
             inputDiagnosticsStatusLabel = Label("", settingsDebugPanel, 18);
@@ -64,42 +69,24 @@ namespace Gugarhythm
             inputDiagnosticsStatusLabel.horizontalOverflow = HorizontalWrapMode.Wrap;
             inputDiagnosticsStatusLabel.verticalOverflow = VerticalWrapMode.Overflow;
             inputDiagnosticsStatusLabel.rectTransform.sizeDelta = new Vector2(900, 150);
-            inputDiagnosticsStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -210);
+            inputDiagnosticsStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -245);
             RefreshInputDiagnosticsSettingsStatus();
             settingsDebugPanel.gameObject.SetActive(false);
-        }
-
-        void BuildInputDiagnosticsHud(RectTransform root)
-        {
-            inputDiagnosticsHudPanel = Panel("Input Diagnostics HUD", root,
-                new Color(.015f, .03f, .08f, .90f), new Vector2(690, 500), Vector2.zero);
-            PinToAnchor(inputDiagnosticsHudPanel, new Vector2(1, 1), new Vector2(1, 1),
-                new Vector2(-24, -112));
-            Outline(inputDiagnosticsHudPanel.gameObject, new Color(.95f, .55f, .18f, .9f), 2);
-            inputDiagnosticsHudPanel.GetComponent<Image>().raycastTarget = false;
-            inputDiagnosticsHudLabel = Label("INPUT DIAGNOSTICS\n等待測試工作階段…",
-                inputDiagnosticsHudPanel, 17);
-            inputDiagnosticsHudLabel.alignment = TextAnchor.UpperLeft;
-            inputDiagnosticsHudLabel.horizontalOverflow = HorizontalWrapMode.Wrap;
-            inputDiagnosticsHudLabel.verticalOverflow = VerticalWrapMode.Overflow;
-            inputDiagnosticsHudLabel.rectTransform.anchorMin = Vector2.zero;
-            inputDiagnosticsHudLabel.rectTransform.anchorMax = Vector2.one;
-            inputDiagnosticsHudLabel.rectTransform.offsetMin = new Vector2(14, 10);
-            inputDiagnosticsHudLabel.rectTransform.offsetMax = new Vector2(-12, -10);
-            inputDiagnosticsHudPanel.gameObject.SetActive(false);
         }
 
         void ShowSettingsDebug()
         {
             if (settingsAudioPanel == null || settingsGamePanel == null ||
-                settingsTagsPanel == null || settingsDebugPanel == null) return;
+                settingsTagsPanel == null || settingsAccountPanel == null || settingsDebugPanel == null) return;
             settingsAudioPanel.gameObject.SetActive(false);
             settingsGamePanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
+            settingsAccountPanel.gameObject.SetActive(false);
             settingsDebugPanel.gameObject.SetActive(true);
             SetSettingsNavigationColor(settingsAudioNavigationButton, false);
             SetSettingsNavigationColor(settingsGameNavigationButton, false);
             SetSettingsNavigationColor(settingsTagsNavigationButton, false);
+            SetSettingsNavigationColor(settingsAccountNavigationButton, false);
             SetSettingsNavigationColor(settingsDebugNavigationButton, true);
             RefreshInputDiagnosticsSettingsStatus();
         }
@@ -166,8 +153,7 @@ namespace Gugarhythm
                 NoteCount = import.Chart?.PlayableCount ?? 0,
                 ImportedAtUnixMilliseconds = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
             };
-            InputDiagnosticsSession.Arm(inputDiagnosticsProtectionToggle == null ||
-                inputDiagnosticsProtectionToggle.isOn, previousEntry, previousBytes);
+            InputDiagnosticsSession.Arm(previousEntry, previousBytes);
             if (!selection.SetSelection(debugEntry, bytes))
             {
                 InputDiagnosticsSession.RestorePreviousSelectionAndDisarm();
@@ -183,26 +169,15 @@ namespace Gugarhythm
 
         void BeginInputDiagnosticsRunIfNeeded()
         {
-            if (!InputDiagnosticsSession.IsDebugEntry(currentLibraryEntry) || !InputDiagnosticsSession.Armed) return;
-            InputDiagnosticsSession.BeginRun();
-            nextInputDiagnosticsHudRefresh = 0f;
-            if (inputDiagnosticsHudPanel != null) inputDiagnosticsHudPanel.gameObject.SetActive(true);
+            if (!InputDiagnosticsSession.ShouldCapture(currentLibraryEntry)) return;
+            InputDiagnosticsSession.BeginRun(currentLibraryEntry);
         }
 
         void ConfigureInputDiagnosticsJudgmentEngine()
         {
-            if (judgmentEngine != null && InputDiagnosticsSession.CaptureActive)
-                judgmentEngine.JudgmentProtectionEnabled = InputDiagnosticsSession.JudgmentProtectionEnabled;
-        }
-
-        void UpdateInputDiagnosticsHud()
-        {
-            var visible = gameplayStageVisible && InputDiagnosticsSession.CaptureActive;
-            if (inputDiagnosticsHudPanel != null && inputDiagnosticsHudPanel.gameObject.activeSelf != visible)
-                inputDiagnosticsHudPanel.gameObject.SetActive(visible);
-            if (!visible || inputDiagnosticsHudLabel == null || Time.unscaledTime < nextInputDiagnosticsHudRefresh) return;
-            nextInputDiagnosticsHudRefresh = Time.unscaledTime + .1f;
-            inputDiagnosticsHudLabel.text = InputDiagnosticsSession.BuildOverlayText();
+            if (judgmentEngine != null)
+                judgmentEngine.JudgmentProtectionEnabled =
+                    InputDiagnosticsSession.JudgmentProtectionEnabled;
         }
 
         void RecordInputDiagnosticsDecisions()
@@ -215,9 +190,9 @@ namespace Gugarhythm
         void EndInputDiagnosticsRun(string reason, bool restoreSelection)
         {
             if (!InputDiagnosticsSession.Armed && !InputDiagnosticsSession.CaptureActive) return;
-            if (restoreSelection) InputDiagnosticsSession.EndRunRestoreAndDisarm(reason);
+            if (restoreSelection && InputDiagnosticsSession.Armed)
+                InputDiagnosticsSession.EndRunRestoreAndDisarm(reason);
             else InputDiagnosticsSession.EndRun(reason);
-            if (inputDiagnosticsHudPanel != null) inputDiagnosticsHudPanel.gameObject.SetActive(false);
         }
 
         void CopyLastInputDiagnosticsReport()

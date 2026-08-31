@@ -44,6 +44,13 @@ namespace Gugarhythm
 
         public IEnumerator DownloadAndImport(RemoteChartSummary chart, Action<RemoteChartImportResult> complete)
         {
+            var operation = DownloadAndImport(chart, complete, string.Empty);
+            while (operation.MoveNext()) yield return operation.Current;
+        }
+
+        public IEnumerator DownloadAndImport(RemoteChartSummary chart, Action<RemoteChartImportResult> complete,
+            string sessionToken)
+        {
             var completion = new CompletionGate(complete);
             if (!TryValidateChart(chart, out var validationError))
             {
@@ -73,7 +80,7 @@ namespace Gugarhythm
             {
                 var response = default(ChartVaultDownloadResult);
                 var responseReceived = false;
-                if (!TryCreateDownload(chart, temporaryPath, result =>
+                if (!TryCreateDownload(chart, temporaryPath, sessionToken, result =>
                     {
                         if (responseReceived) return;
                         response = result;
@@ -212,14 +219,14 @@ namespace Gugarhythm
             }
         }
 
-        bool TryCreateDownload(RemoteChartSummary chart, string path,
+        bool TryCreateDownload(RemoteChartSummary chart, string path, string sessionToken,
             Action<ChartVaultDownloadResult> complete, out IEnumerator download, out bool adapterFailed)
         {
             download = null;
             adapterFailed = false;
             try
             {
-                download = client.DownloadGgr(chart, path, complete);
+                download = client.DownloadGgr(chart, path, complete, sessionToken);
                 return download != null;
             }
             catch (Exception)

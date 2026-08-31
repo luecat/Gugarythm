@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
 using System.Text;
+using System.Threading;
 using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.InputSystem;
@@ -13,12 +14,13 @@ namespace Gugarhythm
     public static class InputDiagnosticsSession
     {
         public const string DebugEntryId = "gugarhythm-input-diagnostics";
-        const int MaximumRecords = 4096;
-        const int RecentLineCount = 10;
         const string LastReportPathPreferenceKey = "gugarhythm-input-diagnostics-last-report";
+        const string RecordAllChartsPreferenceKey = "gugarhythm-input-diagnostics-record-all-charts";
+        const string JudgmentProtectionPreferenceKey = "gugarhythm-input-diagnostics-protection";
+        const int WriterFlushInterval = 256;
 
         [Serializable]
-        sealed class DiagnosticRecord
+        struct DiagnosticRecord
         {
             public string type;
             public double realtime;
@@ -26,20 +28,26 @@ namespace Gugarhythm
             public int fingerId;
             public string phase;
             public string inputKind;
+            public string inputSource;
             public float lane;
             public bool inInputBand;
             public double queueMilliseconds;
             public string disposition;
-            public int noteIndex = -1;
+            public int noteIndex;
             public string grade;
             public double deltaMilliseconds;
             public string detail;
         }
 
-        static readonly List<DiagnosticRecord> records = new(MaximumRecords);
-        static readonly Queue<string> recentLines = new(RecentLineCount);
+        static readonly Queue<DiagnosticRecord> pendingRecords = new();
+        static readonly object writerGate = new();
         static LocalChartEntry previousEntry;
         static byte[] previousBytes;
+        static StreamWriter reportWriter;
+        static Thread reportWriterThread;
+        static Exception reportWriterFailure;
+        static string activeReportPath = string.Empty;
+        static bool reportWriterStopping;
         static DateTime startedUtc;
         static double queueTotalMilliseconds;
         static double queueMaximumMilliseconds;
@@ -56,35 +64,64 @@ namespace Gugarhythm
 
         public static bool Armed { get; private set; }
         public static bool CaptureActive { get; private set; }
-        public static bool JudgmentProtectionEnabled { get; private set; } = true;
+        public static bool IsDebugRun { get; private set; }
+        public static bool JudgmentProtectionEnabled =>
+            PlayerPrefs.GetInt(JudgmentProtectionPreferenceKey, 1) != 0;
         public static string LastReportPath { get; private set; } = string.Empty;
+        public static bool RecordAllChartsEnabled =>
+            PlayerPrefs.GetInt(RecordAllChartsPreferenceKey, 0) != 0;
 
         public static bool IsDebugEntry(LocalChartEntry entry) => entry != null && IsDebugEntry(entry.Id);
         public static bool IsDebugEntry(string entryId) => string.Equals(entryId, DebugEntryId, StringComparison.Ordinal);
 
-        public static void Arm(bool judgmentProtectionEnabled, LocalChartEntry selectedEntry, byte[] selectedBytes)
+        public static void SetRecordAllChartsEnabled(bool enabled)
+        {
+            PlayerPrefs.SetInt(RecordAllChartsPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        public static void SetJudgmentProtectionEnabled(bool enabled)
+        {
+            PlayerPrefs.SetInt(JudgmentProtectionPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        public static bool ShouldCapture(LocalChartEntry entry) => entry != null &&
+            ((IsDebugEntry(entry) && Armed) || RecordAllChartsEnabled);
+
+        public static void Arm(LocalChartEntry selectedEntry, byte[] selectedBytes)
         {
             EndRun("rearmed");
             previousEntry = selectedEntry;
             previousBytes = CopyBytes(selectedBytes);
-            JudgmentProtectionEnabled = judgmentProtectionEnabled;
             Armed = true;
             CaptureActive = false;
+            IsDebugRun = false;
             ResetCounters();
         }
 
-        public static void BeginRun()
+        public static void BeginRun(LocalChartEntry entry)
         {
-            if (!Armed || CaptureActive) return;
+            if (CaptureActive || !ShouldCapture(entry)) return;
             ResetCounters();
             startedUtc = DateTime.UtcNow;
+            activeReportPath = StartReportStream();
+            if (string.IsNullOrEmpty(activeReportPath)) return;
             CaptureActive = true;
+            IsDebugRun = IsDebugEntry(entry) && Armed;
+            var mode = IsDebugRun ? "debug" : "background";
+            var protection = JudgmentProtectionEnabled ? "on" : "off";
+            var audioDelayMilliseconds = GameplayTimingPreferences.LoadDeviceOffset() * 1000d;
+            var inputDelayMilliseconds = GameplayTimingPreferences.LoadInputOffset() * 1000d;
             Add(new DiagnosticRecord
             {
                 type = "session_start",
                 realtime = Time.realtimeSinceStartupAsDouble,
-                detail = JudgmentProtectionEnabled ? "judgment_protection=on" : "judgment_protection=off",
-            }, JudgmentProtectionEnabled ? "SESSION  Protection ON" : "SESSION  Protection OFF");
+                noteIndex = -1,
+                detail = $"mode={mode};chart_id={entry.Id};chart_title={entry.Title};" +
+                    $"judgment_protection={protection};protection_mode=source_aware_shared_lane;" +
+                    $"audio_delay_ms={audioDelayMilliseconds:0.###};input_delay_ms={inputDelayMilliseconds:0.###}",
+            });
         }
 
         public static void RecordTouchQueued(int fingerId, double inputTime, Vector2 screenPosition,
@@ -97,10 +134,11 @@ namespace Gugarhythm
                 type = "touch_callback",
                 realtime = Time.realtimeSinceStartupAsDouble,
                 fingerId = fingerId,
+                noteIndex = -1,
                 phase = phase.ToString(),
                 queueMilliseconds = Math.Max(0d, (InputState.currentTime - inputTime) * 1000d),
                 detail = $"screen=({screenPosition.x:F1},{screenPosition.y:F1})",
-            }, $"TOUCH #{fingerId} {phase}");
+            });
         }
 
         public static void RecordTouchProcessed(int fingerId, double songTime, float lane, bool inInputBand,
@@ -117,11 +155,12 @@ namespace Gugarhythm
                 realtime = Time.realtimeSinceStartupAsDouble,
                 songTime = songTime,
                 fingerId = fingerId,
+                noteIndex = -1,
                 lane = lane,
                 inInputBand = inInputBand,
                 queueMilliseconds = queueMilliseconds,
                 detail = $"tokens={emittedTokenCount}",
-            }, $"MAP   #{fingerId} lane {lane:F2} {(inInputBand ? "IN" : "OUT")} +{emittedTokenCount}");
+            });
         }
 
         public static void RecordToken(InputToken input)
@@ -134,9 +173,11 @@ namespace Gugarhythm
                 realtime = Time.realtimeSinceStartupAsDouble,
                 songTime = input.Time,
                 fingerId = input.FingerId,
+                noteIndex = -1,
                 inputKind = input.Kind.ToString(),
+                inputSource = input.Source.ToString(),
                 lane = input.Lane,
-            }, $"TOKEN #{input.FingerId} {input.Kind} lane {input.Lane:F2}");
+            });
         }
 
         public static void RecordDecision(JudgmentInputDiagnostic diagnostic)
@@ -155,12 +196,16 @@ namespace Gugarhythm
                 songTime = diagnostic.EventTime,
                 fingerId = diagnostic.Input.FingerId,
                 inputKind = diagnostic.Input.Kind.ToString(),
+                inputSource = diagnostic.Input.Source.ToString(),
                 lane = diagnostic.Input.Lane,
                 disposition = diagnostic.Disposition.ToString(),
                 noteIndex = diagnostic.Note?.Index ?? -1,
                 grade = diagnostic.CandidateGrade.ToString(),
                 deltaMilliseconds = double.IsNaN(diagnostic.Delta) ? 0d : diagnostic.Delta * 1000d,
-            }, $"JUDGE {diagnostic.Disposition} note {diagnostic.Note?.Index ?? -1}");
+                detail = diagnostic.Disposition == JudgmentInputDisposition.ProtectionBlocked
+                    ? "source_aware_shared_lane"
+                    : null,
+            });
         }
 
         public static void RecordJudgment(JudgmentEvent judgment)
@@ -175,8 +220,9 @@ namespace Gugarhythm
                 songTime = judgment.Note?.Time ?? 0d,
                 noteIndex = judgment.Note?.Index ?? -1,
                 grade = judgment.Grade.ToString(),
+                lane = judgment.HitLane ?? 0f,
                 deltaMilliseconds = judgment.Delta * 1000d,
-            }, $"EVENT {judgment.Grade} note {judgment.Note?.Index ?? -1}");
+            });
         }
 
         public static void RecordHitFeedback(JudgmentEvent judgment, bool particleRequested)
@@ -189,8 +235,9 @@ namespace Gugarhythm
                 realtime = Time.realtimeSinceStartupAsDouble,
                 noteIndex = judgment.Note?.Index ?? -1,
                 grade = judgment.Grade.ToString(),
+                lane = judgment.HitLane ?? 0f,
                 detail = particleRequested ? "judgment_ui,sound,particle" : "judgment_ui,sound",
-            }, $"FX    {judgment.Grade} note {judgment.Note?.Index ?? -1}");
+            });
         }
 
         public static string EndRun(string reason)
@@ -200,10 +247,14 @@ namespace Gugarhythm
             {
                 type = "session_end",
                 realtime = Time.realtimeSinceStartupAsDouble,
+                noteIndex = -1,
                 detail = reason ?? string.Empty,
-            }, $"END   {reason}");
+            });
             CaptureActive = false;
-            LastReportPath = Export(reason);
+            IsDebugRun = false;
+            StopReportStream();
+            LastReportPath = activeReportPath;
+            activeReportPath = string.Empty;
             if (!string.IsNullOrEmpty(LastReportPath))
             {
                 PlayerPrefs.SetString(LastReportPathPreferenceKey, LastReportPath);
@@ -247,7 +298,6 @@ namespace Gugarhythm
                 .Append("  Miss ").Append(missCount)
                 .Append("\nQueue ms avg ").Append(average.ToString("F2", CultureInfo.InvariantCulture))
                 .Append("  max ").Append(queueMaximumMilliseconds.ToString("F2", CultureInfo.InvariantCulture));
-            foreach (var line in recentLines) builder.Append('\n').Append(line);
             return builder.ToString();
         }
 
@@ -290,37 +340,100 @@ namespace Gugarhythm
             }
         }
 
-        static string Export(string reason)
+        static string StartReportStream()
         {
             try
             {
                 var directory = Path.Combine(Application.persistentDataPath, "InputDiagnostics");
                 Directory.CreateDirectory(directory);
-                var fileName = $"input-{startedUtc:yyyyMMdd-HHmmss}-{Sanitize(reason)}.jsonl";
+                var fileName = $"input-{startedUtc:yyyyMMdd-HHmmss-fff}-{Guid.NewGuid():N}.jsonl";
                 var path = Path.Combine(directory, fileName);
-                using var writer = new StreamWriter(path, false, new UTF8Encoding(false));
-                for (var index = 0; index < records.Count; index++)
-                    writer.WriteLine(JsonConvert.SerializeObject(records[index], Formatting.None));
+                reportWriterFailure = null;
+                reportWriterStopping = false;
+                reportWriter = new StreamWriter(path, false, new UTF8Encoding(false));
+                reportWriterThread = new Thread(WritePendingRecords)
+                {
+                    IsBackground = true,
+                    Name = "Gugarhythm Input Diagnostics Writer",
+                };
+                reportWriterThread.Start();
                 return path;
             }
             catch (Exception exception)
             {
-                Debug.LogError("輸入診斷報告寫入失敗：" + exception.Message);
+                reportWriter?.Dispose();
+                reportWriter = null;
+                reportWriterThread = null;
+                Debug.LogError("無法開始輸入診斷報告：" + exception.Message);
                 return string.Empty;
             }
         }
 
-        static void Add(DiagnosticRecord record, string recent)
+        static void WritePendingRecords()
         {
-            if (records.Count < MaximumRecords) records.Add(record);
-            if (recentLines.Count >= RecentLineCount) recentLines.Dequeue();
-            recentLines.Enqueue(recent);
+            var recordsSinceFlush = 0;
+            var serializer = JsonSerializer.CreateDefault();
+            try
+            {
+                while (true)
+                {
+                    DiagnosticRecord record;
+                    lock (writerGate)
+                    {
+                        while (pendingRecords.Count == 0 && !reportWriterStopping)
+                            Monitor.Wait(writerGate);
+                        if (pendingRecords.Count == 0 && reportWriterStopping) break;
+                        record = pendingRecords.Dequeue();
+                    }
+
+                    serializer.Serialize(reportWriter, record);
+                    reportWriter.WriteLine();
+                    recordsSinceFlush++;
+                    if (recordsSinceFlush < WriterFlushInterval) continue;
+                    reportWriter.Flush();
+                    recordsSinceFlush = 0;
+                }
+                reportWriter.Flush();
+            }
+            catch (Exception exception)
+            {
+                reportWriterFailure = exception;
+            }
+            finally
+            {
+                reportWriter?.Dispose();
+            }
+        }
+
+        static void StopReportStream()
+        {
+            var thread = reportWriterThread;
+            if (thread == null) return;
+            lock (writerGate)
+            {
+                reportWriterStopping = true;
+                Monitor.PulseAll(writerGate);
+            }
+            thread.Join();
+            reportWriterThread = null;
+            reportWriter = null;
+            reportWriterStopping = false;
+            if (reportWriterFailure != null)
+                Debug.LogError("輸入診斷報告寫入失敗：" + reportWriterFailure.Message);
+        }
+
+        static void Add(DiagnosticRecord record)
+        {
+            lock (writerGate)
+            {
+                pendingRecords.Enqueue(record);
+                Monitor.Pulse(writerGate);
+            }
         }
 
         static void ResetCounters()
         {
-            records.Clear();
-            recentLines.Clear();
+            lock (writerGate) pendingRecords.Clear();
             queueTotalMilliseconds = 0d;
             queueMaximumMilliseconds = 0d;
             queueSampleCount = 0;
@@ -333,15 +446,6 @@ namespace Gugarhythm
             judgmentCount = 0;
             hitFeedbackCount = 0;
             missCount = 0;
-        }
-
-        static string Sanitize(string value)
-        {
-            if (string.IsNullOrWhiteSpace(value)) return "ended";
-            var builder = new StringBuilder(value.Length);
-            foreach (var character in value)
-                builder.Append(char.IsLetterOrDigit(character) ? char.ToLowerInvariant(character) : '-');
-            return builder.ToString().Trim('-');
         }
 
         static byte[] CopyBytes(byte[] source)

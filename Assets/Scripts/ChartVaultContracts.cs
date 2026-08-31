@@ -38,6 +38,12 @@ namespace Gugarhythm
         [JsonProperty("cachedAtUnixMilliseconds")] public long CachedAtUnixMilliseconds;
     }
 
+    public enum RemoteChartCatalogScope
+    {
+        Public,
+        Private,
+    }
+
     public readonly struct ChartVaultCatalogResult
     {
         public readonly RemoteChartCatalog Catalog;
@@ -66,6 +72,19 @@ namespace Gugarhythm
         }
     }
 
+    public readonly struct ChartVaultSessionResult
+    {
+        public readonly string SessionToken;
+        public readonly string Error;
+        public bool Success => !string.IsNullOrEmpty(SessionToken) && string.IsNullOrEmpty(Error);
+
+        public ChartVaultSessionResult(string sessionToken, string error)
+        {
+            SessionToken = sessionToken;
+            Error = error;
+        }
+    }
+
     public readonly struct RemoteChartImportResult
     {
         public readonly LocalChartEntry LocalEntry;
@@ -84,9 +103,18 @@ namespace Gugarhythm
     public interface IChartVaultClient
     {
         IEnumerator FetchPublicCatalog(Action<ChartVaultCatalogResult> complete);
+        IEnumerator FetchCatalog(RemoteChartCatalogScope scope,
+            Action<ChartVaultCatalogResult> complete, string sessionToken);
         IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
             Action<ChartVaultDownloadResult> complete);
+        IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
+            Action<ChartVaultDownloadResult> complete, string sessionToken);
         IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete);
+        IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete,
+            string sessionToken);
+        IEnumerator ExchangeAppLoginHandoff(string code, string codeVerifier,
+            Action<ChartVaultSessionResult> complete);
+        IEnumerator LogoutAppSession(string sessionToken, Action<bool> complete);
     }
 
     public interface IChartVaultFileStore
@@ -126,11 +154,22 @@ namespace Gugarhythm
     {
         public const string ApiOrigin = "https://gugarhythm.luecat.com";
         public const string PublicCatalogPath = "/api/v1/charts?scope=public&limit=30";
+        public const string PrivateCatalogPath = "/api/v1/charts?scope=mine&limit=30";
         public const long MaxGgrBytes = 48L * 1024L * 1024L;
 
         const string ApiPathPrefix = "/api/v1/";
         const int MaxApiPathLength = 4096;
         static readonly Uri ApiOriginUri = new(ApiOrigin, UriKind.Absolute);
+
+        public static string BuildCatalogPath(RemoteChartCatalogScope scope, int limit, string cursor)
+        {
+            if (limit < 1 || limit > 50) throw new ArgumentOutOfRangeException(nameof(limit));
+            var suffix = scope == RemoteChartCatalogScope.Private ? "mine" : "public";
+            var path = "/api/v1/charts?scope=" + suffix + "&limit=" + limit;
+            if (!string.IsNullOrWhiteSpace(cursor))
+                path += "&cursor=" + Uri.EscapeDataString(cursor);
+            return path;
+        }
 
         public static bool TryResolveApiPath(string path, out Uri uri)
         {

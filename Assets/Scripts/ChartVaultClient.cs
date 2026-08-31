@@ -2,6 +2,7 @@ using System;
 using System.Collections;
 using System.Globalization;
 using System.Runtime.CompilerServices;
+using Newtonsoft.Json;
 using UnityEngine;
 using UnityEngine.Networking;
 
@@ -11,6 +12,7 @@ namespace Gugarhythm
 {
     public sealed class ChartVaultClient : IChartVaultClient
     {
+        const string SessionCookieName = "__Host-ggr_session";
         const ulong MaxCatalogResponseBytes = 1024UL * 1024UL;
         const int MaxChartIdLength = 128;
         const string CatalogDownloadError = "無法取得遠端譜面清單，請稍後再試。";
@@ -21,6 +23,7 @@ namespace Gugarhythm
         const string SizeLimitError = "遠端譜面檔案大小超過 48 MiB 上限。";
         const string GgrDownloadError = "遠端譜面下載失敗，請稍後再試。";
         const string CoverDownloadError = "遠端譜面封面下載失敗，請稍後再試。";
+        const string AppLoginExchangeError = "登入交接失敗，請回到遊戲後重新登入。";
 
         readonly int timeoutSeconds;
 
@@ -32,14 +35,22 @@ namespace Gugarhythm
 
         public IEnumerator FetchPublicCatalog(Action<ChartVaultCatalogResult> complete)
         {
+            var operation = FetchCatalog(RemoteChartCatalogScope.Public, complete, string.Empty);
+            while (operation.MoveNext()) yield return operation.Current;
+        }
+
+        public IEnumerator FetchCatalog(RemoteChartCatalogScope scope,
+            Action<ChartVaultCatalogResult> complete, string sessionToken)
+        {
             var completion = new CompletionGate<ChartVaultCatalogResult>(complete);
             UnityWebRequest request = null;
             UnityWebRequestAsyncOperation operation;
             try
             {
-                var uri = new Uri(ChartVaultApiSettings.ApiOrigin + ChartVaultApiSettings.PublicCatalogPath,
-                    UriKind.Absolute);
+                var uri = new Uri(ChartVaultApiSettings.ApiOrigin +
+                                  ChartVaultApiSettings.BuildCatalogPath(scope, 30, null), UriKind.Absolute);
                 request = UnityWebRequest.Get(uri);
+                ApplySessionCookie(request, sessionToken);
                 request.timeout = timeoutSeconds;
                 request.disposeDownloadHandlerOnDispose = true;
                 operation = request.SendWebRequest();
@@ -66,6 +77,13 @@ namespace Gugarhythm
         public IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
             Action<ChartVaultDownloadResult> complete)
         {
+            var operation = DownloadGgr(chart, destinationPath, complete, string.Empty);
+            while (operation.MoveNext()) yield return operation.Current;
+        }
+
+        public IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
+            Action<ChartVaultDownloadResult> complete, string sessionToken)
+        {
             var completion = new CompletionGate<ChartVaultDownloadResult>(complete);
             if (!TryPrepareDownload(chart, destinationPath, out var uri, out var error))
             {
@@ -85,6 +103,7 @@ namespace Gugarhythm
                     disposeDownloadHandlerOnDispose = true,
                 };
                 handler = null;
+                ApplySessionCookie(request, sessionToken);
                 operation = request.SendWebRequest();
             }
             catch (Exception)
@@ -109,6 +128,13 @@ namespace Gugarhythm
 
         public IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete)
         {
+            var operation = DownloadCover(chart, complete, string.Empty);
+            while (operation.MoveNext()) yield return operation.Current;
+        }
+
+        public IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete,
+            string sessionToken)
+        {
             var completion = new CompletionGate<CoverResult>(result =>
                 complete?.Invoke(result.Texture, result.Error));
             if (chart != null && chart.CoverUrl == null)
@@ -129,6 +155,7 @@ namespace Gugarhythm
                 request = UnityWebRequestTexture.GetTexture(uri, true);
                 request.timeout = timeoutSeconds;
                 request.disposeDownloadHandlerOnDispose = true;
+                ApplySessionCookie(request, sessionToken);
                 operation = request.SendWebRequest();
             }
             catch (Exception)
@@ -149,6 +176,83 @@ namespace Gugarhythm
                 if (!completion.Invoked)
                     completion.Invoke(new CoverResult(null, CoverDownloadError));
             }
+        }
+
+        public IEnumerator ExchangeAppLoginHandoff(string code, string codeVerifier,
+            Action<ChartVaultSessionResult> complete)
+        {
+            var completion = new CompletionGate<ChartVaultSessionResult>(complete);
+            if (!IsSessionToken(code) || !IsSessionToken(codeVerifier) ||
+                !ChartVaultApiSettings.TryResolveApiPath("/api/v1/app-auth/handoffs/exchange", out var uri))
+            {
+                completion.Invoke(new ChartVaultSessionResult(null, AppLoginExchangeError));
+                yield break;
+            }
+
+            UnityWebRequest request = null;
+            UnityWebRequestAsyncOperation operation;
+            try
+            {
+                var body = JsonConvert.SerializeObject(new { code, codeVerifier });
+                request = new UnityWebRequest(uri, UnityWebRequest.kHttpVerbPOST)
+                {
+                    uploadHandler = new UploadHandlerRaw(System.Text.Encoding.UTF8.GetBytes(body)),
+                    downloadHandler = new DownloadHandlerBuffer(),
+                    timeout = timeoutSeconds,
+                    disposeUploadHandlerOnDispose = true,
+                    disposeDownloadHandlerOnDispose = true,
+                };
+                request.SetRequestHeader("Content-Type", "application/json");
+                operation = request.SendWebRequest();
+            }
+            catch (Exception)
+            {
+                SafeDispose(request);
+                completion.Invoke(new ChartVaultSessionResult(null, AppLoginExchangeError));
+                yield break;
+            }
+
+            yield return operation;
+            try
+            {
+                if (!RequestSucceeded(request) || request.downloadHandler == null)
+                    completion.Invoke(new ChartVaultSessionResult(null, AppLoginExchangeError));
+                else
+                {
+                    var payload = JsonConvert.DeserializeObject<AppLoginExchangeResponse>(request.downloadHandler.text);
+                    completion.Invoke(payload != null && IsSessionToken(payload.SessionToken)
+                        ? new ChartVaultSessionResult(payload.SessionToken, string.Empty)
+                        : new ChartVaultSessionResult(null, AppLoginExchangeError));
+                }
+            }
+            catch (Exception)
+            {
+                completion.Invoke(new ChartVaultSessionResult(null, AppLoginExchangeError));
+            }
+            finally
+            {
+                SafeDispose(request);
+                if (!completion.Invoked) completion.Invoke(new ChartVaultSessionResult(null, AppLoginExchangeError));
+            }
+        }
+
+        public IEnumerator LogoutAppSession(string sessionToken, Action<bool> complete)
+        {
+            if (!IsSessionToken(sessionToken) ||
+                !ChartVaultApiSettings.TryResolveApiPath("/api/v1/app-auth/sessions/logout", out var uri))
+            {
+                complete?.Invoke(false);
+                yield break;
+            }
+            using var request = new UnityWebRequest(uri, UnityWebRequest.kHttpVerbPOST)
+            {
+                downloadHandler = new DownloadHandlerBuffer(),
+                timeout = timeoutSeconds,
+                disposeDownloadHandlerOnDispose = true,
+            };
+            request.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+            yield return request.SendWebRequest();
+            complete?.Invoke(request.result == UnityWebRequest.Result.Success);
         }
 
         internal static bool TryPrepareDownload(RemoteChartSummary chart, string destinationPath,
@@ -290,6 +394,12 @@ namespace Gugarhythm
         static bool RequestSucceeded(UnityWebRequest request) =>
             request != null && request.result == UnityWebRequest.Result.Success;
 
+        static void ApplySessionCookie(UnityWebRequest request, string sessionToken)
+        {
+            if (request == null || !IsSessionToken(sessionToken)) return;
+            request.SetRequestHeader("Cookie", SessionCookieName + "=" + sessionToken);
+        }
+
         static bool IsValidChartId(string value)
         {
             if (string.IsNullOrEmpty(value) || value.Length <= "chart_".Length ||
@@ -316,6 +426,18 @@ namespace Gugarhythm
             return true;
         }
 
+        static bool IsSessionToken(string value)
+        {
+            if (string.IsNullOrEmpty(value) || value.Length != 43) return false;
+            foreach (var character in value)
+                if (!(character >= 'a' && character <= 'z') &&
+                    !(character >= 'A' && character <= 'Z') &&
+                    !(character >= '0' && character <= '9') &&
+                    character != '-' && character != '_')
+                    return false;
+            return true;
+        }
+
         static ChartVaultCatalogResult CatalogFailure(string error) =>
             new(null, string.IsNullOrWhiteSpace(error) ? CatalogDownloadError : error);
 
@@ -338,6 +460,12 @@ namespace Gugarhythm
                 Texture = texture;
                 Error = error;
             }
+        }
+
+        [Serializable]
+        sealed class AppLoginExchangeResponse
+        {
+            [JsonProperty("sessionToken")] public string SessionToken;
         }
 
         sealed class CompletionGate<T>

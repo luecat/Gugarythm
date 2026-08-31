@@ -35,7 +35,7 @@ namespace Gugarhythm
         {
             var state = new ContactState(lane, time, gridCoordinate);
             contacts[fingerId] = state;
-            EmitCell(fingerId, CellAt(lane), time, state, output);
+            EmitCell(fingerId, CellAt(lane), time, state, output, InputTokenSource.DirectPress, lane);
         }
 
         public void Move(int fingerId, double time, float lane, ICollection<InputToken> output) =>
@@ -68,7 +68,8 @@ namespace Gugarhythm
             }
 
             if (ShouldEmitGridRowTap(state, gridCoordinate) && !emittedTap && output != null)
-                output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, lane));
+                output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, lane,
+                    source: InputTokenSource.GridRowCrossing));
             EmitFlicks(fingerId, lane, gridCoordinate, time, state, output);
 
             state.Lane = lane;
@@ -107,7 +108,9 @@ namespace Gugarhythm
                 for (var cell = first; cell <= last; cell++)
                 {
                     var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
-                    EmitCell(fingerId, cell, crossingTime, state, output);
+                    var contactLane = MinimumLane + cell * CellWidth;
+                    EmitCell(fingerId, cell, crossingTime, state, output,
+                        InputTokenSource.CellCrossing, contactLane);
                     emitted = true;
                 }
             }
@@ -118,7 +121,9 @@ namespace Gugarhythm
                 for (var cell = first; cell >= last; cell--)
                 {
                     var crossingTime = CrossingTime(previousLane, previousTime, lane, time, cell, direction);
-                    EmitCell(fingerId, cell, crossingTime, state, output);
+                    var contactLane = MinimumLane + (cell + 1) * CellWidth;
+                    EmitCell(fingerId, cell, crossingTime, state, output,
+                        InputTokenSource.CellCrossing, contactLane);
                     emitted = true;
                 }
             }
@@ -156,10 +161,12 @@ namespace Gugarhythm
             return previousTime + (time - previousTime) * progress;
         }
 
-        static void EmitCell(int fingerId, int cell, double time, ContactState state, ICollection<InputToken> output)
+        static void EmitCell(int fingerId, int cell, double time, ContactState state,
+            ICollection<InputToken> output, InputTokenSource source, float contactLane)
         {
             if (output == null) return;
-            output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, CellCenter(cell)));
+            output.Add(new InputToken(fingerId, RuntimeNoteKind.Tap, time, CellCenter(cell),
+                source: source, contactLane: contactLane));
         }
 
         static void EmitFlicks(int fingerId, float lane, float gridCoordinate, double time,
@@ -192,7 +199,7 @@ namespace Gugarhythm
                     : time;
 
                 output.Add(new InputToken(fingerId, RuntimeNoteKind.Flick, thresholdTime, thresholdLane,
-                    state.FlickAnchorLane, state.FlickAnchorTime));
+                    state.FlickAnchorLane, state.FlickAnchorTime, InputTokenSource.FlickPath));
                 state.FlickAnchorLane = thresholdLane;
                 state.FlickAnchorGridCoordinate = thresholdGridCoordinate;
                 state.FlickAnchorTime = thresholdTime;

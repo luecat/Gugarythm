@@ -1,10 +1,12 @@
 #import <UIKit/UIKit.h>
+#import <Security/Security.h>
 #import "Unity/UnityInterface.h"
 
 #include <stdlib.h>
 #include <string.h>
 
 static NSString *GugaPendingResult = nil;
+static NSString * const GugaSecureService = @"com.luecat.gugarhythm.chart-vault";
 static BOOL GugaPickerPresented = NO;
 
 static void GugaSetPendingResult(NSString *result)
@@ -145,5 +147,49 @@ extern "C"
     void GugaFreeString(const char *value)
     {
         free((void *)value);
+    }
+
+    void GugaSecureStore(const char *key, const char *value)
+    {
+        if (key == NULL || value == NULL) return;
+        NSString *account = [NSString stringWithUTF8String:key];
+        NSString *secret = [NSString stringWithUTF8String:value];
+        if (account.length == 0 || secret.length == 0) return;
+        NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                                (__bridge id)kSecAttrService: GugaSecureService,
+                                (__bridge id)kSecAttrAccount: account};
+        SecItemDelete((__bridge CFDictionaryRef)query);
+        NSMutableDictionary *item = [query mutableCopy];
+        item[(__bridge id)kSecValueData] = [secret dataUsingEncoding:NSUTF8StringEncoding];
+        item[(__bridge id)kSecAttrAccessible] = (__bridge id)kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly;
+        SecItemAdd((__bridge CFDictionaryRef)item, NULL);
+    }
+
+    const char *GugaSecureRead(const char *key)
+    {
+        if (key == NULL) return NULL;
+        NSString *account = [NSString stringWithUTF8String:key];
+        if (account.length == 0) return NULL;
+        NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                                (__bridge id)kSecAttrService: GugaSecureService,
+                                (__bridge id)kSecAttrAccount: account,
+                                (__bridge id)kSecReturnData: @YES,
+                                (__bridge id)kSecMatchLimit: (__bridge id)kSecMatchLimitOne};
+        CFTypeRef result = NULL;
+        if (SecItemCopyMatching((__bridge CFDictionaryRef)query, &result) != errSecSuccess || result == NULL) return NULL;
+        NSData *data = (__bridge_transfer NSData *)result;
+        NSString *value = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
+        return value.length > 0 ? strdup(value.UTF8String) : NULL;
+    }
+
+    void GugaSecureDelete(const char *key)
+    {
+        if (key == NULL) return;
+        NSString *account = [NSString stringWithUTF8String:key];
+        if (account.length == 0) return;
+        NSDictionary *query = @{(__bridge id)kSecClass: (__bridge id)kSecClassGenericPassword,
+                                (__bridge id)kSecAttrService: GugaSecureService,
+                                (__bridge id)kSecAttrAccount: account};
+        SecItemDelete((__bridge CFDictionaryRef)query);
     }
 }

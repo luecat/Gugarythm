@@ -62,6 +62,14 @@ public static class RuntimeValidation
         Debug.Log("GUGARHYTHM_DELAY_SETTINGS_VALIDATION_OK");
     }
 
+    [MenuItem("Gugarhythm/Validate Hit Feedback Positioning")]
+    public static void ValidateHitFeedbackPositioning()
+    {
+        ValidateHitEffectColorRouting();
+        ValidateVirtualSlider();
+        Debug.Log("GUGARHYTHM_HIT_FEEDBACK_POSITION_VALIDATION_OK");
+    }
+
     [MenuItem("Gugarhythm/Validate Bundled Charts")]
     public static void ValidateBundledChartsOnly()
     {
@@ -2204,6 +2212,13 @@ public static class RuntimeValidation
             yield break;
         }
 
+        public IEnumerator FetchCatalog(RemoteChartCatalogScope scope,
+            Action<ChartVaultCatalogResult> complete, string sessionToken)
+        {
+            complete?.Invoke(new ChartVaultCatalogResult(null, "unused"));
+            yield break;
+        }
+
         public IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
             Action<ChartVaultDownloadResult> complete)
         {
@@ -2213,11 +2228,39 @@ public static class RuntimeValidation
             complete?.Invoke(response);
         }
 
+        public IEnumerator DownloadGgr(RemoteChartSummary chart, string destinationPath,
+            Action<ChartVaultDownloadResult> complete, string sessionToken)
+        {
+            var operation = DownloadGgr(chart, destinationPath, complete);
+            while (operation.MoveNext()) yield return operation.Current;
+        }
+
         public IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete)
         {
             complete?.Invoke(null, "unused");
             yield break;
         }
+
+        public IEnumerator DownloadCover(RemoteChartSummary chart, Action<Texture2D, string> complete,
+            string sessionToken)
+        {
+            var operation = DownloadCover(chart, complete);
+            while (operation.MoveNext()) yield return operation.Current;
+        }
+
+        public IEnumerator ExchangeAppLoginHandoff(string code, string codeVerifier,
+            Action<ChartVaultSessionResult> complete)
+        {
+            complete?.Invoke(new ChartVaultSessionResult(null, "unused"));
+            yield break;
+        }
+
+        public IEnumerator LogoutAppSession(string sessionToken, Action<bool> complete)
+        {
+            complete?.Invoke(true);
+            yield break;
+        }
+
     }
 
     sealed class RemoteDownloadValidationFileStore : IChartVaultFileStore
@@ -2477,13 +2520,6 @@ public static class RuntimeValidation
             "Upper hidden bar must cover the requested fraction of the track depth");
         Require(Math.Abs((float)progressMethod.Invoke(null, new object[] { 125f }) - 1f) < .0001f,
             "Upper hidden bar depth must use the clamped percentage");
-        var insetMethod = typeof(SonolusLandscapePrototype).GetMethod(
-            "UpperHiddenBarEdgeInset", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
-        Require(insetMethod != null, "Upper hidden bar settings must expose its blue-boundary inset rule");
-        Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 80f }) - 20f) < .0001f,
-            "Upper hidden bar blue boundary must inset a normal-width track edge");
-        Require(Math.Abs((float)insetMethod.Invoke(null, new object[] { 20f }) - 10f) < .0001f,
-            "Upper hidden bar blue boundary must never invert on a narrow track");
         var refreshMethod = typeof(SonolusLandscapePrototype).GetMethod(
             "ShouldRefreshUpperHiddenBarLayout", System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.Static);
@@ -2520,7 +2556,12 @@ public static class RuntimeValidation
             "Upper hidden bar graphic must expose its uGUI mesh population path");
         var maskObject = new GameObject("Upper hidden bar opacity validation", typeof(RectTransform),
             typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
-        var boundaryObject = new GameObject("Upper hidden bar boundary validation", typeof(RectTransform));
+        var connectorClipObject = new GameObject("Upper hidden bar connector clip validation", typeof(RectTransform),
+            typeof(RectMask2D));
+        var persistentClipObject = new GameObject("Upper hidden bar persistent hold clip validation", typeof(RectTransform),
+            typeof(RectMask2D));
+        var noteClipObject = new GameObject("Upper hidden bar note clip validation", typeof(RectTransform),
+            typeof(RectMask2D));
         var prototypeObject = new GameObject("Upper hidden bar coverage validation");
         prototypeObject.SetActive(false);
         var prototype = prototypeObject.AddComponent<SonolusLandscapePrototype>();
@@ -2532,18 +2573,37 @@ public static class RuntimeValidation
             var maskField = typeof(SonolusLandscapePrototype).GetField(
                 "upperHiddenMask", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
-            var boundaryField = typeof(SonolusLandscapePrototype).GetField(
-                "upperHiddenBoundary", System.Reflection.BindingFlags.NonPublic |
-                System.Reflection.BindingFlags.Instance);
             var percentField = typeof(SonolusLandscapePrototype).GetField(
                 "upperHiddenBarPercent", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
-            Require(maskField != null && boundaryField != null && percentField != null,
+            var connectorClipField = typeof(SonolusLandscapePrototype).GetField(
+                "connectorUpperHiddenClip", System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+            var persistentClipField = typeof(SonolusLandscapePrototype).GetField(
+                "persistentHoldHeadUpperHiddenClip", System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+            var noteClipField = typeof(SonolusLandscapePrototype).GetField(
+                "noteUpperHiddenClip", System.Reflection.BindingFlags.NonPublic |
+                System.Reflection.BindingFlags.Instance);
+            Require(maskField != null && percentField != null &&
+                    connectorClipField != null && persistentClipField != null && noteClipField != null,
                 "Upper hidden bar coverage validation must reach the runtime geometry state");
             maskField.SetValue(prototype, mask);
-            boundaryField.SetValue(prototype, boundaryObject.GetComponent<RectTransform>());
+            var clips = new[]
+            {
+                connectorClipObject.GetComponent<RectMask2D>(),
+                persistentClipObject.GetComponent<RectMask2D>(),
+                noteClipObject.GetComponent<RectMask2D>(),
+            };
+            connectorClipField.SetValue(prototype, clips[0]);
+            persistentClipField.SetValue(prototype, clips[1]);
+            noteClipField.SetValue(prototype, clips[2]);
             percentField.SetValue(prototype, 50f);
             refreshGeometryMethod.Invoke(prototype, null);
+            Require(clips.All(clip =>
+                    Math.Abs(clip.padding.x) < .0001f && Math.Abs(clip.padding.y) < .0001f &&
+                    Math.Abs(clip.padding.z) < .0001f && clip.padding.w > 0f),
+                "Upper hidden bar must clip every gameplay layer above its moving boundary without widening the black fill");
             using var helper = new VertexHelper();
             populateMesh.Invoke(mask, new object[] { helper });
             helper.FillMesh(mesh);
@@ -2559,51 +2619,24 @@ public static class RuntimeValidation
             var topRight = vertices.Where(value => Math.Abs(value.y - topY) < .01f).Max(value => value.x);
             var bottomLeft = vertices.Where(value => Math.Abs(value.y - bottomY) < .01f).Min(value => value.x);
             var bottomRight = vertices.Where(value => Math.Abs(value.y - bottomY) < .01f).Max(value => value.x);
-
-            bool IsCoveredByMask(Vector2 point)
-            {
-                var progress = Mathf.InverseLerp(topY, bottomY, point.y);
-                var left = Mathf.Lerp(topLeft, bottomLeft, progress);
-                var right = Mathf.Lerp(topRight, bottomRight, progress);
-                return point.x >= left - .01f && point.x <= right + .01f;
-            }
-
-            SonolusLandscapePrototype.NoteSurfaceQuad RenderedOuterNote(float lane)
-            {
-                const float screenProgress = .25f;
-                var note = new RuntimeNote
-                {
-                    Index = lane < 0 ? 1 : 2,
-                    Lane = lane,
-                    Size = 1f,
-                    Kind = RuntimeNoteKind.Tap,
-                };
-                var height = SonolusLandscapePrototype.NoteSurfaceHeight(screenProgress);
-                var body = SonolusLandscapePrototype.BuildNoteSurfaceQuad(
-                    note.Lane, note.Size, screenProgress, height);
-                var bodyWidth = ((body.UpperRight.x - body.UpperLeft.x) +
-                                 (body.LowerRight.x - body.LowerLeft.x)) * .5f;
-                var renderWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(bodyWidth, height, note);
-                var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
-                return SonolusLandscapePrototype.BuildNoteSurfaceQuad(
-                    note.Lane, renderSize, screenProgress, height);
-            }
-
-            var leftNote = RenderedOuterNote(-5f);
-            var rightNote = RenderedOuterNote(5f);
-            var outerNoteCorners = new[]
-            {
-                leftNote.UpperLeft, leftNote.UpperRight, leftNote.LowerRight, leftNote.LowerLeft,
-                rightNote.UpperLeft, rightNote.UpperRight, rightNote.LowerRight, rightNote.LowerLeft,
-            };
-            Require(outerNoteCorners.All(IsCoveredByMask),
-                "Upper hidden bar black fill must cover complete outer-lane key quads above its boundary");
+            var xMethod = typeof(SonolusLandscapePrototype).GetMethod(
+                "X", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
+            Require(xMethod != null, "Upper hidden bar validation must reach the track projection");
+            float ProjectX(float lane, float progress) =>
+                (float)xMethod.Invoke(null, new object[] { lane, progress });
+            Require(Math.Abs(topLeft - ProjectX(-6f, 0f)) < .01f &&
+                    Math.Abs(topRight - ProjectX(6f, 0f)) < .01f &&
+                    Math.Abs(bottomLeft - ProjectX(-6f, .5f)) < .01f &&
+                    Math.Abs(bottomRight - ProjectX(6f, .5f)) < .01f,
+                "Upper hidden bar black fill must be exactly the authored -6 through +6 track surface");
         }
         finally
         {
             UnityEngine.Object.DestroyImmediate(mesh);
             UnityEngine.Object.DestroyImmediate(prototypeObject);
-            UnityEngine.Object.DestroyImmediate(boundaryObject);
+            UnityEngine.Object.DestroyImmediate(noteClipObject);
+            UnityEngine.Object.DestroyImmediate(persistentClipObject);
+            UnityEngine.Object.DestroyImmediate(connectorClipObject);
             UnityEngine.Object.DestroyImmediate(maskObject);
         }
         Debug.Log("GUGARHYTHM_UPPER_HIDDEN_BAR_VALIDATION_OK");
@@ -3791,6 +3824,14 @@ public static class RuntimeValidation
         Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick, Critical = true }),
                 new Color(1f, .82f, .12f, .9f)),
             "Critical hit effect must use the yellow button color regardless of note kind");
+
+        var positionedNote = new RuntimeNote { Lane = -2f, Kind = RuntimeNoteKind.Tap };
+        Require(Math.Abs(SonolusLandscapePrototype.ResolveHitEffectLane(
+                    new JudgmentEvent(positionedNote, JudgmentGrade.Perfect, 0, -1.35f)) + 1.35f) < .0001f,
+            "A physical-input judgment must place its hit effect at the matched contact lane");
+        Require(Math.Abs(SonolusLandscapePrototype.ResolveHitEffectLane(
+                    new JudgmentEvent(positionedNote, JudgmentGrade.Perfect, 0)) + 2f) < .0001f,
+            "An automatic or contact judgment without an input lane must keep the hit effect at the note center");
     }
 
     static void ValidateJudgmentSpritePaths()
@@ -5521,8 +5562,16 @@ public static class RuntimeValidation
                 Math.Abs(VirtualSliderInput.CellCenter(1) + 5.25f) < .0001,
             "The 12-lane slider must split each lane into two 0.5-lane cells including both outer edges");
         slider.Begin(1, 1, -5.5f, inputs);
-        Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.25f) < .0001,
-            "Initial slider contact must emit one Tap activation");
+        Require(inputs.Count == 1 && Math.Abs(inputs[0].Lane + 5.25f) < .0001 &&
+                Math.Abs(inputs[0].ContactLane + 5.5f) < .0001,
+            "Initial slider contact must emit one Tap activation while retaining the physical touch lane");
+
+        var positionedNote = Note(99, 1, -5.25f);
+        var positionedEngine = new JudgmentEngine(new[] { positionedNote }, new ScoreState());
+        var positionedEvents = positionedEngine.Process(1, inputs, Array.Empty<ActiveContact>());
+        Require(positionedEvents.Count == 1 && positionedEvents[0].HitLane.HasValue &&
+                Math.Abs(positionedEvents[0].HitLane.Value + 5.5f) < .0001f,
+            "A matched Tap must carry its physical touch lane into the judgment event");
 
         slider.Move(1, 1.005, -5.4f, inputs);
         Require(inputs.Count == 1, "Motion inside one slider cell must not retrigger Tap");
