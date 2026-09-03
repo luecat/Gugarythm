@@ -26,7 +26,7 @@ namespace Gugarhythm
     }
 
     // CPU parity oracle for the GPU shader.  These constants are measured from
-    // the same 1280x732 lane artwork used by SonolusLandscapePrototype.
+    // the same 1280x732 lane artwork used by GugarhythmLandscapePrototype.
     public static class GpuRibbonProjection
     {
         public const float ReferenceWidth = 1920f;

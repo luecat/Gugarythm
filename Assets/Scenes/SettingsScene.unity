@@ -147,7 +147,7 @@ MonoBehaviour:
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 4bcf7165f84ff49b389af9e7df2adee4, type: 3}
   m_Name:
-  m_EditorClassIdentifier: Assembly-CSharp::Gugarhythm.SonolusLandscapePrototype
+  m_EditorClassIdentifier: Assembly-CSharp::Gugarhythm.GugarhythmLandscapePrototype
 --- !u!4 &1571033942
 Transform:
   m_ObjectHideFlags: 0

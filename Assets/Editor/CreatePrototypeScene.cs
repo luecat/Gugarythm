@@ -71,7 +71,7 @@ public static class CreatePrototypeScene
     {
         var scene = EditorSceneManager.NewScene(NewSceneSetup.EmptyScene, NewSceneMode.Single);
         var root = new GameObject(rootName);
-        root.AddComponent<SonolusLandscapePrototype>();
+        root.AddComponent<GugarhythmLandscapePrototype>();
         EditorSceneManager.SaveScene(scene, path);
     }
 

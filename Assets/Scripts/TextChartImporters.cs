@@ -29,7 +29,7 @@ namespace Gugarhythm
                 }
                 else json = new UTF8Encoding(false, true).GetString(data);
                 var levelData = JObject.Parse(json);
-                if (levelData["entities"] is not JArray) return ImportResult.Fail("JSON 不是 Sonolus LevelData。");
+                if (levelData["entities"] is not JArray) return ImportResult.Fail("JSON 不是 Gugarhythm LevelData。");
                 var chart = ScpChartImporter.BuildRuntimeChart(levelData, null, "LevelData");
                 chart.Title = Path.GetFileNameWithoutExtension(fileName);
                 chart.BgmOffset = (double?)levelData["bgmOffset"] ?? 0;

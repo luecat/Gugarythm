@@ -99,9 +99,9 @@ public static class InputDiagnosticsChartValidation
         ValidateSwipePair(bytes, 31d, 31.24d);
         ValidateDiagnosticDispositions(bytes);
         ValidateStreamingAssetUrls();
-        Require(typeof(SonolusLandscapePrototype).GetMethod("StartInputDiagnosticsChart",
+        Require(typeof(GugarhythmLandscapePrototype).GetMethod("StartInputDiagnosticsChart",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic) != null &&
-                typeof(SonolusLandscapePrototype).GetMethod("BuildInputDiagnosticsSettingsSection",
+                typeof(GugarhythmLandscapePrototype).GetMethod("BuildInputDiagnosticsSettingsSection",
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic) != null,
             "Runtime prototype must expose the DEBUG tab and chart launch workflow");
         Debug.Log("GUGARHYTHM_INPUT_DIAGNOSTICS_CHART_VALIDATION_OK notes=19 targetDeltaMs=120");

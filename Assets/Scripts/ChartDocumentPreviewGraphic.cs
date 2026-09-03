@@ -253,7 +253,7 @@ namespace Gugarhythm
             var batch = go.GetComponent<HoldBatchGraphic>();
             batch.raycastTarget = false;
             batch.color = new Color(1f, 1f, 1f, .62f);
-            batch.sourceUvInset = SonolusLandscapePrototype.HoldConnectorSourceUvInset;
+            batch.sourceUvInset = GugarhythmLandscapePrototype.HoldConnectorSourceUvInset;
             return batch;
         }
 
@@ -395,7 +395,7 @@ namespace Gugarhythm
             var center = ColumnPoint(left, bottom, top, columnIndex, note.Beat, note.Lane);
             var height = note.Kind == RuntimeNoteKind.Flick ? PreviewFlickHeight : PreviewTapHeight;
             var bodyWidth = ColumnLaneSpan(note.Size);
-            var renderWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(bodyWidth, height, note);
+            var renderWidth = GugarhythmLandscapePrototype.NoteRenderQuadWidth(bodyWidth, height, note);
             var body = visual.Body;
             body.rectTransform.anchoredPosition = center;
             body.rectTransform.sizeDelta = new Vector2(renderWidth, height);
@@ -581,7 +581,7 @@ namespace Gugarhythm
                 active = AcquirePreviewRibbon(critical, columnIndex);
             var left = ColumnTrackLeft(rect, columnIndex);
             var center = ColumnPoint(left, bottom, top, columnIndex, beat, lane);
-            var width = SonolusLandscapePrototype.HoldConnectorRenderWidth(ColumnLaneSpan(size));
+            var width = GugarhythmLandscapePrototype.HoldConnectorRenderWidth(ColumnLaneSpan(size));
             active.AddPoint(center, width);
         }
 

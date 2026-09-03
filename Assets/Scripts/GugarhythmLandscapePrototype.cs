@@ -104,7 +104,7 @@ namespace Gugarhythm
         {
             GugarhythmPreferenceMigration.Migrate();
             var storedLegacyOffset = PlayerPrefs.GetFloat(LegacyDeviceOffsetKey, 0f);
-            var legacyOffset = SonolusLandscapePrototype.SanitizeAudioOffset(storedLegacyOffset);
+            var legacyOffset = GugarhythmLandscapePrototype.SanitizeAudioOffset(storedLegacyOffset);
             var settingsOffset = SettingsDelayAdjustment.Clamp(PlayerPrefs.GetFloat(
                 SettingsDeviceOffsetKey, (float)legacyOffset));
             var resolvedOffset = GameplayTiming.ReplaceDeviceOffset(settingsOffset);
@@ -185,7 +185,7 @@ namespace Gugarhythm
         }
     }
 
-    public sealed partial class SonolusLandscapePrototype : MonoBehaviour
+    public sealed partial class GugarhythmLandscapePrototype : MonoBehaviour
     {
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         static readonly ProfilerMarker GameplayFrameProfiler = new("Gugarhythm.GameplayFrame");

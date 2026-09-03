@@ -40,7 +40,7 @@ public sealed class DesktopSpeedControl : EditorWindow
     static float CurrentSpeed()
     {
         GugarhythmPreferenceMigration.Migrate();
-        var controller = Object.FindFirstObjectByType<SonolusLandscapePrototype>();
+        var controller = Object.FindFirstObjectByType<GugarhythmLandscapePrototype>();
         return controller != null ? controller.ScrollSpeed : PlayerPrefs.GetFloat(PreferenceKey, 8f);
     }
 
@@ -48,7 +48,7 @@ public sealed class DesktopSpeedControl : EditorWindow
     {
         value = Mathf.Clamp(value, 1f, 20f);
         PlayerPrefs.SetFloat(PreferenceKey, value);
-        var controller = Object.FindFirstObjectByType<SonolusLandscapePrototype>();
+        var controller = Object.FindFirstObjectByType<GugarhythmLandscapePrototype>();
         if (controller != null) controller.SetDesktopScrollSpeed(value);
     }
 }

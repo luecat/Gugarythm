@@ -6,7 +6,7 @@ using UnityEngine.UI;
 
 namespace Gugarhythm
 {
-    public sealed partial class SonolusLandscapePrototype
+    public sealed partial class GugarhythmLandscapePrototype
     {
         readonly List<JudgmentInputDiagnostic> inputDiagnosticsDecisions = new(32);
         RectTransform settingsDebugPanel;

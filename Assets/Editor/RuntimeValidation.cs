@@ -115,7 +115,7 @@ public static class RuntimeValidation
     [MenuItem("Gugarhythm/Start Loaded Chart _F8")]
     public static void StartLoadedChart()
     {
-        var controller = UnityEngine.Object.FindFirstObjectByType<SonolusLandscapePrototype>();
+        var controller = UnityEngine.Object.FindFirstObjectByType<GugarhythmLandscapePrototype>();
         if (controller == null) throw new InvalidOperationException("Runtime controller is not active.");
         controller.StartLoadedChartForEditor();
     }
@@ -310,7 +310,7 @@ public static class RuntimeValidation
 
     static void ValidatePerformanceDiagnosticsToggleVisibility()
     {
-        Require(!SonolusLandscapePrototype.ShouldShowPerformanceDiagnosticsToggle(),
+        Require(!GugarhythmLandscapePrototype.ShouldShowPerformanceDiagnosticsToggle(),
             "The player-facing performance diagnostics toggle must remain hidden");
     }
 
@@ -561,7 +561,7 @@ public static class RuntimeValidation
         nullChart.Connectors.Add(nullConnector);
         var nullResult = HoldPathBuilder.Build(nullChart);
         Require(nullResult.FallbackConnectors.Count == 1 && nullResult.Warnings.Count > 0 &&
-                !SonolusLandscapePrototype.CanRenderLegacyConnector(nullConnector),
+                !GugarhythmLandscapePrototype.CanRenderLegacyConnector(nullConnector),
             "A null-endpoint connector must warn but never enter the dereferencing legacy renderer");
 
         var cycleChart = new RuntimeChart();
@@ -1189,8 +1189,8 @@ public static class RuntimeValidation
             A = NoteAt(7, .25, "main"),
             B = NoteAt(8, 2, "fast"),
         };
-        var simLineAhead = SonolusLandscapePrototype.SimLineIndexAhead(
-            SonolusLandscapePrototype.NoteApproachDurationSeconds, 732f);
+        var simLineAhead = GugarhythmLandscapePrototype.SimLineIndexAhead(
+            GugarhythmLandscapePrototype.NoteApproachDurationSeconds, 732f);
         var farPlaneSimLine = new RuntimeSimLine
         {
             A = NoteAt(9, simLineAhead - .001, "main"),
@@ -1231,7 +1231,7 @@ public static class RuntimeValidation
         Require(!simLines.Contains(indexedSimLine) && simLines.Contains(crossGroupSimLine),
             "ChartRenderIndex must cull same-group SimLines outside the visual window without dropping cross-group lines");
         index.QuerySimLines(0, 0, simLineAhead, simLines);
-        Require(simLines.Contains(farPlaneSimLine) && simLineAhead > SonolusLandscapePrototype.NoteApproachDurationSeconds,
+        Require(simLines.Contains(farPlaneSimLine) && simLineAhead > GugarhythmLandscapePrototype.NoteApproachDurationSeconds,
             "SimLine indexed visibility must preserve the original 8-pixel far-plane allowance");
 
         RuntimeGuidePoint ReversePoint(double time, float lane) => new()
@@ -1374,9 +1374,9 @@ public static class RuntimeValidation
     {
         const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Static;
-        var insetField = typeof(SonolusLandscapePrototype).GetField("LibraryDividerHorizontalInset", flags);
-        var widthField = typeof(SonolusLandscapePrototype).GetField("LibrarySelectionFrameWidth", flags);
-        var frameGraphicType = typeof(SonolusLandscapePrototype).GetNestedType("SelectionFrameGraphic", flags);
+        var insetField = typeof(GugarhythmLandscapePrototype).GetField("LibraryDividerHorizontalInset", flags);
+        var widthField = typeof(GugarhythmLandscapePrototype).GetField("LibrarySelectionFrameWidth", flags);
+        var frameGraphicType = typeof(GugarhythmLandscapePrototype).GetNestedType("SelectionFrameGraphic", flags);
         Require(insetField != null && Math.Abs((float)insetField.GetRawConstantValue() - 16f) < .0001f,
             "Selected library rows and persistent dividers must keep their sixteen-unit horizontal inset");
         Require(widthField == null && frameGraphicType == null,
@@ -1385,7 +1385,7 @@ public static class RuntimeValidation
 
     static void ValidateStartupSplashConfiguration()
     {
-        var startupType = typeof(SonolusLandscapePrototype).Assembly.GetType("Gugarhythm.GugarhythmStartupSplash");
+        var startupType = typeof(GugarhythmLandscapePrototype).Assembly.GetType("Gugarhythm.GugarhythmStartupSplash");
         Require(startupType != null, "The startup splash controller must exist");
         var durationField = startupType.GetField("DefaultDisplaySeconds",
             System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
@@ -1407,7 +1407,7 @@ public static class RuntimeValidation
         Require(hash == "35e78408e8ea3396e0c26ce17147f8d6b3235edca7c50459d1bd6a0958493c00",
             "The startup splash must use the correctly spelled GUGARHYTHM artwork");
 
-        var assembly = typeof(SonolusLandscapePrototype).Assembly;
+        var assembly = typeof(GugarhythmLandscapePrototype).Assembly;
         var landscapeType = assembly.GetType("Gugarhythm.LandscapeOrientation");
         var lockMethod = landscapeType?.GetMethod("Lock", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(lockMethod != null, "Runtime must expose the landscape-only orientation lock");
@@ -1561,12 +1561,12 @@ public static class RuntimeValidation
 
     static void ValidateLatencyCalibrationMath()
     {
-        Require(SonolusLandscapePrototype.DelayAdjustmentTimingHint(-.001d) == "LATE",
+        Require(GugarhythmLandscapePrototype.DelayAdjustmentTimingHint(-.001d) == "LATE",
             "Negative delay adjustment must identify late input");
-        Require(SonolusLandscapePrototype.DelayAdjustmentTimingHint(.001d) == "FAST",
+        Require(GugarhythmLandscapePrototype.DelayAdjustmentTimingHint(.001d) == "FAST",
             "Positive delay adjustment must identify fast input");
-        Require(SonolusLandscapePrototype.DelayAdjustmentGuidance(-.001d) == "LATE 較多：往 − 調" &&
-                SonolusLandscapePrototype.DelayAdjustmentGuidance(.001d) == "FAST 較多：往 ＋ 調",
+        Require(GugarhythmLandscapePrototype.DelayAdjustmentGuidance(-.001d) == "LATE 較多：往 − 調" &&
+                GugarhythmLandscapePrototype.DelayAdjustmentGuidance(.001d) == "FAST 較多：往 ＋ 調",
             "Delay adjustment controls must state which direction corrects predominantly LATE or FAST judgments");
         var samples = new[] { .010d, .020d, .030d, .040d };
         Require(LatencyCalibrationMath.TryGetCalibrationAverage(samples, out var average) && Math.Abs(average - .025d) < .000001d,
@@ -1704,7 +1704,7 @@ public static class RuntimeValidation
     {
         const System.Reflection.BindingFlags flags = System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Instance;
-        var controller = typeof(SonolusLandscapePrototype);
+        var controller = typeof(GugarhythmLandscapePrototype);
         Require(controller.GetMethod("SelectLibrarySource", flags, null,
                     new[] { typeof(ChartLibrarySource) }, null)?.ReturnType == typeof(void),
             "Online library integration must expose the exact source-selection entry point");
@@ -1721,21 +1721,21 @@ public static class RuntimeValidation
                     Type.EmptyTypes, null)?.ReturnType == typeof(IEnumerator),
             "Online library integration must expose the exact remote-download coroutine");
 
-        Require(!SonolusLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
+        Require(!GugarhythmLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
                 ChartLibrarySource.Local, false),
             "Selecting Local must never fetch the public catalog");
-        Require(SonolusLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
+        Require(GugarhythmLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
                 ChartLibrarySource.Online, false),
             "The first Online selection must fetch the public catalog");
-        Require(!SonolusLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
+        Require(!GugarhythmLandscapePrototype.ShouldFetchRemoteCatalogOnSourceChange(
                 ChartLibrarySource.Online, true),
             "Returning to Online after its first request must reuse memory or cache");
-        Require(SonolusLandscapePrototype.ShouldEnableLibraryStartButton(
+        Require(GugarhythmLandscapePrototype.ShouldEnableLibraryStartButton(
                 ChartLibrarySource.Local, true) &&
-                !SonolusLandscapePrototype.ShouldEnableLibraryStartButton(
+                !GugarhythmLandscapePrototype.ShouldEnableLibraryStartButton(
                     ChartLibrarySource.Local, false),
             "Local start availability must continue to follow local selection");
-        Require(!SonolusLandscapePrototype.ShouldEnableLibraryStartButton(
+        Require(!GugarhythmLandscapePrototype.ShouldEnableLibraryStartButton(
                 ChartLibrarySource.Online, true),
             "Online selection must never enable the local Start button");
         Debug.Log("GUGARHYTHM_ONLINE_LIBRARY_CONTRACTS_VALIDATION_OK");
@@ -2431,7 +2431,7 @@ public static class RuntimeValidation
             "A valid GGR JPEG cover must decode into a display texture");
         UnityEngine.Object.DestroyImmediate(decoded);
 
-        var aspectMethod = typeof(SonolusLandscapePrototype).GetMethod("CoverPresentationAspectMode",
+        var aspectMethod = typeof(GugarhythmLandscapePrototype).GetMethod("CoverPresentationAspectMode",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         Require(aspectMethod != null && string.Equals(aspectMethod.Invoke(null, null)?.ToString(), "EnvelopeParent", StringComparison.Ordinal),
             "Cover artwork must crop into a unified square presentation");
@@ -2458,7 +2458,7 @@ public static class RuntimeValidation
 
     public static void ValidateInitialWaterfallTiming()
     {
-        var initialWaterfallTimeMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var initialWaterfallTimeMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "InitialWaterfallSongTime", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(initialWaterfallTimeMethod != null,
             "Gameplay must expose the initial waterfall song-time calculation");
@@ -2471,40 +2471,40 @@ public static class RuntimeValidation
         var scaledChart = new RuntimeChart { DefaultTimeScaleGroup = "scaled" };
         scaledChart.TimeScaleGroups["scaled"] = new RuntimeTimeScaleGroup("scaled", new[] { (time: 0d, scale: .5d) });
         scaledChart.Notes.Add(new RuntimeNote { Time = 4d, TimeScaleGroup = "scaled", Visible = true });
-        var firstVisualTimeMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var firstVisualTimeMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "FirstWaterfallVisualTime", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         Require(firstVisualTimeMethod != null, "Gameplay must expose its first visual-time calculation");
         var scaledFirstVisualTime = (double)firstVisualTimeMethod.Invoke(null, new object[] { scaledChart });
         Require(Math.Abs(scaledFirstVisualTime - 2d) < .0001,
             "The first waterfall time must use the note's time-scale visual position");
-        var firstSongTimeMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var firstSongTimeMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "FirstWaterfallSongTime", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
         Require(firstSongTimeMethod != null, "Gameplay must expose its first waterfall song-time calculation");
         var scaledFirstSongTime = (double)firstSongTimeMethod.Invoke(null, new object[] { scaledChart });
         Require(Math.Abs(scaledFirstSongTime + .5d) < .0001,
             "The first waterfall song time must invert the time-scale visual position");
 
-        Require(Math.Abs(SonolusLandscapePrototype.DifficultyButtonWidthForText("未標示難度") - 170f) < .0001,
+        Require(Math.Abs(GugarhythmLandscapePrototype.DifficultyButtonWidthForText("未標示難度") - 170f) < .0001,
             "The unmarked difficulty button must reserve enough width for mobile text");
         Debug.Log("GUGARHYTHM_WATERFALL_VALIDATION_OK");
     }
 
     static void ValidateScrollSpeedMath()
     {
-        Require(Math.Abs(SonolusLandscapePrototype.DefaultScrollSpeed - 4f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.DefaultScrollSpeed - 4f) < .0001f,
             "The default scroll speed must be 4");
-        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(4f) - 2f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.NoteApproachDurationForScrollSpeed(4f) - 2f) < .0001f,
             "Scroll speed 4 must preserve the current two-second approach duration");
-        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(8f) - 1f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.NoteApproachDurationForScrollSpeed(8f) - 1f) < .0001f,
             "Doubling scroll speed must halve the approach duration");
-        Require(Math.Abs(SonolusLandscapePrototype.NoteApproachDurationForScrollSpeed(2f) - 4f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.NoteApproachDurationForScrollSpeed(2f) - 4f) < .0001f,
             "Halving scroll speed must double the approach duration");
         Debug.Log("GUGARHYTHM_SCROLL_SPEED_VALIDATION_OK");
     }
 
     static void ValidateUpperHiddenBarSettings()
     {
-        var method = typeof(SonolusLandscapePrototype).GetMethod(
+        var method = typeof(GugarhythmLandscapePrototype).GetMethod(
             "ClampUpperHiddenBarPercent", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(method != null, "Upper hidden bar settings must expose a clamped percentage rule");
         Require(Math.Abs((float)method.Invoke(null, new object[] { -25f })) < .0001f,
@@ -2513,14 +2513,14 @@ public static class RuntimeValidation
             "Upper hidden bar percentage must preserve an in-range value");
         Require(Math.Abs((float)method.Invoke(null, new object[] { 125f }) - 100f) < .0001f,
             "Upper hidden bar percentage must clamp above one hundred");
-        var progressMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var progressMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "UpperHiddenBarScreenProgress", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(progressMethod != null, "Upper hidden bar settings must expose a track-relative depth rule");
         Require(Math.Abs((float)progressMethod.Invoke(null, new object[] { 50f }) - .5f) < .0001f,
             "Upper hidden bar must cover the requested fraction of the track depth");
         Require(Math.Abs((float)progressMethod.Invoke(null, new object[] { 125f }) - 1f) < .0001f,
             "Upper hidden bar depth must use the clamped percentage");
-        var refreshMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var refreshMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "ShouldRefreshUpperHiddenBarLayout", System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.Static);
         Require(refreshMethod != null,
@@ -2531,7 +2531,7 @@ public static class RuntimeValidation
             "Upper hidden bar must not rebuild for an unchanged canvas height");
         Require((bool)refreshMethod.Invoke(null, new object[] { 1080f, 1440f }),
             "Upper hidden bar must rebuild when an iPad aspect ratio changes the canvas height");
-        var colorProperty = typeof(SonolusLandscapePrototype).GetProperty(
+        var colorProperty = typeof(GugarhythmLandscapePrototype).GetProperty(
             "UpperHiddenBarMaskColor", System.Reflection.BindingFlags.Public |
             System.Reflection.BindingFlags.Static);
         Require(colorProperty != null,
@@ -2539,12 +2539,12 @@ public static class RuntimeValidation
         var maskColor = (Color)colorProperty.GetValue(null);
         Require(Math.Abs(maskColor.a - 1f) < .0001f,
             "Upper hidden bar black fill must be fully opaque");
-        var configureMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var configureMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "ConfigureUpperHiddenBarMask", System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Static);
         Require(configureMethod != null,
             "Upper hidden bar must configure its runtime graphic through one validated path");
-        var refreshGeometryMethod = typeof(SonolusLandscapePrototype).GetMethod(
+        var refreshGeometryMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
             "RefreshUpperHiddenBarGeometry", System.Reflection.BindingFlags.NonPublic |
             System.Reflection.BindingFlags.Instance);
         Require(refreshGeometryMethod != null,
@@ -2564,25 +2564,25 @@ public static class RuntimeValidation
             typeof(RectMask2D));
         var prototypeObject = new GameObject("Upper hidden bar coverage validation");
         prototypeObject.SetActive(false);
-        var prototype = prototypeObject.AddComponent<SonolusLandscapePrototype>();
+        var prototype = prototypeObject.AddComponent<GugarhythmLandscapePrototype>();
         var mesh = new Mesh { name = "Upper hidden bar opacity validation mesh" };
         try
         {
             var mask = maskObject.GetComponent<TaperedConnectorGraphic>();
             configureMethod.Invoke(null, new object[] { mask });
-            var maskField = typeof(SonolusLandscapePrototype).GetField(
+            var maskField = typeof(GugarhythmLandscapePrototype).GetField(
                 "upperHiddenMask", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
-            var percentField = typeof(SonolusLandscapePrototype).GetField(
+            var percentField = typeof(GugarhythmLandscapePrototype).GetField(
                 "upperHiddenBarPercent", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
-            var connectorClipField = typeof(SonolusLandscapePrototype).GetField(
+            var connectorClipField = typeof(GugarhythmLandscapePrototype).GetField(
                 "connectorUpperHiddenClip", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
-            var persistentClipField = typeof(SonolusLandscapePrototype).GetField(
+            var persistentClipField = typeof(GugarhythmLandscapePrototype).GetField(
                 "persistentHoldHeadUpperHiddenClip", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
-            var noteClipField = typeof(SonolusLandscapePrototype).GetField(
+            var noteClipField = typeof(GugarhythmLandscapePrototype).GetField(
                 "noteUpperHiddenClip", System.Reflection.BindingFlags.NonPublic |
                 System.Reflection.BindingFlags.Instance);
             Require(maskField != null && percentField != null &&
@@ -2619,7 +2619,7 @@ public static class RuntimeValidation
             var topRight = vertices.Where(value => Math.Abs(value.y - topY) < .01f).Max(value => value.x);
             var bottomLeft = vertices.Where(value => Math.Abs(value.y - bottomY) < .01f).Min(value => value.x);
             var bottomRight = vertices.Where(value => Math.Abs(value.y - bottomY) < .01f).Max(value => value.x);
-            var xMethod = typeof(SonolusLandscapePrototype).GetMethod(
+            var xMethod = typeof(GugarhythmLandscapePrototype).GetMethod(
                 "X", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             Require(xMethod != null, "Upper hidden bar validation must reach the track projection");
             float ProjectX(float lane, float progress) =>
@@ -2644,7 +2644,7 @@ public static class RuntimeValidation
 
     static void ValidateLibrarySelectionRestore()
     {
-        var method = typeof(SonolusLandscapePrototype).GetMethod("ShouldEnableLibraryStartButton",
+        var method = typeof(GugarhythmLandscapePrototype).GetMethod("ShouldEnableLibraryStartButton",
             System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static, null,
             new[] { typeof(ChartLibrarySource), typeof(bool) }, null);
         Require(method != null, "Library selection restore must expose its start-button state rule");
@@ -2743,51 +2743,51 @@ public static class RuntimeValidation
     {
         var normalTap = new RuntimeNote { Kind = RuntimeNoteKind.Tap };
         var criticalTap = new RuntimeNote { Kind = RuntimeNoteKind.Tap, Critical = true };
-        var tapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, normalTap);
-        var criticalTapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, criticalTap);
-        Require(Math.Abs(SonolusLandscapePrototype.NoteBodyWidth(tapQuadWidth, 104.7f, normalTap) - 147.5f) < .0001f,
+        var tapQuadWidth = GugarhythmLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, normalTap);
+        var criticalTapQuadWidth = GugarhythmLandscapePrototype.NoteRenderQuadWidth(147.5f, 104.7f, criticalTap);
+        Require(Math.Abs(GugarhythmLandscapePrototype.NoteBodyWidth(tapQuadWidth, 104.7f, normalTap) - 147.5f) < .0001f,
             "A normal Tap's visible body must span exactly one authored note track");
-        var holdHeadHeight = SonolusLandscapePrototype.HoldHeadRenderHeight(104.7f);
-        var holdHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, holdHeadHeight, false);
-        var criticalHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, holdHeadHeight, true);
+        var holdHeadHeight = GugarhythmLandscapePrototype.HoldHeadRenderHeight(104.7f);
+        var holdHeadQuadWidth = GugarhythmLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, holdHeadHeight, false);
+        var criticalHoldHeadQuadWidth = GugarhythmLandscapePrototype.HoldHeadRenderQuadWidth(147.5f, holdHeadHeight, true);
         Require(Math.Abs(holdHeadHeight - 104.7f) < .0001f,
             "A Hold head must use the same projected height as a Tap");
         Require(Math.Abs(holdHeadQuadWidth - tapQuadWidth) < .0001f &&
                 Math.Abs(criticalHoldHeadQuadWidth - criticalTapQuadWidth) < .0001f,
             "Normal and Critical Hold heads must use the same width calculation as equivalent Taps");
-        var wideTapQuadWidth = SonolusLandscapePrototype.NoteRenderQuadWidth(295f, 104.7f, normalTap);
-        var wideHoldHeadQuadWidth = SonolusLandscapePrototype.HoldHeadRenderQuadWidth(295f, holdHeadHeight, false);
+        var wideTapQuadWidth = GugarhythmLandscapePrototype.NoteRenderQuadWidth(295f, 104.7f, normalTap);
+        var wideHoldHeadQuadWidth = GugarhythmLandscapePrototype.HoldHeadRenderQuadWidth(295f, holdHeadHeight, false);
         Require(Math.Abs(wideHoldHeadQuadWidth - wideTapQuadWidth) < .0001f,
             "Hold and Tap width calculations must remain identical for wider authored note sizes");
         var descendingHoldHead = new RuntimeNote { Index = 7, HoldRootIndex = 7, Kind = RuntimeNoteKind.Sustain };
-        Require(Math.Abs(SonolusLandscapePrototype.NoteRenderQuadWidth(147.5f, holdHeadHeight, descendingHoldHead) - holdHeadQuadWidth) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.NoteRenderQuadWidth(147.5f, holdHeadHeight, descendingHoldHead) - holdHeadQuadWidth) < .0001f,
             "A descending Hold head must use the same quad width as its persistent judgment-line head");
-        var connectorVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(
-            SonolusLandscapePrototype.HoldConnectorRenderWidth(147.5f));
+        var connectorVisibleWidth = GugarhythmLandscapePrototype.HoldConnectorVisibleBodyWidth(
+            GugarhythmLandscapePrototype.HoldConnectorRenderWidth(147.5f));
         Require(Math.Abs(connectorVisibleWidth - 147.5f) < .0001f,
             "A Hold ribbon's visible fill must align with its USC-authored head width");
-        var projectedConnectorVisibleWidth = SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(
-            SonolusLandscapePrototype.HoldConnectorRenderWidth(147.5f, 0f, 1f, 1f));
+        var projectedConnectorVisibleWidth = GugarhythmLandscapePrototype.HoldConnectorVisibleBodyWidth(
+            GugarhythmLandscapePrototype.HoldConnectorRenderWidth(147.5f, 0f, 1f, 1f));
         Require(Math.Abs(projectedConnectorVisibleWidth - 147.5f) < .0001f,
             "Changing Hold-head atlas padding must not shrink an unclipped Hold ribbon");
-        Require(Math.Abs(SonolusLandscapePrototype.HoldConnectorLaneWidth(147.5f) - 147.5f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.HoldConnectorLaneWidth(147.5f) - 147.5f) < .0001f,
             "A rendered Hold ribbon must stay within its authored lane span instead of expanding into a neighboring lane");
-        Require(Math.Abs((1 - SonolusLandscapePrototype.HoldConnectorSourceUvInset * 2) * 306 - 240) < .0001f,
+        Require(Math.Abs((1 - GugarhythmLandscapePrototype.HoldConnectorSourceUvInset * 2) * 306 - 240) < .0001f,
             "A lane-confined Hold ribbon must map only the texture's visible core across its authored lane span");
 
-        var outOfBoundsConnectorWidth = SonolusLandscapePrototype.HoldConnectorRenderWidth(1000f, 7f, 1f, 1f);
-        Require(Math.Abs(SonolusLandscapePrototype.HoldConnectorVisibleBodyWidth(outOfBoundsConnectorWidth) - 1000f) < .0001f,
+        var outOfBoundsConnectorWidth = GugarhythmLandscapePrototype.HoldConnectorRenderWidth(1000f, 7f, 1f, 1f);
+        Require(Math.Abs(GugarhythmLandscapePrototype.HoldConnectorVisibleBodyWidth(outOfBoundsConnectorWidth) - 1000f) < .0001f,
             "An out-of-track Hold connector must retain its authored visible width instead of being clamped to the track");
 
-        var buildHoldHead = typeof(SonolusLandscapePrototype).GetMethod(
+        var buildHoldHead = typeof(GugarhythmLandscapePrototype).GetMethod(
             "BuildHoldHeadSurface", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(buildHoldHead != null,
             "Hold-head rendering must expose the same full surface projection for in-track and out-of-track heads");
         var edgeRenderSize = holdHeadQuadWidth / 147.5f;
-        var trackSurface = SonolusLandscapePrototype.BuildNoteSurfaceQuad(0f, 6f, 1f, holdHeadHeight);
-        var leftOutside = (SonolusLandscapePrototype.NoteSurfaceQuad)buildHoldHead.Invoke(
+        var trackSurface = GugarhythmLandscapePrototype.BuildNoteSurfaceQuad(0f, 6f, 1f, holdHeadHeight);
+        var leftOutside = (GugarhythmLandscapePrototype.NoteSurfaceQuad)buildHoldHead.Invoke(
             null, new object[] { -7f, edgeRenderSize, 1f, holdHeadHeight });
-        var rightOutside = (SonolusLandscapePrototype.NoteSurfaceQuad)buildHoldHead.Invoke(
+        var rightOutside = (GugarhythmLandscapePrototype.NoteSurfaceQuad)buildHoldHead.Invoke(
             null, new object[] { 7f, edgeRenderSize, 1f, holdHeadHeight });
         Require(leftOutside.UpperLeft.x < trackSurface.UpperLeft.x &&
                 leftOutside.LowerLeft.x < trackSurface.LowerLeft.x &&
@@ -2795,8 +2795,8 @@ public static class RuntimeValidation
                 rightOutside.LowerRight.x > trackSurface.LowerRight.x,
             "Out-of-track Hold heads must keep their outer vertices beyond the visible track instead of clipping at its edges");
 
-        var expectedLeft = SonolusLandscapePrototype.BuildNoteSurfaceQuad(-7f, edgeRenderSize, 1f, holdHeadHeight);
-        var expectedRight = SonolusLandscapePrototype.BuildNoteSurfaceQuad(7f, edgeRenderSize, 1f, holdHeadHeight);
+        var expectedLeft = GugarhythmLandscapePrototype.BuildNoteSurfaceQuad(-7f, edgeRenderSize, 1f, holdHeadHeight);
+        var expectedRight = GugarhythmLandscapePrototype.BuildNoteSurfaceQuad(7f, edgeRenderSize, 1f, holdHeadHeight);
         Require((leftOutside.UpperLeft - expectedLeft.UpperLeft).sqrMagnitude < .0001f &&
                 (leftOutside.LowerRight - expectedLeft.LowerRight).sqrMagnitude < .0001f &&
                 (rightOutside.UpperLeft - expectedRight.UpperLeft).sqrMagnitude < .0001f &&
@@ -2806,7 +2806,7 @@ public static class RuntimeValidation
 
     static void ValidateNoteRenderVisibilityWindow()
     {
-        var method = typeof(SonolusLandscapePrototype).GetMethod(
+        var method = typeof(GugarhythmLandscapePrototype).GetMethod(
             "IsInNoteRenderWindow", System.Reflection.BindingFlags.Public | System.Reflection.BindingFlags.Static);
         Require(method != null, "Gameplay must expose its note render-window rule");
 
@@ -3319,7 +3319,7 @@ public static class RuntimeValidation
         var canvasHeight = 1920f * Screen.height / Math.Max(1, Screen.width);
         foreach (var lane in new[] { -8f, -6f, -1f, 0f, 1f, 6f, 8f })
             Require(Math.Abs(GpuRibbonProjection.LaneX(lane, 1, canvasHeight) -
-                             SonolusLandscapePrototype.JudgmentLaneCanvasX(lane)) <= 1e-4f,
+                             GugarhythmLandscapePrototype.JudgmentLaneCanvasX(lane)) <= 1e-4f,
                 $"GPU ribbon lane projection drifted from the CPU reference at lane {lane}");
         foreach (var approach in new[] { -.25f, 0f, .25f, .5f, .75f, 1f, 1.1f })
             Require(float.IsFinite(GpuRibbonProjection.Perspective(approach)),
@@ -3441,7 +3441,7 @@ public static class RuntimeValidation
         // A projected note stays a fixed-height sticker on the lane surface:
         // its top and bottom edges sample the lane separately, instead of
         // scaling an axis-aligned UI rectangle by depth.
-        var quad = SonolusLandscapePrototype.BuildNoteSurfaceQuad(3f, 1f, .5f, 48f);
+        var quad = GugarhythmLandscapePrototype.BuildNoteSurfaceQuad(3f, 1f, .5f, 48f);
         Require(Math.Abs(quad.UpperLeft.y - quad.LowerLeft.y - 48f) < .0001f &&
                 Math.Abs(quad.UpperRight.y - quad.LowerRight.y - 48f) < .0001f,
             "A surface-projected note must retain its authored screen-space height");
@@ -3451,9 +3451,9 @@ public static class RuntimeValidation
         Require(quad.UpperRight.x > quad.UpperLeft.x && quad.LowerRight.x > quad.LowerLeft.x,
             "A surface-projected note must keep its left-to-right lane ordering at both edges");
 
-        var judgmentHeight = SonolusLandscapePrototype.NoteSurfaceHeight(1f);
-        var midHeight = SonolusLandscapePrototype.NoteSurfaceHeight(.75f);
-        var farHeight = SonolusLandscapePrototype.NoteSurfaceHeight(.1f);
+        var judgmentHeight = GugarhythmLandscapePrototype.NoteSurfaceHeight(1f);
+        var midHeight = GugarhythmLandscapePrototype.NoteSurfaceHeight(.75f);
+        var farHeight = GugarhythmLandscapePrototype.NoteSurfaceHeight(.1f);
         Require(farHeight > 0 && farHeight < midHeight && midHeight < judgmentHeight,
             "Note height must grow continuously from the vanishing point to the judgment edge");
     }
@@ -3462,9 +3462,9 @@ public static class RuntimeValidation
     {
         var judgedRoot = new RuntimeNote { Visible = true, Judged = true };
         var headlessRoot = new RuntimeNote { Visible = false, Judged = false };
-        Require(SonolusLandscapePrototype.ShouldRenderPersistentHoldHead(judgedRoot),
+        Require(GugarhythmLandscapePrototype.ShouldRenderPersistentHoldHead(judgedRoot),
             "A judged Hold root must retain its judgment-line head");
-        Require(!SonolusLandscapePrototype.ShouldRenderPersistentHoldHead(headlessRoot),
+        Require(!GugarhythmLandscapePrototype.ShouldRenderPersistentHoldHead(headlessRoot),
             "A no-head-judgment Hold must not synthesize a normal Hold head at the judgment line");
     }
 
@@ -3472,9 +3472,9 @@ public static class RuntimeValidation
     {
         var traceRoot = new RuntimeNote { Archetype = "USC Trace Slide start", Visible = true, Judged = true };
         var normalRoot = new RuntimeNote { Archetype = "USC Slide start", Visible = true, Judged = true };
-        Require(SonolusLandscapePrototype.ShouldUseTracePersistentHoldVisual(traceRoot),
+        Require(GugarhythmLandscapePrototype.ShouldUseTracePersistentHoldVisual(traceRoot),
             "A Trace Hold root must retain its Trace visual at the judgment line");
-        Require(!SonolusLandscapePrototype.ShouldUseTracePersistentHoldVisual(normalRoot),
+        Require(!GugarhythmLandscapePrototype.ShouldUseTracePersistentHoldVisual(normalRoot),
             "A normal Hold root must retain its Hold-head visual at the judgment line");
     }
 
@@ -3681,8 +3681,8 @@ public static class RuntimeValidation
         Require(particleOnly.SlideNodeRole == SlideNodeRole.Attach && particleOnly.SlideJudgeMode == SlideJudgeMode.None,
             "An authored attach must retain Attach role and None judgment metadata");
         Require(particleOnly.HoldRootIndex == At(10).Index &&
-                !SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, .999f) &&
-                SonolusLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, 1f),
+                !GugarhythmLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, .999f) &&
+                GugarhythmLandscapePrototype.ShouldHideAttachedHoldParticle(particleOnly, 1f),
             "An attach particle must belong to its Hold and retract at the same judgment-line threshold");
         Require(particleAndBend.Visible && !particleAndBend.Judged && chart.Notes.Contains(particleAndBend) &&
                 Math.Abs(particleAndBend.Lane - 6f) < .0001f && Math.Abs(particleAndBend.Size - 3f) < .0001f,
@@ -3693,12 +3693,12 @@ public static class RuntimeValidation
         Require(chart.Connectors.Any(connector => ReferenceEquals(connector.End, particleAndBend)) &&
                 chart.Connectors.Any(connector => ReferenceEquals(connector.Start, particleAndBend)),
             "A visible Tick must remain in the authored Hold geometry path");
-        Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(bendOnly, true) &&
-                SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, true) &&
-                SonolusLandscapePrototype.ShouldShowNoteParticle(particleAndBend, true),
+        Require(!GugarhythmLandscapePrototype.ShouldShowNoteParticle(bendOnly, true) &&
+                GugarhythmLandscapePrototype.ShouldShowNoteParticle(particleOnly, true) &&
+                GugarhythmLandscapePrototype.ShouldShowNoteParticle(particleAndBend, true),
             "Authored Attach and visible Tick midpoint particles must both render when textures exist");
-        Require(!SonolusLandscapePrototype.ShouldShowNoteParticle(particleOnly, false) &&
-                !SonolusLandscapePrototype.ShouldShowNoteParticle(particleAndBend, false),
+        Require(!GugarhythmLandscapePrototype.ShouldShowNoteParticle(particleOnly, false) &&
+                !GugarhythmLandscapePrototype.ShouldShowNoteParticle(particleAndBend, false),
             "Missing midpoint textures must keep USC Hold particles hidden");
     }
 
@@ -3725,7 +3725,7 @@ public static class RuntimeValidation
         {
             if (enhancedTouchWasEnabled)
                 UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.Disable();
-            SonolusLandscapePrototype.EnsureEnhancedTouchForCallbackMutation();
+            GugarhythmLandscapePrototype.EnsureEnhancedTouchForCallbackMutation();
             Require(UnityEngine.InputSystem.EnhancedTouch.EnhancedTouchSupport.enabled,
                 "Scene teardown must be able to detach Enhanced Touch callbacks after another scene disabled global support");
         }
@@ -3809,40 +3809,40 @@ public static class RuntimeValidation
             Mathf.Approximately(actual.r, expected.r) && Mathf.Approximately(actual.g, expected.g) &&
             Mathf.Approximately(actual.b, expected.b) && Mathf.Approximately(actual.a, expected.a);
 
-        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Tap }),
+        Require(Same(GugarhythmLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Tap }),
                 new Color(.28f, .82f, 1f, .84f)),
             "Normal Tap hit effect must use the cyan button color");
-        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick }),
+        Require(Same(GugarhythmLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick }),
                 new Color(1f, .2f, .67f, .86f)),
             "Normal Flick hit effect must use the pink button color");
-        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Sustain }),
+        Require(Same(GugarhythmLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Sustain }),
                 new Color(.12f, 1f, .58f, .84f)),
             "Normal Hold hit effect must use the mint button color");
-        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Tap, Archetype = "TraceNote" }),
+        Require(Same(GugarhythmLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Tap, Archetype = "TraceNote" }),
                 new Color(.12f, 1f, .58f, .84f)),
             "Trace hit effect must use the mint button color");
-        Require(Same(SonolusLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick, Critical = true }),
+        Require(Same(GugarhythmLandscapePrototype.ResolveHitEffectColor(new RuntimeNote { Kind = RuntimeNoteKind.Flick, Critical = true }),
                 new Color(1f, .82f, .12f, .9f)),
             "Critical hit effect must use the yellow button color regardless of note kind");
 
         var positionedNote = new RuntimeNote { Lane = -2f, Kind = RuntimeNoteKind.Tap };
-        Require(Math.Abs(SonolusLandscapePrototype.ResolveHitEffectLane(
+        Require(Math.Abs(GugarhythmLandscapePrototype.ResolveHitEffectLane(
                     new JudgmentEvent(positionedNote, JudgmentGrade.Perfect, 0, -1.35f)) + 1.35f) < .0001f,
             "A physical-input judgment must place its hit effect at the matched contact lane");
-        Require(Math.Abs(SonolusLandscapePrototype.ResolveHitEffectLane(
+        Require(Math.Abs(GugarhythmLandscapePrototype.ResolveHitEffectLane(
                     new JudgmentEvent(positionedNote, JudgmentGrade.Perfect, 0)) + 2f) < .0001f,
             "An automatic or contact judgment without an input lane must keep the hit effect at the note center");
     }
 
     static void ValidateJudgmentSpritePaths()
     {
-        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Perfect) == "JudgmentSprites/perfect",
+        Require(GugarhythmLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Perfect) == "JudgmentSprites/perfect",
             "Perfect judgment must select its image asset");
-        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Great) == "JudgmentSprites/great",
+        Require(GugarhythmLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Great) == "JudgmentSprites/great",
             "Great judgment must select its image asset");
-        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Good) == "JudgmentSprites/good",
+        Require(GugarhythmLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Good) == "JudgmentSprites/good",
             "Good judgment must select its image asset");
-        Require(SonolusLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Miss) == "JudgmentSprites/miss",
+        Require(GugarhythmLandscapePrototype.JudgmentSpriteResourcePath(JudgmentGrade.Miss) == "JudgmentSprites/miss",
             "Miss judgment must select its image asset");
     }
 
@@ -3874,7 +3874,7 @@ public static class RuntimeValidation
         var parentObject = new GameObject("Figma Toggle Validation Parent", typeof(RectTransform));
         try
         {
-            var factory = typeof(SonolusLandscapePrototype).GetMethod("MakeFigmaSlidingToggle",
+            var factory = typeof(GugarhythmLandscapePrototype).GetMethod("MakeFigmaSlidingToggle",
                 System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static);
             Require(factory != null, "FAST/LATE must use the Figma sliding toggle factory");
             var toggle = (Toggle)factory.Invoke(null, new object[]
@@ -3897,33 +3897,33 @@ public static class RuntimeValidation
 
     static void ValidateAutoPlaySelection()
     {
-        Require(SonolusLandscapePrototype.ToggleAutoPlaySelection(false),
+        Require(GugarhythmLandscapePrototype.ToggleAutoPlaySelection(false),
             "AUTO PLAY selection must enable from the disabled state");
-        Require(!SonolusLandscapePrototype.ToggleAutoPlaySelection(true),
+        Require(!GugarhythmLandscapePrototype.ToggleAutoPlaySelection(true),
             "AUTO PLAY selection must disable from the enabled state");
     }
 
     static void ValidateJudgmentTimingSpritePaths()
     {
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentTimingSpriteHeight -
-                    SonolusLandscapePrototype.JudgmentSpriteSize.y * .5f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.JudgmentTimingSpriteHeight -
+                    GugarhythmLandscapePrototype.JudgmentSpriteSize.y * .5f) < .0001f,
             "FAST/LATE indicator height must be half the main judgment height");
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentTimingSpriteCenterYOffset -
-                    SonolusLandscapePrototype.JudgmentSpriteSize.y * .55f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.JudgmentTimingSpriteCenterYOffset -
+                    GugarhythmLandscapePrototype.JudgmentSpriteSize.y * .55f) < .0001f,
             "FAST/LATE indicator must visually sit close above the main judgment image");
-        Require(SonolusLandscapePrototype.FastLateDisplayWidth <
-                    SonolusLandscapePrototype.SettingsSliderWidth * .5f,
+        Require(GugarhythmLandscapePrototype.FastLateDisplayWidth <
+                    GugarhythmLandscapePrototype.SettingsSliderWidth * .5f,
             "FAST/LATE and AUTO PLAY setting cards must be shorter than half the slider width");
-        Require(Math.Abs(SonolusLandscapePrototype.SettingsSliderWidth -
-                    SonolusLandscapePrototype.FastLateDisplayWidth * 2f - 24f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.SettingsSliderWidth -
+                    GugarhythmLandscapePrototype.FastLateDisplayWidth * 2f - 24f) < .0001f,
             "FAST/LATE and AUTO PLAY cards must retain a 24-unit gutter at the center line");
-        Require(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Fast) == "JudgmentSprites/fast",
+        Require(GugarhythmLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Fast) == "JudgmentSprites/fast",
             "FAST timing must select its image asset");
-        Require(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Late) == "JudgmentSprites/late",
+        Require(GugarhythmLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Late) == "JudgmentSprites/late",
             "LATE timing must select its image asset");
-        Require(Resources.Load<Texture2D>(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Fast)) != null,
+        Require(Resources.Load<Texture2D>(GugarhythmLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Fast)) != null,
             "FAST timing sprite resource is missing");
-        Require(Resources.Load<Texture2D>(SonolusLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Late)) != null,
+        Require(Resources.Load<Texture2D>(GugarhythmLandscapePrototype.JudgmentTimingSpriteResourcePath(JudgmentTiming.Late)) != null,
             "LATE timing sprite resource is missing");
     }
 
@@ -3933,9 +3933,9 @@ public static class RuntimeValidation
         try
         {
             var image = gameObject.GetComponent<RawImage>();
-            SonolusLandscapePrototype.SetJudgmentSprite(image, null);
+            GugarhythmLandscapePrototype.SetJudgmentSprite(image, null);
             Require(!image.enabled, "Cleared judgment image must not render Unity's default white texture");
-            SonolusLandscapePrototype.SetJudgmentSprite(image, Texture2D.whiteTexture);
+            GugarhythmLandscapePrototype.SetJudgmentSprite(image, Texture2D.whiteTexture);
             Require(image.enabled && image.texture == Texture2D.whiteTexture,
                 "A loaded judgment sprite must enable its image renderer");
         }
@@ -3947,7 +3947,7 @@ public static class RuntimeValidation
 
     static void ValidateJudgmentSpriteSize()
     {
-        Require(SonolusLandscapePrototype.JudgmentSpriteSize == new Vector2(330, 110),
+        Require(GugarhythmLandscapePrototype.JudgmentSpriteSize == new Vector2(330, 110),
             "Judgment sprite size must remain half of the original 660 by 220 display area");
     }
 
@@ -3966,22 +3966,22 @@ public static class RuntimeValidation
             return note;
         }
 
-        var state = new SonolusLandscapePrototype.HoldJudgmentAudioState();
+        var state = new GugarhythmLandscapePrototype.HoldJudgmentAudioState();
         var head = HoldPart(100, 100, HoldCheckpointSource.None, RuntimeNoteKind.Tap);
         var headRoute = state.Route(new JudgmentEvent(head, JudgmentGrade.Perfect, 0));
-        Require(headRoute == SonolusLandscapePrototype.JudgmentAudioRoute.GradeOneShot &&
+        Require(headRoute == GugarhythmLandscapePrototype.JudgmentAudioRoute.GradeOneShot &&
                 !state.ShouldPlay && state.ActiveCount == 0,
             "A successful Slide head must route only to its ordinary judgment one-shot and never activate the Hold loop");
 
         var standaloneTrace = HoldPart(90, -1, HoldCheckpointSource.None,
             RuntimeNoteKind.Sustain, SlideJudgeMode.Trace);
         Require(state.Route(new JudgmentEvent(standaloneTrace, JudgmentGrade.Perfect, 0)) ==
-                SonolusLandscapePrototype.JudgmentAudioRoute.None,
+                GugarhythmLandscapePrototype.JudgmentAudioRoute.None,
             "A successful Trace judgment must not fall through to the Tap-grade one-shot route");
 
         var mid = HoldPart(101, 100, HoldCheckpointSource.Mid);
         var midRoute = state.Route(new JudgmentEvent(mid, JudgmentGrade.Great, 0));
-        Require(midRoute == SonolusLandscapePrototype.JudgmentAudioRoute.ActivateHoldLoop &&
+        Require(midRoute == GugarhythmLandscapePrototype.JudgmentAudioRoute.ActivateHoldLoop &&
                 state.ShouldPlay && state.ActiveCount == 1,
             "A successful authored Hold mid must activate its root without routing a one-shot");
 
@@ -3991,21 +3991,21 @@ public static class RuntimeValidation
             "Successful checkpoints from overlapping Holds must add roots to the shared gate");
 
         var midMissRoute = state.Route(new JudgmentEvent(mid, JudgmentGrade.Miss, 0));
-        Require(midMissRoute == SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
+        Require(midMissRoute == GugarhythmLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
                 state.ShouldPlay && state.ActiveCount == 1,
             "A missed Hold mid must deactivate only its own root while another active Hold keeps the loop enabled");
 
         var auto = HoldPart(102, 100, HoldCheckpointSource.Auto);
         var autoRoute = state.Route(new JudgmentEvent(auto, JudgmentGrade.Good, 0));
-        Require(autoRoute == SonolusLandscapePrototype.JudgmentAudioRoute.ActivateHoldLoop && state.ActiveCount == 2,
+        Require(autoRoute == GugarhythmLandscapePrototype.JudgmentAudioRoute.ActivateHoldLoop && state.ActiveCount == 2,
             "A later successful Auto checkpoint must reactivate a Hold after an authored-mid Miss");
 
         var missedTail = HoldPart(103, 100, HoldCheckpointSource.Tail);
         var missedTailRoute = state.Route(new JudgmentEvent(missedTail, JudgmentGrade.Miss, 0));
-        Require(missedTailRoute == SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
+        Require(missedTailRoute == GugarhythmLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
                 state.ShouldPlay && state.ActiveCount == 1,
             "A missed Hold tail must permanently deactivate its root without a success one-shot");
-        Require(state.Route(new JudgmentEvent(auto, JudgmentGrade.Perfect, 0)) == SonolusLandscapePrototype.JudgmentAudioRoute.None &&
+        Require(state.Route(new JudgmentEvent(auto, JudgmentGrade.Perfect, 0)) == GugarhythmLandscapePrototype.JudgmentAudioRoute.None &&
                 state.ActiveCount == 1,
             "A Hold root must never reactivate after its terminal judgment");
 
@@ -4013,8 +4013,8 @@ public static class RuntimeValidation
         state.Route(new JudgmentEvent(normalAuto, JudgmentGrade.Perfect, 0));
         var normalTail = HoldPart(302, 300, HoldCheckpointSource.Tail);
         var normalTailRoute = state.Route(new JudgmentEvent(normalTail, JudgmentGrade.Perfect, 0));
-        Require(normalTailRoute == (SonolusLandscapePrototype.JudgmentAudioRoute.GradeOneShot |
-                                    SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
+        Require(normalTailRoute == (GugarhythmLandscapePrototype.JudgmentAudioRoute.GradeOneShot |
+                                    GugarhythmLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
                 state.ActiveCount == 1,
             "A successful normal Hold tail must deactivate its root and retain its resolved grade one-shot route");
 
@@ -4023,14 +4023,14 @@ public static class RuntimeValidation
         var traceTerminal = HoldPart(402, 400, HoldCheckpointSource.Mid,
             RuntimeNoteKind.Sustain, SlideJudgeMode.Trace, true);
         var traceTerminalRoute = state.Route(new JudgmentEvent(traceTerminal, JudgmentGrade.Perfect, 0));
-        Require(traceTerminalRoute == SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
+        Require(traceTerminalRoute == GugarhythmLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop &&
                 state.ActiveCount == 1,
             "A Trace at a Hold End must stop its loop without being rewritten to a Tap or Tail one-shot");
 
         var flickTail = HoldPart(202, 200, HoldCheckpointSource.Tail, RuntimeNoteKind.Flick);
         var flickTailRoute = state.Route(new JudgmentEvent(flickTail, JudgmentGrade.Perfect, 0));
-        Require(flickTailRoute == (SonolusLandscapePrototype.JudgmentAudioRoute.FlickOneShot |
-                                   SonolusLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
+        Require(flickTailRoute == (GugarhythmLandscapePrototype.JudgmentAudioRoute.FlickOneShot |
+                                   GugarhythmLandscapePrototype.JudgmentAudioRoute.DeactivateHoldLoop) &&
                 !state.ShouldPlay && state.ActiveCount == 0,
             "A successful Flick Hold tail must deactivate its root and retain the Flick one-shot route");
 
@@ -4054,18 +4054,18 @@ public static class RuntimeValidation
 
     static void ValidateJudgedVisualMasking()
     {
-        Require(SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Pending) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
-                SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Perfect) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
-                SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Miss) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
-                SonolusLandscapePrototype.ResolveHoldConnectorRenderMode(false, JudgmentGrade.Perfect) == SonolusLandscapePrototype.HoldConnectorRenderMode.AnchorClipped,
+        Require(GugarhythmLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Pending) == GugarhythmLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
+                GugarhythmLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Perfect) == GugarhythmLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
+                GugarhythmLandscapePrototype.ResolveHoldConnectorRenderMode(true, JudgmentGrade.Miss) == GugarhythmLandscapePrototype.HoldConnectorRenderMode.AnchorClipped &&
+                GugarhythmLandscapePrototype.ResolveHoldConnectorRenderMode(false, JudgmentGrade.Perfect) == GugarhythmLandscapePrototype.HoldConnectorRenderMode.AnchorClipped,
             "Hold connectors must always stop at their Head, regardless of judgment result");
-        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1f),
+        Require(!GugarhythmLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1f),
             "A successful note must remain visible until it reaches the lower edge of the judgment strip");
-        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Miss, 1.01f),
+        Require(!GugarhythmLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Miss, 1.01f),
             "A missed note must remain visible while travelling through the judgment strip");
-        Require(SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1.02f),
+        Require(GugarhythmLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Perfect, 1.02f),
             "A successful note must disappear after reaching the lower edge of the judgment strip");
-        Require(!SonolusLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Pending, 1.1f),
+        Require(!GugarhythmLandscapePrototype.ShouldHideJudgedVisual(JudgmentGrade.Pending, 1.1f),
             "An unresolved note must not be hidden by the judgment mask");
     }
 
@@ -4716,21 +4716,21 @@ public static class RuntimeValidation
 
     static void ValidateLatencyCalibration()
     {
-        var audioOffset = SonolusLandscapePrototype.CalibrationAudioOffsetForTap(4.906077, 4.8);
+        var audioOffset = GugarhythmLandscapePrototype.CalibrationAudioOffsetForTap(4.906077, 4.8);
         Require(Math.Abs(audioOffset + .106077) < .000001,
             "A late tap must be compared with its assigned fourth audible beat");
-        var earlyOffset = SonolusLandscapePrototype.CalibrationAudioOffsetForTap(4.694, 4.8);
+        var earlyOffset = GugarhythmLandscapePrototype.CalibrationAudioOffsetForTap(4.694, 4.8);
         Require(Math.Abs(earlyOffset - .106) < .000001,
             "An early tap must delay audio by its measured difference from the assigned beat");
-        Require(SonolusLandscapePrototype.SanitizeAudioOffset(4.906077) == 0,
+        Require(GugarhythmLandscapePrototype.SanitizeAudioOffset(4.906077) == 0,
             "An impossible persisted audio offset must reset to zero");
-        Require(Math.Abs(SonolusLandscapePrototype.SanitizeAudioOffset(.106077) - .106077) < .000001,
+        Require(Math.Abs(GugarhythmLandscapePrototype.SanitizeAudioOffset(.106077) - .106077) < .000001,
             "A plausible persisted audio offset must be preserved");
-        Require(SonolusLandscapePrototype.SanitizeAudioOffset(.31) == 0,
+        Require(GugarhythmLandscapePrototype.SanitizeAudioOffset(.31) == 0,
             "Manual audio offset must not exceed the 300 ms safety limit");
-        Require(!SonolusLandscapePrototype.CanAdjustAudioOffsetManually(true),
+        Require(!GugarhythmLandscapePrototype.CanAdjustAudioOffsetManually(true),
             "Manual audio offset controls must be disabled while calibration ticks are scheduled");
-        Require(SonolusLandscapePrototype.CanAdjustAudioOffsetManually(false),
+        Require(GugarhythmLandscapePrototype.CanAdjustAudioOffsetManually(false),
             "Manual audio offset controls must be available outside calibration");
     }
 
@@ -4764,13 +4764,13 @@ public static class RuntimeValidation
             "Audio recovery must not seek past the end of a clip");
         Require(Math.Abs(AudioDeviceRecovery.ScheduledDspForChartTime(400.25, 12.5, .3) - 387.45) < .0001,
             "Audio recovery must rebuild a DSP schedule that preserves chart time");
-        Require(SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, false),
+        Require(GugarhythmLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, false),
             "An active unpaused game must pause after an output-device change");
-        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, false, false),
+        Require(!GugarhythmLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, false, false),
             "An idle game must ignore an output-device change");
-        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, true),
+        Require(!GugarhythmLandscapePrototype.ShouldPauseForAudioConfigurationChange(true, true, true),
             "An already paused game must not restart its pause flow");
-        Require(!SonolusLandscapePrototype.ShouldPauseForAudioConfigurationChange(false, true, false),
+        Require(!GugarhythmLandscapePrototype.ShouldPauseForAudioConfigurationChange(false, true, false),
             "Non-device audio configuration changes must not interrupt gameplay");
         Require(AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(true),
             "An audio interruption must rebuild its schedule instead of unpausing the old one");
@@ -4931,7 +4931,7 @@ public static class RuntimeValidation
         const string keyVolumeKey = "gugarhythm-key-volume";
         const System.Reflection.BindingFlags instanceFlags = System.Reflection.BindingFlags.Instance |
             System.Reflection.BindingFlags.NonPublic;
-        var controllerType = typeof(SonolusLandscapePrototype);
+        var controllerType = typeof(GugarhythmLandscapePrototype);
         var awakeMethod = controllerType.GetMethod("Awake", instanceFlags);
         var resetMethod = controllerType.GetMethod("ResetRuntime", instanceFlags);
         var updateMethod = controllerType.GetMethod("Update", instanceFlags);
@@ -4941,7 +4941,7 @@ public static class RuntimeValidation
         var scheduledDspField = controllerType.GetField("scheduledDsp", instanceFlags);
         Require(awakeMethod != null && resetMethod != null && updateMethod != null && chartField != null &&
                 runningField != null && pausedField != null && scheduledDspField != null,
-            "The allocation fixture must bind the real SonolusLandscapePrototype lifecycle and Update path");
+            "The allocation fixture must bind the real GugarhythmLandscapePrototype lifecycle and Update path");
 
         var activeScene = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
         var originalRoots = new HashSet<int>(activeScene.GetRootGameObjects().Select(root => root.GetInstanceID()));
@@ -4970,7 +4970,7 @@ public static class RuntimeValidation
         {
             UnityEngine.Profiling.Profiler.enabled = true;
             var controllerObject = new GameObject("Update allocation validation fixture");
-            var controller = controllerObject.AddComponent<SonolusLandscapePrototype>();
+            var controller = controllerObject.AddComponent<GugarhythmLandscapePrototype>();
             awakeMethod.Invoke(controller, null);
 
             var chart = new RuntimeChart();
@@ -5284,7 +5284,7 @@ public static class RuntimeValidation
 
             Action updateAction;
             System.Reflection.FieldInfo runningField;
-            SonolusLandscapePrototype controller;
+            GugarhythmLandscapePrototype controller;
             ProfilerRecorder frameRecorder;
             ProfilerRecorder gcAllocRecorder;
             ProfilerRecorder idleFrameRecorder;
@@ -5310,7 +5310,7 @@ public static class RuntimeValidation
             {
                 const System.Reflection.BindingFlags instanceFlags =
                     System.Reflection.BindingFlags.Instance | System.Reflection.BindingFlags.NonPublic;
-                var controllerType = typeof(SonolusLandscapePrototype);
+                var controllerType = typeof(GugarhythmLandscapePrototype);
                 var awakeMethod = controllerType.GetMethod("Awake", instanceFlags);
                 var resetMethod = controllerType.GetMethod("ResetRuntime", instanceFlags);
                 var updateMethod = controllerType.GetMethod("Update", instanceFlags);
@@ -5324,7 +5324,7 @@ public static class RuntimeValidation
 
                 UnityEngine.Profiling.Profiler.enabled = true;
                 var controllerObject = new GameObject("Multi-frame Update profiler fixture");
-                controller = controllerObject.AddComponent<SonolusLandscapePrototype>();
+                controller = controllerObject.AddComponent<GugarhythmLandscapePrototype>();
                 awakeMethod.Invoke(controller, null);
 
                 var chart = new RuntimeChart();
@@ -5756,43 +5756,43 @@ public static class RuntimeValidation
 
     static void ValidateJudgmentDebugGrid()
     {
-        Require(SonolusLandscapePrototype.JudgmentDebugCellCount == 24,
+        Require(GugarhythmLandscapePrototype.JudgmentDebugCellCount == 24,
             "Judgment debug grid must expose one cell for every half lane");
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCellWidth - .5f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.JudgmentDebugCellWidth - .5f) < .0001f,
             "Judgment debug grid cells must remain half a lane wide");
         foreach (var lane in new[] { -6f, -3f, 0f, 3f, 6f })
-            Require(Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(
-                    SonolusLandscapePrototype.JudgmentLaneCanvasX(lane)) - lane) < .0001f,
+            Require(Math.Abs(GugarhythmLandscapePrototype.InputLaneAtCanvasX(
+                    GugarhythmLandscapePrototype.JudgmentLaneCanvasX(lane)) - lane) < .0001f,
                 "Input lane conversion must invert the rendered perspective lane geometry");
-        Require(Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(-960f) + 6f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(960f) - 6f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.InputLaneAtCanvasX(-960f) + 6f) < .0001f &&
+                Math.Abs(GugarhythmLandscapePrototype.InputLaneAtCanvasX(960f) - 6f) < .0001f,
             "The far left and right of the touch region must clamp to the -6 and +6 outer keys");
-        Require(SonolusLandscapePrototype.ShouldContinueTrackedContact(true, false) &&
-                SonolusLandscapePrototype.ShouldContinueTrackedContact(true, true) &&
-                !SonolusLandscapePrototype.ShouldContinueTrackedContact(false, false),
+        Require(GugarhythmLandscapePrototype.ShouldContinueTrackedContact(true, false) &&
+                GugarhythmLandscapePrototype.ShouldContinueTrackedContact(true, true) &&
+                !GugarhythmLandscapePrototype.ShouldContinueTrackedContact(false, false),
             "A started Hold contact must continue outside the input band until it ends, while a new contact must begin inside it");
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentInputBandHeight(732f) - 45f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.JudgmentInputBandHeight(732f) - 45f) < .0001f,
             "Each judgment input band must match the 45-pixel judgement strip");
-        Require(SonolusLandscapePrototype.JudgmentInputGridRow(-111.5f, 732f) == 0 &&
-                SonolusLandscapePrototype.JudgmentInputGridRow(-111.6f, 732f) == -1 &&
-                SonolusLandscapePrototype.JudgmentInputGridRow(-156.6f, 732f) == -2,
+        Require(GugarhythmLandscapePrototype.JudgmentInputGridRow(-111.5f, 732f) == 0 &&
+                GugarhythmLandscapePrototype.JudgmentInputGridRow(-111.6f, 732f) == -1 &&
+                GugarhythmLandscapePrototype.JudgmentInputGridRow(-156.6f, 732f) == -2,
             "Virtual touch rows must advance once per purple judgment-strip height");
-        var inputTop = SonolusLandscapePrototype.JudgmentInputTop(732f);
+        var inputTop = GugarhythmLandscapePrototype.JudgmentInputTop(732f);
         Require(Math.Abs(inputTop - 1f) < .001f &&
-                SonolusLandscapePrototype.IsJudgmentInputBand(-366f, 732f) &&
-                SonolusLandscapePrototype.IsJudgmentInputBand(inputTop, 732f) &&
-                !SonolusLandscapePrototype.IsJudgmentInputBand(-366.1f, 732f) &&
-                !SonolusLandscapePrototype.IsJudgmentInputBand(inputTop + .1f, 732f),
+                GugarhythmLandscapePrototype.IsJudgmentInputBand(-366f, 732f) &&
+                GugarhythmLandscapePrototype.IsJudgmentInputBand(inputTop, 732f) &&
+                !GugarhythmLandscapePrototype.IsJudgmentInputBand(-366.1f, 732f) &&
+                !GugarhythmLandscapePrototype.IsJudgmentInputBand(inputTop + .1f, 732f),
             "The input region must run from canvas bottom to three band heights above the judgment line");
-        Require(SonolusLandscapePrototype.CanvasXAtInputLane(-6f) < -600f &&
-                SonolusLandscapePrototype.CanvasXAtInputLane(6f) > 600f &&
-                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(
-                    SonolusLandscapePrototype.CanvasXAtInputLane(-6f)) + 6f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.InputLaneAtCanvasX(
-                    SonolusLandscapePrototype.CanvasXAtInputLane(6f)) - 6f) < .0001f,
+        Require(GugarhythmLandscapePrototype.CanvasXAtInputLane(-6f) < -600f &&
+                GugarhythmLandscapePrototype.CanvasXAtInputLane(6f) > 600f &&
+                Math.Abs(GugarhythmLandscapePrototype.InputLaneAtCanvasX(
+                    GugarhythmLandscapePrototype.CanvasXAtInputLane(-6f)) + 6f) < .0001f &&
+                Math.Abs(GugarhythmLandscapePrototype.InputLaneAtCanvasX(
+                    GugarhythmLandscapePrototype.CanvasXAtInputLane(6f)) - 6f) < .0001f,
             "The visible input region must align with the rendered outer lanes");
-        Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCanvasXAtLane(-6f) + 960f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.JudgmentDebugCanvasXAtLane(6f) - 960f) < .0001f,
+        Require(Math.Abs(GugarhythmLandscapePrototype.JudgmentDebugCanvasXAtLane(-6f) + 960f) < .0001f &&
+                Math.Abs(GugarhythmLandscapePrototype.JudgmentDebugCanvasXAtLane(6f) - 960f) < .0001f,
             "The purple judgment debug region must retain the full canvas width");
     }
 

@@ -26,7 +26,7 @@ namespace Gugarhythm
                 if (data == null || data.LongLength == 0) return ImportResult.Fail("SCP 是空檔案。");
                 if (data.LongLength > MaxArchiveBytes) return ImportResult.Fail("SCP 超過 128 MB 上限。");
                 var files = ReadArchive(data);
-                if (!files.ContainsKey("sonolus/package")) return ImportResult.Fail("ZIP 不是 Sonolus Collection Package。");
+                if (!files.ContainsKey("sonolus/package")) return ImportResult.Fail("ZIP 不是 Gugarhythm Collection Package。");
                 var detailPath = files.Keys.FirstOrDefault(path => path.StartsWith("sonolus/levels/", StringComparison.Ordinal) &&
                     path != "sonolus/levels/info" && path != "sonolus/levels/list");
                 if (detailPath == null) return ImportResult.Fail("SCP 內沒有 level detail。");
@@ -148,7 +148,7 @@ namespace Gugarhythm
             foreach (var entity in entities)
             {
                 var isNote = entity.Archetype.EndsWith("Note", StringComparison.Ordinal);
-                // Sonolus hasInput does not mean "draw and judge this entity".
+                // Gugarhythm hasInput does not mean "draw and judge this entity".
                 // Hold control points such as Ignored/AttachedSlideTick also have
                 // input access inside the engine, but must remain connector-only.
                 var playable = (playableArchetypes.Count > 0 ? playableArchetypes.Contains(entity.Archetype) : IsFallbackPlayable(entity.Archetype)) &&
