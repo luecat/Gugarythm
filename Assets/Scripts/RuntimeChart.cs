@@ -32,6 +32,31 @@ namespace Gugarhythm
         public SlideJudgeMode SlideJudgeMode;
         public int HoldRootIndex = -1;
         public bool IsHoldTerminal;
+
+        // Archetype is set once at construction and never mutated afterward
+        // (including for notes built ad hoc outside the import pipeline, e.g.
+        // by validation code), so each of these string-matching results is
+        // computed at most once per note and cached, instead of being
+        // re-parsed from Archetype every frame for every visible note.
+        bool archetypeFlagsComputed;
+        bool isTraceArchetype;
+        bool isHoldMidArchetype;
+        bool isDamageArchetype;
+
+        public bool IsTraceArchetype { get { EnsureArchetypeFlags(); return isTraceArchetype; } }
+        public bool IsHoldMidArchetype { get { EnsureArchetypeFlags(); return isHoldMidArchetype; } }
+        public bool IsDamageArchetype { get { EnsureArchetypeFlags(); return isDamageArchetype; } }
+
+        void EnsureArchetypeFlags()
+        {
+            if (archetypeFlagsComputed) return;
+            var archetype = Archetype ?? string.Empty;
+            isTraceArchetype = archetype.IndexOf("Trace", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                archetype.StartsWith("USC Trace", StringComparison.OrdinalIgnoreCase);
+            isHoldMidArchetype = archetype.EndsWith("SlideTickNote", StringComparison.OrdinalIgnoreCase);
+            isDamageArchetype = archetype.IndexOf("Damage", StringComparison.OrdinalIgnoreCase) >= 0;
+            archetypeFlagsComputed = true;
+        }
     }
 
     public sealed class RuntimeTimeScaleGroup

@@ -219,6 +219,7 @@ namespace Gugarhythm
         {
             None = 0,
             GradeOneShot = 1 << 0,
+            TraceOneShot = 1 << 1,
             FlickOneShot = 1 << 2,
             ActivateHoldLoop = 1 << 3,
             DeactivateHoldLoop = 1 << 4,
@@ -255,7 +256,9 @@ namespace Gugarhythm
                     if (judgment.Grade == JudgmentGrade.Miss)
                         return root >= 0 ? JudgmentAudioRoute.DeactivateHoldLoop : JudgmentAudioRoute.None;
                     if (note.SlideJudgeMode == SlideJudgeMode.Trace)
-                        return root >= 0 ? JudgmentAudioRoute.DeactivateHoldLoop : JudgmentAudioRoute.None;
+                        return root >= 0
+                            ? JudgmentAudioRoute.TraceOneShot | JudgmentAudioRoute.DeactivateHoldLoop
+                            : JudgmentAudioRoute.TraceOneShot;
                     var oneShot = note.SlideJudgeMode == SlideJudgeMode.Flick || note.Kind == RuntimeNoteKind.Flick
                         ? JudgmentAudioRoute.FlickOneShot
                         : JudgmentAudioRoute.GradeOneShot;
@@ -277,7 +280,7 @@ namespace Gugarhythm
                 }
 
                 if (judgment.Grade == JudgmentGrade.Miss) return JudgmentAudioRoute.None;
-                if (note.SlideJudgeMode == SlideJudgeMode.Trace) return JudgmentAudioRoute.None;
+                if (note.SlideJudgeMode == SlideJudgeMode.Trace) return JudgmentAudioRoute.TraceOneShot;
                 return note.SlideJudgeMode == SlideJudgeMode.Flick || note.Kind == RuntimeNoteKind.Flick
                     ? JudgmentAudioRoute.FlickOneShot
                     : JudgmentAudioRoute.GradeOneShot;
@@ -387,6 +390,7 @@ namespace Gugarhythm
         readonly Dictionary<RuntimeGuide, TaperedConnectorGraphic> guideViews = new();
         readonly Dictionary<int, RuntimeNote> holdRoots = new();
         readonly Dictionary<int, List<RuntimeNote>> holdCheckpoints = new();
+        readonly Dictionary<int, bool> holdMissedByRoot = new();
         readonly HoldJudgmentAudioState holdAudioState = new();
         readonly Stack<HorizontalSlicedRawImage> notePool = new();
         readonly Stack<TaperedConnectorGraphic> connectorPool = new();
@@ -474,6 +478,7 @@ namespace Gugarhythm
         AudioClip flickSound;
         AudioClip criticalFlickSound;
         AudioClip stageSound;
+        AudioClip traceSound;
         RuntimeChart chart;
         LocalChartEntry currentLibraryEntry;
         JudgmentEngine judgmentEngine;
@@ -498,6 +503,8 @@ namespace Gugarhythm
         RectTransform simLineLayer;
         RectTransform persistentHoldHeadLayer;
         RectTransform noteLayer;
+        NoteParticleBatchGraphic holdMidMintBatch;
+        NoteParticleBatchGraphic holdMidYellowBatch;
         RectMask2D connectorUpperHiddenClip;
         RectMask2D persistentHoldHeadUpperHiddenClip;
         RectMask2D noteUpperHiddenClip;
@@ -1962,6 +1969,7 @@ namespace Gugarhythm
         {
             holdRoots.Clear();
             holdCheckpoints.Clear();
+            holdMissedByRoot.Clear();
             foreach (var point in chart.Connectors.SelectMany(connector => new[] { connector.Start, connector.End })
                          .Where(point => point != null && point.HoldRootIndex == point.Index).Distinct())
                 holdRoots[point.Index] = point;
@@ -2009,6 +2017,15 @@ namespace Gugarhythm
             holdYellowBatch?.Prepare(holdPathCapacity, holdPointCapacity);
             missedHoldGreenBatch?.Prepare(holdPathCapacity, holdPointCapacity);
             missedHoldYellowBatch?.Prepare(holdPathCapacity, holdPointCapacity);
+            var midMintCapacity = 0;
+            var midYellowCapacity = 0;
+            foreach (var note in chart.Notes)
+            {
+                if (!note.IsHoldMidArchetype) continue;
+                if (note.Critical) midYellowCapacity++; else midMintCapacity++;
+            }
+            holdMidMintBatch?.Prepare(midMintCapacity);
+            holdMidYellowBatch?.Prepare(midYellowCapacity);
             if (gpuRibbonRenderer == null || !ReferenceEquals(gpuRibbonRenderer.Chart, chart))
             {
                 gpuRibbonRenderer?.Dispose();
@@ -2280,8 +2297,12 @@ namespace Gugarhythm
             ShowJudgmentTiming(timing);
             PlayJudgmentSound(judgment);
             if (judgment.Note != null && judgment.Note.HoldRootIndex >= 0)
-                gpuRibbonRenderer?.SetHoldMissed(judgment.Note.HoldRootIndex,
-                    IsHoldCurrentlyMissed(judgment.Note.HoldRootIndex));
+            {
+                var rootIndex = judgment.Note.HoldRootIndex;
+                var missed = IsHoldCurrentlyMissed(rootIndex);
+                holdMissedByRoot[rootIndex] = missed;
+                gpuRibbonRenderer?.SetHoldMissed(rootIndex, missed);
+            }
             if (judgment.Grade != JudgmentGrade.Miss)
             {
                 SpawnHitParticle(judgment);
@@ -2298,16 +2319,19 @@ namespace Gugarhythm
 
             if (effects == null) return;
             AudioClip clip;
-            if ((route & JudgmentAudioRoute.FlickOneShot) != 0)
-                clip = judgment.Note.Critical && criticalFlickSound != null ? criticalFlickSound : flickSound;
-            else if ((route & JudgmentAudioRoute.GradeOneShot) != 0)
-                clip = judgment.Grade switch
+            var gradeClip = judgment.Grade switch
             {
                 JudgmentGrade.Perfect => perfectSound,
                 JudgmentGrade.Great => greatSound,
                 JudgmentGrade.Good => goodSound,
                 _ => null,
             };
+            if ((route & JudgmentAudioRoute.FlickOneShot) != 0)
+                clip = judgment.Note.Critical && criticalFlickSound != null ? criticalFlickSound : flickSound;
+            else if ((route & JudgmentAudioRoute.TraceOneShot) != 0)
+                clip = traceSound != null ? traceSound : gradeClip;
+            else if ((route & JudgmentAudioRoute.GradeOneShot) != 0)
+                clip = gradeClip;
             else clip = null;
             if (clip != null) effects.PlayOneShot(clip, .78f);
         }
@@ -2486,6 +2510,8 @@ namespace Gugarhythm
             if (performanceDiagnosticsEnabled) NotesProfiler.Begin();
 #endif
             renderedNoteIds.Clear();
+            holdMidMintBatch?.BeginFrame();
+            holdMidYellowBatch?.BeginFrame();
             chartRenderIndex.QueryNotes(visualFrameContext, ApproachDuration, ApproachDuration * 2, visibleNotes);
             foreach (var note in visibleNotes)
             {
@@ -2496,6 +2522,15 @@ namespace Gugarhythm
                     !ShouldHideHoldHead(note, approachProgress);
                 if (!visible)
                 {
+                    continue;
+                }
+                // A Hold mid is particle-only and fully transparent, so it
+                // never needs a pooled note view: routing it into the shared
+                // particle batch instead avoids two dirtied CanvasRenderers
+                // per mid every frame.
+                if (IsHoldMid(note))
+                {
+                    RenderHoldMidParticle(note, screenProgress);
                     continue;
                 }
                 renderedNoteIds.Add(note.Index);
@@ -2519,7 +2554,7 @@ namespace Gugarhythm
                     ApplyNoteSurfaceQuad(view, BuildHoldHeadSurface(note.Lane, renderSize, screenProgress, height));
                 else
                     ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
-                view.color = IsHoldMid(note) ? Color.clear : Color.white;
+                view.color = Color.white;
                 var traceParticle = view.TraceParticle;
                 if (traceParticle != null)
                 {
@@ -2551,6 +2586,8 @@ namespace Gugarhythm
                     flickArrow.color = new Color(1, 1, 1, 1 - animationProgress * animationProgress * animationProgress);
                 }
             }
+            holdMidMintBatch?.EndFrame();
+            holdMidYellowBatch?.EndFrame();
 
             noteViewReleaseKeys.Clear();
             foreach (var pair in noteViews)
@@ -2773,9 +2810,12 @@ namespace Gugarhythm
         bool IsHoldCurrentlyMissed(RuntimeConnector connector)
         {
             if (connector?.Start == null || connector.Start.HoldRootIndex < 0) return false;
-            return IsHoldCurrentlyMissed(connector.Start.HoldRootIndex);
+            return IsHoldCurrentlyMissedCached(connector.Start.HoldRootIndex);
         }
 
+        // Called once per judgment (root's checkpoint list changes only then),
+        // and repeatedly per frame from render code via the cached variant
+        // below, so the O(checkpoints) walk here must not run every frame.
         bool IsHoldCurrentlyMissed(int rootIndex)
         {
             if (rootIndex < 0) return false;
@@ -2785,6 +2825,15 @@ namespace Gugarhythm
                 foreach (var checkpoint in checkpoints)
                     if (checkpoint.Grade != JudgmentGrade.Pending) latestGrade = checkpoint.Grade;
             return latestGrade == JudgmentGrade.Miss;
+        }
+
+        bool IsHoldCurrentlyMissedCached(int rootIndex)
+        {
+            if (rootIndex < 0) return false;
+            if (holdMissedByRoot.TryGetValue(rootIndex, out var missed)) return missed;
+            missed = IsHoldCurrentlyMissed(rootIndex);
+            holdMissedByRoot[rootIndex] = missed;
+            return missed;
         }
 
         int SetGuidePath(GuideBatchGraphic batch, GuideRenderCache cache, GuideVisualSpan span)
@@ -3032,14 +3081,34 @@ namespace Gugarhythm
                 new Vector2(X(leftLane, lowerProgress), lowerY));
         }
 
+        static Vector2 NoteSurfaceQuadCenter(NoteSurfaceQuad quad) =>
+            (quad.UpperLeft + quad.UpperRight + quad.LowerRight + quad.LowerLeft) * .25f;
+
         static void ApplyNoteSurfaceQuad(HorizontalSlicedRawImage view, NoteSurfaceQuad quad)
         {
-            var center = (quad.UpperLeft + quad.UpperRight + quad.LowerRight + quad.LowerLeft) * .25f;
+            var center = NoteSurfaceQuadCenter(quad);
             var width = Mathf.Max(quad.UpperRight.x - quad.UpperLeft.x, quad.LowerRight.x - quad.LowerLeft.x);
             var height = Mathf.Max(quad.UpperLeft.y - quad.LowerLeft.y, quad.UpperRight.y - quad.LowerRight.y);
             view.rectTransform.anchoredPosition = center;
             view.rectTransform.sizeDelta = new Vector2(width, height);
             view.SetSurfaceQuad(quad.UpperLeft - center, quad.UpperRight - center, quad.LowerRight - center, quad.LowerLeft - center);
+        }
+
+        void RenderHoldMidParticle(RuntimeNote note, float screenProgress)
+        {
+            var texture = note.Critical ? holdMidYellowTexture : holdMidMintTexture;
+            if (texture == null) return;
+            var height = NoteSurfaceHeight(screenProgress);
+            var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
+            var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
+            var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
+            var center = NoteSurfaceQuadCenter(BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
+            // Both official tick layouts use the same square as the note's
+            // depth-scaled height; their textures distinguish the larger
+            // SlideTick from the smaller Trace diamond.
+            var aspect = texture.width / (float)Mathf.Max(1, texture.height);
+            var size = new Vector2(height * aspect, height);
+            (note.Critical ? holdMidYellowBatch : holdMidMintBatch)?.AddQuad(center, size);
         }
 
         static float ScreenProgressAtY(float y) => (TopY - y) / (TopY - HitY);
@@ -3117,18 +3186,14 @@ namespace Gugarhythm
             var finalSpan = X(CentralHalfLanes, screenProgress) - finalLeft;
             return CentralHalfLanes - 1 + (canvasX - finalLeft) / finalSpan;
         }
-        static bool IsTrace(RuntimeNote note)
-        {
-            var archetype = note.Archetype ?? string.Empty;
-            // Trace slide heads/tails use the same slim body and diamond as
-            // ordinary Trace notes. They are passive hold checkpoints rather
-            // than full mint Tap/Release buttons.
-            return archetype.IndexOf("Trace", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                archetype.StartsWith("USC Trace", StringComparison.OrdinalIgnoreCase);
-        }
+        // Trace slide heads/tails use the same slim body and diamond as
+        // ordinary Trace notes. They are passive hold checkpoints rather
+        // than full mint Tap/Release buttons. Archetype is immutable after
+        // import, so this reads RuntimeNote's cached flag instead of
+        // re-parsing the string every call.
+        static bool IsTrace(RuntimeNote note) => note.IsTraceArchetype;
 
-        static bool IsHoldMid(RuntimeNote note) =>
-            (note.Archetype ?? string.Empty).EndsWith("SlideTickNote", StringComparison.OrdinalIgnoreCase);
+        static bool IsHoldMid(RuntimeNote note) => note.IsHoldMidArchetype;
 
         /// <summary>
         /// Both Trace notes and USC Slide tick/attach particles use the child
@@ -3138,8 +3203,7 @@ namespace Gugarhythm
         public static bool ShouldShowNoteParticle(RuntimeNote note, bool hasParticleTexture) =>
             hasParticleTexture && note.Visible && (IsTrace(note) || IsHoldMid(note));
 
-        static bool IsDamage(RuntimeNote note) =>
-            (note.Archetype ?? string.Empty).IndexOf("Damage", StringComparison.OrdinalIgnoreCase) >= 0;
+        static bool IsDamage(RuntimeNote note) => note.IsDamageArchetype;
 
         static float NoteOuterPaddingPixels(RuntimeNote note)
         {
@@ -3248,6 +3312,7 @@ namespace Gugarhythm
             holdSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/hold-loop");
             flickSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/flick");
             criticalFlickSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/critical-flick");
+            traceSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/alternative");
             stageSound = Resources.Load<AudioClip>("Gugarhythm/package/audio/stage");
         }
 
@@ -3337,6 +3402,11 @@ namespace Gugarhythm
             persistentHoldHeadUpperHiddenClip = persistentHoldHeadLayer.gameObject.AddComponent<RectMask2D>();
             noteLayer = Layer("Notes", stage);
             noteUpperHiddenClip = noteLayer.gameObject.AddComponent<RectMask2D>();
+            // Pooled note views always SetAsLastSibling on acquire, so
+            // creating the mid particle batches first keeps them permanently
+            // behind every tap/hold-head view without per-frame reordering.
+            holdMidMintBatch = CreateNoteParticleBatch("Hold Mid Mint Batch", holdMidMintTexture);
+            holdMidYellowBatch = CreateNoteParticleBatch("Hold Mid Yellow Batch", holdMidYellowTexture);
             var upperHiddenMaskObject = new GameObject("Upper Hidden Bar", typeof(RectTransform),
                 typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var upperHiddenMaskRect = upperHiddenMaskObject.GetComponent<RectTransform>();
@@ -5712,6 +5782,17 @@ namespace Gugarhythm
             return batch;
         }
 
+        NoteParticleBatchGraphic CreateNoteParticleBatch(string name, Texture2D texture)
+        {
+            var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(NoteParticleBatchGraphic));
+            var rect = go.GetComponent<RectTransform>(); rect.SetParent(noteLayer, false); Fill(rect);
+            var batch = go.GetComponent<NoteParticleBatchGraphic>();
+            batch.raycastTarget = false;
+            batch.texture = texture;
+            batch.color = Color.white;
+            return batch;
+        }
+
         HoldBatchGraphic LegacyHoldBatch(RuntimeConnector connector)
         {
             var missed = IsHoldCurrentlyMissed(connector);
@@ -5721,7 +5802,7 @@ namespace Gugarhythm
 
         HoldBatchGraphic HoldRunBatch(HoldRenderRun run)
         {
-            var missed = IsHoldCurrentlyMissed(run.Path.RootIndex);
+            var missed = IsHoldCurrentlyMissedCached(run.Path.RootIndex);
             if (run.Critical) return missed ? missedHoldYellowBatch : holdYellowBatch;
             return missed ? missedHoldGreenBatch : holdGreenBatch;
         }

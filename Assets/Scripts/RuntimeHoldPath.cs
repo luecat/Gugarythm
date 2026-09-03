@@ -63,6 +63,11 @@ namespace Gugarhythm
         public RuntimeNote Start => Path.Segments[FirstSegmentIndex].Start;
         public RuntimeNote End => Path.Segments[LastSegmentIndex].End;
 
+        // Remembers the tolerance that satisfied the point budget last frame,
+        // so a dense run with a stable point count does not have to re-walk
+        // the doubling ladder from the default every frame.
+        internal float LastSuccessfulTolerance = AdaptiveHoldTessellator.DefaultScreenErrorPixels;
+
         internal HoldRenderRun(int firstSegmentIndex, int lastSegmentIndex, bool critical)
         {
             FirstSegmentIndex = firstSegmentIndex;

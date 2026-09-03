@@ -51,13 +51,24 @@ namespace Gugarhythm
             if (project == null) throw new ArgumentNullException(nameof(project));
             if (output == null) throw new ArgumentNullException(nameof(output));
             if (lastVisibleTime < firstVisibleTime) (firstVisibleTime, lastVisibleTime) = (lastVisibleTime, firstVisibleTime);
-            var tolerance = DefaultScreenErrorPixels;
+            // A run whose visible point count is stable frame to frame (the
+            // common case) settles on one tolerance. Starting the ladder from
+            // last frame's successful value, instead of always from the
+            // default, turns that steady state back into a single attempt.
+            var tolerance = run.LastSuccessfulTolerance;
             for (var attempt = 0; attempt < 8; attempt++)
             {
                 output.Clear();
-                if (BuildProjectedWithTolerance(run, firstVisibleTime, lastVisibleTime, tolerance, project, output)) return;
+                if (BuildProjectedWithTolerance(run, firstVisibleTime, lastVisibleTime, tolerance, project, output))
+                {
+                    run.LastSuccessfulTolerance = output.Count * 4 < MaxPointsPerRun && tolerance > DefaultScreenErrorPixels
+                        ? Mathf.Max(DefaultScreenErrorPixels, tolerance * .5f)
+                        : tolerance;
+                    return;
+                }
                 tolerance *= 2;
             }
+            run.LastSuccessfulTolerance = tolerance;
             BuildCappedFallback(run, firstVisibleTime, lastVisibleTime, fallbackPoints);
             output.Clear();
             foreach (var point in fallbackPoints) output.Add(project(point));

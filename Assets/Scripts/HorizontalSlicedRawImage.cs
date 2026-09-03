@@ -54,12 +54,23 @@ namespace Gugarhythm
         public void SetSurfaceQuad(Vector2 upperLeft, Vector2 upperRight, Vector2 lowerRight, Vector2 lowerLeft,
             float horizontalStart = 0, float horizontalEnd = 1)
         {
+            var clampedStart = Mathf.Clamp01(horizontalStart);
+            var clampedEnd = Mathf.Clamp(horizontalEnd, clampedStart, 1);
+            // Most on-screen notes hold a stationary quad for several frames
+            // (a fully transparent Hold mid in particular). Skip the mesh
+            // rebuild when nothing about the submitted geometry changed.
+            if (useSurfaceQuad &&
+                surfaceUpperLeft == upperLeft && surfaceUpperRight == upperRight &&
+                surfaceLowerRight == lowerRight && surfaceLowerLeft == lowerLeft &&
+                Mathf.Approximately(surfaceHorizontalStart, clampedStart) &&
+                Mathf.Approximately(surfaceHorizontalEnd, clampedEnd))
+                return;
             surfaceUpperLeft = upperLeft;
             surfaceUpperRight = upperRight;
             surfaceLowerRight = lowerRight;
             surfaceLowerLeft = lowerLeft;
-            surfaceHorizontalStart = Mathf.Clamp01(horizontalStart);
-            surfaceHorizontalEnd = Mathf.Clamp(horizontalEnd, surfaceHorizontalStart, 1);
+            surfaceHorizontalStart = clampedStart;
+            surfaceHorizontalEnd = clampedEnd;
             useSurfaceQuad = true;
             SetVerticesDirty();
         }
