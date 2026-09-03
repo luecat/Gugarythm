@@ -5794,21 +5794,6 @@ public static class RuntimeValidation
         Require(Math.Abs(SonolusLandscapePrototype.JudgmentDebugCanvasXAtLane(-6f) + 960f) < .0001f &&
                 Math.Abs(SonolusLandscapePrototype.JudgmentDebugCanvasXAtLane(6f) - 960f) < .0001f,
             "The purple judgment debug region must retain the full canvas width");
-        Require(Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackDuration - .12f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackWidth - 1f) < .0001f &&
-                Math.Abs(SonolusLandscapePrototype.InputLaneFeedbackTop(732f) -
-                         SonolusLandscapePrototype.InputLaneFeedbackBottom(732f) -
-                         SonolusLandscapePrototype.JudgmentInputBandHeight(732f)) < .0001f &&
-                Math.Abs((SonolusLandscapePrototype.InputLaneFeedbackTop(732f) +
-                          SonolusLandscapePrototype.InputLaneFeedbackBottom(732f)) * .5f -
-                         (732f * .5f - 500f)) < .0001f &&
-                SonolusLandscapePrototype.InputLaneFeedbackCell(-6f) == 0 &&
-                SonolusLandscapePrototype.InputLaneFeedbackCell(6f) == VirtualSliderInput.CellCount - 1 &&
-                SonolusLandscapePrototype.InputLaneFeedbackGridCell(0) == 0 &&
-                SonolusLandscapePrototype.InputLaneFeedbackGridCell(1) == 0 &&
-                SonolusLandscapePrototype.InputLaneFeedbackGridCell(2) == 1 &&
-                SonolusLandscapePrototype.InputLaneFeedbackGridCell(VirtualSliderInput.CellCount - 1) == 11,
-            "Input feedback must flash one perspective-aligned button grid for each pair of input half-cells");
     }
 
     static RuntimeNote Note(int index, double time, float lane) => new()

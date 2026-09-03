@@ -368,8 +368,6 @@ namespace Gugarhythm
         const string FastLateDisplayPreferenceKey = "gugarhythm-fast-late-display";
         const string AutoPlayPreferenceKey = "gugarhythm-auto-play";
         const string HitParticleEffectPreferenceKey = "gugarhythm-hit-particle-effect";
-        public const float InputLaneFeedbackDuration = .12f;
-        const int InputLaneFeedbackGridCellCount = VirtualSliderInput.CellCount / 2;
         const float HoldLoopVolume = .55f;
         const float HoldLoopFadeDuration = .04f;
 
@@ -404,8 +402,6 @@ namespace Gugarhythm
         readonly GameplayContactCleanupBuffers contactCleanupBuffers = new();
         readonly GameplayHudState hudState = new();
         readonly VirtualSliderInput virtualSlider = new();
-        readonly TaperedConnectorGraphic[] inputLaneFeedback = new TaperedConnectorGraphic[InputLaneFeedbackGridCellCount];
-        readonly float[] inputLaneFeedbackUntil = new float[InputLaneFeedbackGridCellCount];
         readonly float[] connectorPathSamples = new float[ConnectorPathSegments + 3];
         readonly AdaptiveHoldTessellator holdTessellator = new();
         readonly List<HoldProjectedPoint> holdTessellationPoints = new(AdaptiveHoldTessellator.MaxPointsPerRun);
@@ -708,13 +704,6 @@ namespace Gugarhythm
         public static float JudgmentDebugCellWidth => VirtualSliderInput.CellWidth;
         public static float JudgmentInputBandHeight(float canvasHeight) =>
             JudgmentStripSourceHeight / LaneTextureHeight * canvasHeight;
-        public static float InputLaneFeedbackBottom(float canvasHeight)
-        {
-            var hitY = canvasHeight * .5f - HitSourceY / LaneTextureHeight * canvasHeight;
-            return hitY - JudgmentInputBandHeight(canvasHeight) * .5f;
-        }
-        public static float InputLaneFeedbackTop(float canvasHeight) =>
-            InputLaneFeedbackBottom(canvasHeight) + JudgmentInputBandHeight(canvasHeight);
         public static float JudgmentInputTop(float canvasHeight)
         {
             var hitY = canvasHeight * .5f - HitSourceY / LaneTextureHeight * canvasHeight;
@@ -744,12 +733,6 @@ namespace Gugarhythm
         public static float JudgmentLaneCanvasX(float lane) => X(lane, 1f);
         public static bool ShouldContinueTrackedContact(bool wasTracking, bool isInInputBand) =>
             wasTracking || isInInputBand;
-        public static int InputLaneFeedbackCell(float lane) => VirtualSliderInput.CellAt(lane);
-        // LaneWidth takes a half-width, while the visual feedback is authored
-        // as one full button-width across the track.
-        public static float InputLaneFeedbackWidth => 1f;
-        public static int InputLaneFeedbackGridCell(int inputCell) =>
-            Mathf.Clamp(inputCell / 2, 0, InputLaneFeedbackGridCellCount - 1);
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
@@ -1112,7 +1095,6 @@ namespace Gugarhythm
             UpdatePerformanceHud();
             PollNativeImport();
             UpdateSafeAreaLayout();
-            UpdateInputLaneFeedback();
             UpdateDesktopSpeedControls();
             UpdateLatencyCalibration();
             if (judgmentHideAt >= 0 && Time.unscaledTime >= judgmentHideAt)
@@ -1937,7 +1919,6 @@ namespace Gugarhythm
             bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
-            ClearInputLaneFeedback();
             ReleaseAllViews();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
@@ -1973,7 +1954,6 @@ namespace Gugarhythm
             bufferedTouchSamples.Clear();
             contactPaths.Clear();
             virtualSlider.Reset();
-            ClearInputLaneFeedback();
             ReleaseAllViews();
             RefreshHud();
         }
@@ -3339,7 +3319,6 @@ namespace Gugarhythm
             }
             var missedHoldShader = Shader.Find("Gugarhythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
-            BuildInputLaneFeedback(stage);
             guideLayer = Layer("Decoration Guides", stage);
             // GPU ribbon geometry is static after chart load. A child Canvas keeps
             // unrelated note and input changes from rebuilding the Guide batches.
@@ -3568,79 +3547,6 @@ namespace Gugarhythm
             if (bytes >= 1024 * 1024) return $"{bytes / (1024d * 1024d):0.00} MB";
             if (bytes >= 1024) return $"{bytes / 1024d:0.0} KB";
             return $"{bytes} B";
-        }
-
-        void BuildInputLaneFeedback(RectTransform root)
-        {
-            var layer = Layer("Input Lane Feedback", root);
-            // Input flashes toggle active state for only a few frames. Keep their
-            // rebatching local instead of dirtying the much larger gameplay Canvas.
-            layer.gameObject.AddComponent<Canvas>();
-            for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
-            {
-                var flash = new GameObject($"Input Lane Flash {cell + 1:00}", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic))
-                    .GetComponent<TaperedConnectorGraphic>();
-                flash.rectTransform.SetParent(layer, false);
-                Fill(flash.rectTransform);
-                flash.color = new Color(.25f, .25f, .28f, .42f);
-                flash.drawGlow = false;
-                flash.drawEdges = false;
-                flash.fillAlphaScale = 1;
-                flash.fillAlphaLimit = 1;
-                flash.raycastTarget = false;
-
-                var lane = VirtualSliderInput.MinimumLane + (cell + .5f) * InputLaneFeedbackWidth;
-                var halfWidth = InputLaneFeedbackWidth * .5f;
-                // A press only illuminates its judgment cell.  Drawing the
-                // same track from the vanishing point to the foreground made
-                // the feedback read as a large translucent reflection.
-                var width = X(lane + halfWidth, 1f) - X(lane - halfWidth, 1f);
-                flash.SetGeometry(
-                    new Vector2(X(lane, 1f), InputLaneFeedbackBottom(CanvasHeight)),
-                    new Vector2(X(lane, 1f), InputLaneFeedbackTop(CanvasHeight)),
-                    width, width);
-                flash.gameObject.SetActive(false);
-                inputLaneFeedback[cell] = flash;
-            }
-        }
-
-        void FlashInputLane(float lane)
-        {
-            var inputCell = InputLaneFeedbackCell(lane);
-            if (inputCell < 0 || inputCell >= VirtualSliderInput.CellCount) return;
-            var inputLeftLane = VirtualSliderInput.MinimumLane + inputCell * VirtualSliderInput.CellWidth;
-            var inputRightLane = inputLeftLane + VirtualSliderInput.CellWidth;
-            var inputLeft = CanvasXAtInputLane(inputLeftLane);
-            var inputRight = CanvasXAtInputLane(inputRightLane);
-            for (var track = 0; track < inputLaneFeedback.Length; track++)
-            {
-                var trackLane = VirtualSliderInput.MinimumLane + (track + .5f) * InputLaneFeedbackWidth;
-                var halfWidth = InputLaneFeedbackWidth * .5f;
-                // Highlight every real perspective lane covered by the flat
-                // virtual judgment cell at the purple judgment-strip depth.
-                var trackLeft = X(trackLane - halfWidth, 1f);
-                var trackRight = X(trackLane + halfWidth, 1f);
-                if (trackRight < inputLeft || trackLeft > inputRight) continue;
-                inputLaneFeedbackUntil[track] = Mathf.Max(inputLaneFeedbackUntil[track], Time.unscaledTime + InputLaneFeedbackDuration);
-                inputLaneFeedback[track].gameObject.SetActive(true);
-            }
-        }
-
-        void UpdateInputLaneFeedback()
-        {
-            for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
-                if (inputLaneFeedback[cell] != null && inputLaneFeedback[cell].gameObject.activeSelf &&
-                    Time.unscaledTime >= inputLaneFeedbackUntil[cell])
-                    inputLaneFeedback[cell].gameObject.SetActive(false);
-        }
-
-        void ClearInputLaneFeedback()
-        {
-            for (var cell = 0; cell < inputLaneFeedback.Length; cell++)
-            {
-                inputLaneFeedbackUntil[cell] = 0;
-                if (inputLaneFeedback[cell] != null) inputLaneFeedback[cell].gameObject.SetActive(false);
-            }
         }
 
         void BuildHud(RectTransform root, RectTransform canvasRoot)
