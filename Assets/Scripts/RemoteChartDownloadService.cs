@@ -104,7 +104,7 @@ namespace Gugarhythm
 
                 if (!responseReceived || !response.Success)
                 {
-                    completion.Invoke(Failure(DownloadError));
+                    completion.Invoke(Failure(DownloadError, responseReceived && response.Unauthorized));
                     yield break;
                 }
                 if (response.ContentLength < 0)
@@ -177,24 +177,36 @@ namespace Gugarhythm
             existingEntry = null;
             try
             {
-                if (!links.TryGet(chart.ChartId, chart.Version, out var link) || link == null ||
-                    !string.Equals(link.ChartId, chart.ChartId, StringComparison.Ordinal) ||
-                    link.Version != chart.Version ||
-                    !string.Equals(link.Sha256, chart.Sha256, StringComparison.Ordinal) ||
-                    !string.Equals(link.LocalEntryId, chart.Sha256, StringComparison.Ordinal))
+                if (links.TryGet(chart.ChartId, chart.Version, out var exactLink) && exactLink != null &&
+                    string.Equals(exactLink.ChartId, chart.ChartId, StringComparison.Ordinal) &&
+                    exactLink.Version == chart.Version &&
+                    string.Equals(exactLink.Sha256, chart.Sha256, StringComparison.Ordinal) &&
+                    string.Equals(exactLink.LocalEntryId, chart.Sha256, StringComparison.Ordinal) &&
+                    TryFindLocalEntry(chart.Sha256, out existingEntry))
                     return true;
 
-                var entries = library.Load();
-                if (entries == null) return true;
-                foreach (var entry in entries)
+                existingEntry = null;
+
+                // The GGR content can stay byte-identical across a version bump when only
+                // catalog metadata (title/difficulty/rating/...) changed server-side. Relink
+                // to the copy already on disk instead of redownloading the same bytes.
+                if (links.TryGetLatestForChart(chart.ChartId, out var latestLink) && latestLink != null &&
+                    string.Equals(latestLink.Sha256, chart.Sha256, StringComparison.Ordinal) &&
+                    string.Equals(latestLink.LocalEntryId, chart.Sha256, StringComparison.Ordinal) &&
+                    TryFindLocalEntry(chart.Sha256, out existingEntry))
                 {
-                    if (entry == null ||
-                        !string.Equals(entry.Id, link.LocalEntryId, StringComparison.Ordinal) ||
-                        !string.Equals(entry.Id, chart.Sha256, StringComparison.Ordinal))
-                        continue;
-                    existingEntry = entry;
-                    break;
+                    links.Upsert(new RemoteChartLink
+                    {
+                        ChartId = chart.ChartId,
+                        Version = chart.Version,
+                        Sha256 = chart.Sha256,
+                        LocalEntryId = chart.Sha256,
+                        DownloadedAtUnixMilliseconds = latestLink.DownloadedAtUnixMilliseconds,
+                    });
+                    return true;
                 }
+
+                existingEntry = null;
                 return true;
             }
             catch (Exception)
@@ -202,6 +214,20 @@ namespace Gugarhythm
                 existingEntry = null;
                 return false;
             }
+        }
+
+        bool TryFindLocalEntry(string sha256, out LocalChartEntry entry)
+        {
+            entry = null;
+            var entries = library.Load();
+            if (entries == null) return false;
+            foreach (var candidate in entries)
+            {
+                if (candidate == null || !string.Equals(candidate.Id, sha256, StringComparison.Ordinal)) continue;
+                entry = candidate;
+                return true;
+            }
+            return false;
         }
 
         bool TryCreateTemporaryPath(out string path)
@@ -421,8 +447,8 @@ namespace Gugarhythm
             return true;
         }
 
-        static RemoteChartImportResult Failure(string error) =>
-            new(null, false, string.IsNullOrWhiteSpace(error) ? UnexpectedError : error);
+        static RemoteChartImportResult Failure(string error, bool unauthorized = false) =>
+            new(null, false, string.IsNullOrWhiteSpace(error) ? UnexpectedError : error, unauthorized);
 
         sealed class CompletionGate
         {

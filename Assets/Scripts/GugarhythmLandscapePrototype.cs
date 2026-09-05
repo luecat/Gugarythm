@@ -1,6 +1,7 @@
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
@@ -585,6 +586,7 @@ namespace Gugarhythm
         Button settingsAccountNavigationButton;
         Button settingsAccountLoginButton;
         Button settingsAccountLogoutButton;
+        Button settingsAccountManageButton;
         Button remotePublicScopeButton;
         Button remotePrivateScopeButton;
         Text settingsAccountStatusLabel;
@@ -620,6 +622,11 @@ namespace Gugarhythm
         string chartVaultSessionToken;
         string pendingChartVaultLoginState;
         string pendingChartVaultCodeVerifier;
+        string chartVaultDisplayName;
+        string chartVaultExpiresAt;
+        int chartVaultDeviceCount;
+        bool chartVaultProfileLoading;
+        bool chartVaultSessionExpired;
         LocalChartEntry chartEditorEntry;
         string selectedDifficultyName = "";
         string pendingDifficultyTagDelete;
@@ -837,6 +844,8 @@ namespace Gugarhythm
             var chartVaultStorageRoot = LocalChartLibrary.StorageDirectoryPath;
             chartVaultClient = new ChartVaultClient();
             chartVaultSessionToken = ChartVaultSessionStore.Load();
+            if (!string.IsNullOrEmpty(chartVaultSessionToken))
+                StartCoroutine(RefreshChartVaultProfile());
             if (string.IsNullOrEmpty(chartVaultSessionToken) &&
                 ChartVaultSessionStore.TryLoadPendingLogin(out var savedLoginState, out var savedLoginVerifier))
             {
@@ -4058,6 +4067,8 @@ namespace Gugarhythm
                 StartChartVaultLogin, new Vector2(230, 62), new Color(.06f, .58f, .96f));
             settingsAccountLogoutButton = MakeOutlinedButton("登出", settingsAccountPanel, new Vector2(130, -5),
                 LogoutChartVault, new Vector2(230, 62));
+            settingsAccountManageButton = MakeOutlinedButton("在網站管理帳號", settingsAccountPanel,
+                new Vector2(0, -85), OpenChartVaultAccountPage, new Vector2(470, 56));
             settingsAccountPanel.gameObject.SetActive(false);
             RefreshAccountSettings();
             BuildInputDiagnosticsSettingsSection(navigation);
@@ -4070,7 +4081,9 @@ namespace Gugarhythm
             if (settingsAccountStatusLabel != null)
                 settingsAccountStatusLabel.text = chartVaultLoginPending
                     ? "正在等待登入完成；若流程已中斷，可重新登入。"
-                    : signedIn ? "已登入" : "尚未登入";
+                    : signedIn
+                        ? FormatChartVaultAccountStatus()
+                        : chartVaultSessionExpired ? "登入已過期，請重新登入。" : "尚未登入";
             if (settingsAccountLoginButton != null)
             {
                 settingsAccountLoginButton.gameObject.SetActive(!signedIn);
@@ -4080,11 +4093,36 @@ namespace Gugarhythm
             }
             if (settingsAccountLogoutButton != null)
                 settingsAccountLogoutButton.gameObject.SetActive(signedIn);
+            if (settingsAccountManageButton != null)
+                settingsAccountManageButton.gameObject.SetActive(signedIn);
+        }
+
+        static void OpenChartVaultAccountPage() =>
+            Application.OpenURL(ChartVaultApiSettings.ApiOrigin + "/account");
+
+        string FormatChartVaultAccountStatus()
+        {
+            if (string.IsNullOrEmpty(chartVaultDisplayName)) return "已登入";
+            var status = "已登入為 " + chartVaultDisplayName;
+            var expires = FormatChartVaultExpiresAt(chartVaultExpiresAt);
+            if (!string.IsNullOrEmpty(expires)) status += "（有效至 " + expires + "）";
+            if (chartVaultDeviceCount > 0) status += "，已登入 " + chartVaultDeviceCount + "／5 台裝置";
+            return status;
+        }
+
+        static string FormatChartVaultExpiresAt(string iso)
+        {
+            if (string.IsNullOrEmpty(iso)) return string.Empty;
+            return DateTimeOffset.TryParse(iso, CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind,
+                out var parsed)
+                ? parsed.ToLocalTime().ToString("yyyy-MM-dd HH:mm", CultureInfo.InvariantCulture)
+                : string.Empty;
         }
 
         void StartChartVaultLogin()
         {
             if (!string.IsNullOrEmpty(chartVaultSessionToken)) return;
+            chartVaultSessionExpired = false;
             if (chartVaultLoginPending)
             {
                 chartVaultLoginPending = false;
@@ -4095,7 +4133,8 @@ namespace Gugarhythm
             var state = NewChartVaultToken();
             var verifier = NewChartVaultToken();
             var challenge = ComputeChartVaultPkceChallenge(verifier);
-            if (state == null || verifier == null || challenge == null)
+            var device = SanitizedDeviceLabelToken();
+            if (state == null || verifier == null || challenge == null || device == null)
             {
                 SetStatus("目前無法開始登入，請稍後再試。");
                 return;
@@ -4105,14 +4144,58 @@ namespace Gugarhythm
             chartVaultLoginPending = true;
             ChartVaultSessionStore.SavePendingLogin(state, verifier);
             RefreshAccountSettings();
-            var loginUrl = ChartVaultApiSettings.ApiOrigin + "/app-login?state=" + state + "&code_challenge=" + challenge;
+            var loginUrl = ChartVaultApiSettings.ApiOrigin + "/app-login?state=" + state +
+                "&code_challenge=" + challenge + "&device=" + device + "&platform=" + CurrentChartVaultPlatform();
             Application.OpenURL(loginUrl);
+        }
+
+        static string SanitizedDeviceLabelToken()
+        {
+            var raw = SystemInfo.deviceModel;
+            if (string.IsNullOrEmpty(raw) || raw == SystemInfo.unsupportedIdentifier) raw = SystemInfo.deviceName;
+            if (string.IsNullOrEmpty(raw)) raw = "Unknown Device";
+            var builder = new System.Text.StringBuilder(raw.Length);
+            foreach (var character in raw)
+            {
+                if (char.IsControl(character)) continue;
+                builder.Append(character);
+                if (builder.Length >= 64) break;
+            }
+            var sanitized = builder.ToString().Trim();
+            if (sanitized.Length == 0) sanitized = "Unknown Device";
+            try
+            {
+                var bytes = System.Text.Encoding.UTF8.GetBytes(sanitized);
+                return Convert.ToBase64String(bytes).Replace('+', '-').Replace('/', '_').TrimEnd('=');
+            }
+            catch (Exception)
+            {
+                return null;
+            }
+        }
+
+        static string CurrentChartVaultPlatform()
+        {
+            switch (Application.platform)
+            {
+                case RuntimePlatform.Android: return "android";
+                case RuntimePlatform.IPhonePlayer: return "ios";
+                case RuntimePlatform.OSXEditor:
+                case RuntimePlatform.WindowsEditor:
+                case RuntimePlatform.LinuxEditor:
+                    return "editor";
+                default: return "unknown";
+            }
         }
 
         void LogoutChartVault()
         {
             var tokenToRevoke = chartVaultSessionToken;
             chartVaultSessionToken = null;
+            chartVaultSessionExpired = false;
+            chartVaultDisplayName = null;
+            chartVaultExpiresAt = null;
+            chartVaultDeviceCount = 0;
             ChartVaultSessionStore.Clear();
             chartVaultLoginPending = false;
             pendingChartVaultLoginState = null;
@@ -4211,8 +4294,10 @@ namespace Gugarhythm
             if (completed && result.Success)
             {
                 chartVaultSessionToken = result.SessionToken;
+                chartVaultSessionExpired = false;
                 ChartVaultSessionStore.Save(chartVaultSessionToken);
                 SetStatus("帳號已登入。");
+                StartCoroutine(RefreshChartVaultProfile());
             }
             else
             {
@@ -4220,6 +4305,85 @@ namespace Gugarhythm
             }
             RefreshAccountSettings();
             RefreshLibraryUI();
+        }
+
+        IEnumerator RefreshChartVaultProfile()
+        {
+            var token = chartVaultSessionToken;
+            if (string.IsNullOrEmpty(token) || chartVaultProfileLoading) yield break;
+            chartVaultProfileLoading = true;
+            var completed = false;
+            var result = default(ChartVaultAppSessionResult);
+            IEnumerator operation = null;
+            try
+            {
+                operation = chartVaultClient?.GetAppSession(token, value =>
+                {
+                    if (destroying || completed) return;
+                    result = value;
+                    completed = true;
+                });
+            }
+            catch (Exception) { }
+            while (operation != null)
+            {
+                object current;
+                try
+                {
+                    if (!operation.MoveNext()) break;
+                    current = operation.Current;
+                }
+                catch (Exception) { break; }
+                yield return current;
+            }
+            if (operation is IDisposable disposable)
+                try { disposable.Dispose(); } catch (Exception) { }
+
+            chartVaultProfileLoading = false;
+            if (destroying || token != chartVaultSessionToken) yield break;
+            if (completed && result.Success)
+            {
+                chartVaultDisplayName = result.DisplayName;
+                chartVaultExpiresAt = result.ExpiresAt;
+                chartVaultDeviceCount = result.DeviceCount;
+                RefreshAccountSettings();
+            }
+            else if (completed && result.Unauthorized)
+            {
+                HandleChartVaultUnauthorized();
+            }
+        }
+
+        // A 401 from any App-authenticated request means the Bearer token is no
+        // longer valid (expired, or revoked from the website's account page).
+        // This is the single place that reacts: clear the token and every piece
+        // of private-scope state that token unlocked, without touching charts
+        // already saved to LocalChartLibrary — those were validated and copied
+        // in at download time and do not depend on the session being alive.
+        void HandleChartVaultUnauthorized()
+        {
+            if (string.IsNullOrEmpty(chartVaultSessionToken)) return;
+            chartVaultSessionToken = null;
+            chartVaultSessionExpired = true;
+            chartVaultDisplayName = null;
+            chartVaultExpiresAt = null;
+            chartVaultDeviceCount = 0;
+            ChartVaultSessionStore.Clear();
+            var wasPrivateScope = remoteCatalogScope == RemoteChartCatalogScope.Private;
+            remoteCatalogScope = RemoteChartCatalogScope.Public;
+            remoteCatalog = null;
+            selectedRemoteChart = null;
+            remoteOperationGeneration++;
+            remoteCoverGeneration++;
+            ClearRemoteCoverTexture();
+            RefreshAccountSettings();
+            RefreshLibraryUI();
+            if (wasPrivateScope)
+            {
+                SetStatus("登入已過期，請重新登入。");
+                if (librarySource == ChartLibrarySource.Online)
+                    StartCoroutine(RefreshRemoteCatalog(false));
+            }
         }
 
         static string NewChartVaultToken()
@@ -4688,6 +4852,11 @@ namespace Gugarhythm
             if (destroying || generation != remoteOperationGeneration) yield break;
             remoteCatalogLoading = false;
             RefreshLibrarySourceControls();
+            if (resultReceived && result.Unauthorized)
+            {
+                HandleChartVaultUnauthorized();
+                yield break;
+            }
             if (operationFailed || !resultReceived || !result.Success)
             {
                 if (librarySource == ChartLibrarySource.Online)
@@ -4976,7 +5145,7 @@ namespace Gugarhythm
                 detailArtistLabel.text = RemoteText(selectedRemoteChart.Artist) + " · 譜師 " +
                     RemoteText(selectedRemoteChart.Author);
                 detailDifficultyLabel.text = FormatRemoteDifficulty(selectedRemoteChart) + " · v" +
-                    selectedRemoteChart.Version + " · 公開";
+                    selectedRemoteChart.Version + " · " + (selectedRemoteChart.IsPrivate ? "私人" : "公開");
                 detailAccuracyLabel.text = string.Empty;
                 ShowRemoteCover(remoteCoverTexture);
             }
@@ -5117,6 +5286,11 @@ namespace Gugarhythm
             if (destroying || generation != remoteOperationGeneration) yield break;
             remoteChartDownloading = false;
             RefreshLibrarySourceControls();
+            if (resultReceived && result.Unauthorized)
+            {
+                HandleChartVaultUnauthorized();
+                yield break;
+            }
             if (operationFailed || !resultReceived || !result.Success || result.LocalEntry == null)
             {
                 if (librarySource == ChartLibrarySource.Online)

@@ -23,11 +23,14 @@ namespace Gugarhythm
         [JsonProperty("difficulty")] public string Difficulty;
         [JsonProperty("rating")] public float Rating;
         [JsonProperty("offset")] public double Offset;
+        [JsonProperty("visibility")] public string Visibility;
         [JsonProperty("updatedAt")] public string UpdatedAt;
         [JsonProperty("sha256")] public string Sha256;
         [JsonProperty("sizeBytes")] public long SizeBytes;
         [JsonProperty("coverUrl")] public string CoverUrl;
         [JsonProperty("downloadUrl")] public string DownloadUrl;
+
+        public bool IsPrivate => Visibility == "private";
     }
 
     [Serializable]
@@ -48,12 +51,14 @@ namespace Gugarhythm
     {
         public readonly RemoteChartCatalog Catalog;
         public readonly string Error;
+        public readonly bool Unauthorized;
         public bool Success => Catalog != null && string.IsNullOrEmpty(Error);
 
-        public ChartVaultCatalogResult(RemoteChartCatalog catalog, string error)
+        public ChartVaultCatalogResult(RemoteChartCatalog catalog, string error, bool unauthorized = false)
         {
             Catalog = catalog;
             Error = error;
+            Unauthorized = unauthorized;
         }
     }
 
@@ -62,13 +67,15 @@ namespace Gugarhythm
         public readonly string Error;
         public readonly long ContentLength;
         public readonly string Sha256Header;
+        public readonly bool Unauthorized;
         public bool Success => string.IsNullOrEmpty(Error);
 
-        public ChartVaultDownloadResult(string error, long contentLength, string sha256Header)
+        public ChartVaultDownloadResult(string error, long contentLength, string sha256Header, bool unauthorized = false)
         {
             Error = error;
             ContentLength = contentLength;
             Sha256Header = sha256Header;
+            Unauthorized = unauthorized;
         }
     }
 
@@ -85,18 +92,41 @@ namespace Gugarhythm
         }
     }
 
+    public readonly struct ChartVaultAppSessionResult
+    {
+        public readonly string DisplayName;
+        public readonly string ExpiresAt;
+        public readonly int DeviceCount;
+        public readonly string Error;
+        public readonly bool Unauthorized;
+        public bool Success => !string.IsNullOrEmpty(DisplayName) && string.IsNullOrEmpty(Error);
+
+        public ChartVaultAppSessionResult(string displayName, string expiresAt, int deviceCount, string error,
+            bool unauthorized = false)
+        {
+            DisplayName = displayName;
+            ExpiresAt = expiresAt;
+            DeviceCount = deviceCount;
+            Error = error;
+            Unauthorized = unauthorized;
+        }
+    }
+
     public readonly struct RemoteChartImportResult
     {
         public readonly LocalChartEntry LocalEntry;
         public readonly bool AlreadyDownloaded;
         public readonly string Error;
+        public readonly bool Unauthorized;
         public bool Success => LocalEntry != null && string.IsNullOrEmpty(Error);
 
-        public RemoteChartImportResult(LocalChartEntry localEntry, bool alreadyDownloaded, string error)
+        public RemoteChartImportResult(LocalChartEntry localEntry, bool alreadyDownloaded, string error,
+            bool unauthorized = false)
         {
             LocalEntry = localEntry;
             AlreadyDownloaded = alreadyDownloaded;
             Error = error;
+            Unauthorized = unauthorized;
         }
     }
 
@@ -115,6 +145,7 @@ namespace Gugarhythm
         IEnumerator ExchangeAppLoginHandoff(string code, string codeVerifier,
             Action<ChartVaultSessionResult> complete);
         IEnumerator LogoutAppSession(string sessionToken, Action<bool> complete);
+        IEnumerator GetAppSession(string sessionToken, Action<ChartVaultAppSessionResult> complete);
     }
 
     public interface IChartVaultFileStore
@@ -137,6 +168,7 @@ namespace Gugarhythm
     public interface IRemoteChartLinkStore
     {
         bool TryGet(string chartId, int version, out RemoteChartLink link);
+        bool TryGetLatestForChart(string chartId, out RemoteChartLink link);
         void Upsert(RemoteChartLink link);
     }
 
@@ -154,7 +186,7 @@ namespace Gugarhythm
     {
         public const string ApiOrigin = "https://gugarhythm.luecat.com";
         public const string PublicCatalogPath = "/api/v1/charts?scope=public&limit=30";
-        public const string PrivateCatalogPath = "/api/v1/charts?scope=mine&limit=30";
+        public const string PrivateCatalogPath = "/api/v1/charts?scope=mine&visibility=private&limit=30";
         public const long MaxGgrBytes = 48L * 1024L * 1024L;
 
         const string ApiPathPrefix = "/api/v1/";
@@ -164,8 +196,9 @@ namespace Gugarhythm
         public static string BuildCatalogPath(RemoteChartCatalogScope scope, int limit, string cursor)
         {
             if (limit < 1 || limit > 50) throw new ArgumentOutOfRangeException(nameof(limit));
-            var suffix = scope == RemoteChartCatalogScope.Private ? "mine" : "public";
-            var path = "/api/v1/charts?scope=" + suffix + "&limit=" + limit;
+            var path = scope == RemoteChartCatalogScope.Private
+                ? "/api/v1/charts?scope=mine&visibility=private&limit=" + limit
+                : "/api/v1/charts?scope=public&limit=" + limit;
             if (!string.IsNullOrWhiteSpace(cursor))
                 path += "&cursor=" + Uri.EscapeDataString(cursor);
             return path;
@@ -292,6 +325,8 @@ namespace Gugarhythm
                     return Fail(out error, "遠端譜面版本無效。");
                 if (chart.SizeBytes < 0 || chart.SizeBytes > ChartVaultApiSettings.MaxGgrBytes)
                     return Fail(out error, "遠端譜面檔案大小無效。");
+                if (chart.Visibility != "public" && chart.Visibility != "private")
+                    return Fail(out error, "遠端譜面可見度無效。");
                 if (!IsFinite(chart.Rating) || !IsFinite(chart.Offset))
                     return Fail(out error, "遠端譜面數值無效。");
                 if (!IsLowercaseSha256(chart.Sha256))

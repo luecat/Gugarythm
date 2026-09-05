@@ -1746,7 +1746,7 @@ public static class RuntimeValidation
         const string sha256 = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
         const string json = "{\"charts\":[{\"chartId\":\"chart_a\",\"version\":1," +
             "\"title\":\"Test\",\"artist\":\"Artist\",\"author\":\"Author\",\"difficulty\":\"MASTER\"," +
-            "\"rating\":15,\"offset\":0,\"updatedAt\":\"2026-08-27T00:00:00.000Z\"," +
+            "\"rating\":15,\"offset\":0,\"visibility\":\"public\",\"updatedAt\":\"2026-08-27T00:00:00.000Z\"," +
             "\"sha256\":\"" + sha256 + "\",\"sizeBytes\":123456,\"coverUrl\":null," +
             "\"downloadUrl\":\"/api/v1/charts/chart_a/versions/1/ggr\",\"futureField\":true}]," +
             "\"nextCursor\":null,\"cachedAtUnixMilliseconds\":999,\"futureCatalogField\":true}";
@@ -1756,7 +1756,7 @@ public static class RuntimeValidation
         Require(chart.ChartId == "chart_a" && chart.Version == 1 &&
                 chart.Title == "Test" && chart.Artist == "Artist" && chart.Author == "Author" &&
                 chart.Difficulty == "MASTER" && Math.Abs(chart.Rating - 15f) < .0001f &&
-                Math.Abs(chart.Offset) < .0001d &&
+                Math.Abs(chart.Offset) < .0001d && chart.Visibility == "public" && !chart.IsPrivate &&
                 chart.UpdatedAt == "2026-08-27T00:00:00.000Z" && chart.Sha256 == sha256 &&
                 chart.SizeBytes == 123456 && chart.CoverUrl == null &&
                 chart.DownloadUrl == "/api/v1/charts/chart_a/versions/1/ggr" && catalog.NextCursor == null &&
@@ -1766,6 +1766,20 @@ public static class RuntimeValidation
                 "/api/v1/charts?scope=public&limit=30", out var catalogUri) &&
                 catalogUri.AbsoluteUri == "https://gugarhythm.luecat.com/api/v1/charts?scope=public&limit=30",
             "Catalog paths under the configured API root must resolve");
+
+        // The App's private catalog request must always scope itself to the
+        // caller's own private charts. A regression here (e.g. dropping
+        // visibility=private) would make the App's "private" tab silently show
+        // the owner's public charts too, which is a Chart Vault-side privacy bug.
+        Require(ChartVaultApiSettings.PrivateCatalogPath.Contains("scope=mine") &&
+                ChartVaultApiSettings.PrivateCatalogPath.Contains("visibility=private"),
+            "The private catalog path constant must request scope=mine with visibility=private");
+        Require(ChartVaultApiSettings.BuildCatalogPath(RemoteChartCatalogScope.Private, 30, null)
+                .Contains("visibility=private"),
+            "Building a private catalog path must always include visibility=private");
+        Require(!ChartVaultApiSettings.BuildCatalogPath(RemoteChartCatalogScope.Public, 30, null)
+                .Contains("visibility="),
+            "Building a public catalog path must never carry a visibility filter");
 
         foreach (var unsafePath in new[]
                  {
@@ -1789,6 +1803,16 @@ public static class RuntimeValidation
         var unsafeDownload = json.Replace("/api/v1/charts/chart_a/versions/1/ggr", "https://evil.invalid/a.ggr");
         Require(!RemoteChartCatalogCodec.TryParse(unsafeDownload, out _, out _),
             "Catalog parsing must reject unsafe download paths");
+        var missingVisibility = json.Replace("\"visibility\":\"public\",", string.Empty);
+        Require(!RemoteChartCatalogCodec.TryParse(missingVisibility, out _, out _),
+            "Catalog parsing must reject a chart missing its visibility field");
+        var badVisibility = json.Replace("\"visibility\":\"public\"", "\"visibility\":\"secret\"");
+        Require(!RemoteChartCatalogCodec.TryParse(badVisibility, out _, out _),
+            "Catalog parsing must reject a chart with an unrecognized visibility value");
+        var privateChart = json.Replace("\"visibility\":\"public\"", "\"visibility\":\"private\"");
+        Require(RemoteChartCatalogCodec.TryParse(privateChart, out var privateCatalog, out error) &&
+                privateCatalog.Charts[0].IsPrivate,
+            "Catalog parsing must recognize a private chart");
         Require(RemoteChartCatalogCodec.TryParse("{\"nextCursor\":null}", out var emptyCatalog, out error) &&
                 emptyCatalog.Charts.Count == 0,
             "An omitted charts field must produce an empty catalog");
@@ -1910,6 +1934,7 @@ public static class RuntimeValidation
                         Difficulty = "MASTER",
                         Rating = 15,
                         Offset = 0,
+                        Visibility = "public",
                         UpdatedAt = "2026-08-27T00:00:00.000Z",
                         Sha256 = hashA,
                         SizeBytes = 123456,
@@ -1939,6 +1964,48 @@ public static class RuntimeValidation
                 "Writing the same remote chart/version must replace its link instead of creating a duplicate");
             Require(store.Load().Count == 1,
                 "Remote link persistence must key links by chart ID and version");
+
+            // Private-scope catalogs must never touch disk. This is the one
+            // structural guard standing between a coding mistake elsewhere and a
+            // real privacy leak: a private chart written to this cache would
+            // survive logout and be readable by anything with device access.
+            var privateGuardThrew = false;
+            try
+            {
+                cache.Save(new RemoteChartCatalog
+                {
+                    CachedAtUnixMilliseconds = expectedCachedAt,
+                    Charts = new List<RemoteChartSummary>
+                    {
+                        new()
+                        {
+                            ChartId = "chart_private",
+                            Version = 1,
+                            Title = "Private Test",
+                            Artist = "Artist",
+                            Author = "Author",
+                            Difficulty = "MASTER",
+                            Rating = 15,
+                            Offset = 0,
+                            Visibility = "private",
+                            UpdatedAt = "2026-08-27T00:00:00.000Z",
+                            Sha256 = hashB,
+                            SizeBytes = 123456,
+                            CoverUrl = null,
+                            DownloadUrl = "/api/v1/charts/chart_private/versions/1/ggr",
+                        },
+                    },
+                });
+            }
+            catch (InvalidOperationException)
+            {
+                privateGuardThrew = true;
+            }
+            Require(privateGuardThrew,
+                "RemoteChartCatalogCache.Save must refuse a catalog containing a private-visibility chart");
+            Require(cache.TryLoad(out var afterGuardCatalog) && afterGuardCatalog.Charts.Count == 1 &&
+                    afterGuardCatalog.Charts[0].ChartId == "chart_a",
+                "A rejected private-catalog save must leave the previously cached public catalog untouched");
 
             File.WriteAllText(catalogPath, "{ malformed");
             File.WriteAllText(linksPath, "{ malformed");
@@ -2048,6 +2115,54 @@ public static class RuntimeValidation
             "A matching remote link whose local entry is missing must redownload, save, and replace the link");
         Require(staleFiles.CreatedPaths == 1 && staleFiles.DeleteCalls == 1 && staleFiles.LivePaths == 0,
             "A stale-link redownload must delete its temporary GGR");
+
+        var metadataBumpFiles = new RemoteDownloadValidationFileStore();
+        var metadataBumpClient = new RemoteDownloadValidationClient(metadataBumpFiles, fixtureBytes,
+            new ChartVaultDownloadResult(string.Empty, testGgrSize, testGgrSha256));
+        var metadataBumpImporter = new CountingChartImporter(new GgrChartImporter());
+        var metadataBumpLibrary = new RemoteDownloadValidationLibrary { SaveEntryId = testGgrSha256 };
+        metadataBumpLibrary.Save("Test.ggr", fixtureBytes, new GgrChartImporter().Import("Test.ggr", fixtureBytes).Chart, "existing-test-group");
+        var metadataBumpSaveCallsBeforeDownload = metadataBumpLibrary.SaveCalls;
+        var metadataBumpLinks = new RemoteDownloadValidationLinkStore();
+        metadataBumpLinks.Seed(new RemoteChartLink
+        {
+            ChartId = "chart_test",
+            Version = 1,
+            Sha256 = testGgrSha256,
+            LocalEntryId = testGgrSha256,
+            DownloadedAtUnixMilliseconds = downloadedAt - 1,
+        });
+        var metadataBumpService = new RemoteChartDownloadService(metadataBumpClient, metadataBumpFiles,
+            metadataBumpImporter, metadataBumpLibrary, metadataBumpLinks, () => downloadedAt);
+        var metadataBumpSummary = new RemoteChartSummary
+        {
+            ChartId = "chart_test",
+            Version = 2,
+            Title = "Test",
+            Artist = "GUGArhythm",
+            Author = "Aurora",
+            Difficulty = "TEST",
+            Rating = 3,
+            Offset = 0,
+            UpdatedAt = "2026-09-01T00:00:00.000Z",
+            Sha256 = testGgrSha256,
+            SizeBytes = testGgrSize,
+            CoverUrl = null,
+            DownloadUrl = "/api/v1/charts/chart_test/versions/2/ggr",
+        };
+        var metadataBumpResult = RunRemoteChartDownload(metadataBumpService, metadataBumpSummary,
+            out var metadataBumpCallbacks);
+        Require(metadataBumpCallbacks == 1 && metadataBumpResult.Success && metadataBumpResult.AlreadyDownloaded &&
+                metadataBumpResult.LocalEntry.Id == testGgrSha256 && metadataBumpClient.DownloadCalls == 0 &&
+                metadataBumpImporter.ImportCalls == 0 &&
+                metadataBumpLibrary.SaveCalls == metadataBumpSaveCallsBeforeDownload,
+            "A version bump whose GGR hash is unchanged (a metadata-only update) must relink the existing copy instead of redownloading it");
+        Require(metadataBumpLinks.UpsertCalls == 1 && metadataBumpLinks.LastUpsert.Version == 2 &&
+                metadataBumpLinks.LastUpsert.Sha256 == testGgrSha256 &&
+                metadataBumpLinks.LastUpsert.LocalEntryId == testGgrSha256,
+            "Relinking a metadata-only update must record the new version against the same local entry");
+        Require(metadataBumpFiles.CreatedPaths == 0 && metadataBumpFiles.DeleteCalls == 0,
+            "A metadata-only relink must never create or delete a temporary GGR");
 
         var overLimitFiles = new RemoteDownloadValidationFileStore();
         var overLimitClient = new RemoteDownloadValidationClient(overLimitFiles, fixtureBytes,
@@ -2261,6 +2376,12 @@ public static class RuntimeValidation
             yield break;
         }
 
+        public IEnumerator GetAppSession(string sessionToken, Action<ChartVaultAppSessionResult> complete)
+        {
+            complete?.Invoke(new ChartVaultAppSessionResult(null, null, 0, "unused"));
+            yield break;
+        }
+
     }
 
     sealed class RemoteDownloadValidationFileStore : IChartVaultFileStore
@@ -2402,6 +2523,15 @@ public static class RuntimeValidation
 
         public bool TryGet(string chartId, int version, out RemoteChartLink link) =>
             stored.TryGetValue(Key(chartId, version), out link);
+
+        public bool TryGetLatestForChart(string chartId, out RemoteChartLink link)
+        {
+            link = stored.Values
+                .Where(candidate => string.Equals(candidate.ChartId, chartId, StringComparison.Ordinal))
+                .OrderByDescending(candidate => candidate.Version)
+                .FirstOrDefault();
+            return link != null;
+        }
 
         public void Upsert(RemoteChartLink link)
         {

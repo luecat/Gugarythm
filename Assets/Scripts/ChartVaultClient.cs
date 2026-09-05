@@ -12,7 +12,6 @@ namespace Gugarhythm
 {
     public sealed class ChartVaultClient : IChartVaultClient
     {
-        const string SessionCookieName = "__Host-ggr_session";
         const ulong MaxCatalogResponseBytes = 1024UL * 1024UL;
         const int MaxChartIdLength = 128;
         const string CatalogDownloadError = "無法取得遠端譜面清單，請稍後再試。";
@@ -24,6 +23,7 @@ namespace Gugarhythm
         const string GgrDownloadError = "遠端譜面下載失敗，請稍後再試。";
         const string CoverDownloadError = "遠端譜面封面下載失敗，請稍後再試。";
         const string AppLoginExchangeError = "登入交接失敗，請回到遊戲後重新登入。";
+        const string AppSessionInfoError = "無法取得帳號資訊，請重新登入。";
 
         readonly int timeoutSeconds;
 
@@ -50,7 +50,7 @@ namespace Gugarhythm
                 var uri = new Uri(ChartVaultApiSettings.ApiOrigin +
                                   ChartVaultApiSettings.BuildCatalogPath(scope, 30, null), UriKind.Absolute);
                 request = UnityWebRequest.Get(uri);
-                ApplySessionCookie(request, sessionToken);
+                ApplyBearer(request, sessionToken);
                 request.timeout = timeoutSeconds;
                 request.disposeDownloadHandlerOnDispose = true;
                 operation = request.SendWebRequest();
@@ -103,7 +103,7 @@ namespace Gugarhythm
                     disposeDownloadHandlerOnDispose = true,
                 };
                 handler = null;
-                ApplySessionCookie(request, sessionToken);
+                ApplyBearer(request, sessionToken);
                 operation = request.SendWebRequest();
             }
             catch (Exception)
@@ -155,7 +155,7 @@ namespace Gugarhythm
                 request = UnityWebRequestTexture.GetTexture(uri, true);
                 request.timeout = timeoutSeconds;
                 request.disposeDownloadHandlerOnDispose = true;
-                ApplySessionCookie(request, sessionToken);
+                ApplyBearer(request, sessionToken);
                 operation = request.SendWebRequest();
             }
             catch (Exception)
@@ -255,6 +255,63 @@ namespace Gugarhythm
             complete?.Invoke(request.result == UnityWebRequest.Result.Success);
         }
 
+        public IEnumerator GetAppSession(string sessionToken, Action<ChartVaultAppSessionResult> complete)
+        {
+            var completion = new CompletionGate<ChartVaultAppSessionResult>(complete);
+            if (!IsSessionToken(sessionToken) ||
+                !ChartVaultApiSettings.TryResolveApiPath("/api/v1/app-session", out var uri))
+            {
+                completion.Invoke(new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError));
+                yield break;
+            }
+
+            UnityWebRequest request = null;
+            UnityWebRequestAsyncOperation operation;
+            try
+            {
+                request = UnityWebRequest.Get(uri);
+                request.SetRequestHeader("Authorization", "Bearer " + sessionToken);
+                request.timeout = timeoutSeconds;
+                request.disposeDownloadHandlerOnDispose = true;
+                operation = request.SendWebRequest();
+            }
+            catch (Exception)
+            {
+                SafeDispose(request);
+                completion.Invoke(new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError));
+                yield break;
+            }
+
+            yield return operation;
+            try
+            {
+                completion.Invoke(ReadAppSessionResult(request));
+            }
+            catch (Exception)
+            {
+                completion.Invoke(new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError));
+            }
+            finally
+            {
+                SafeDispose(request);
+                if (!completion.Invoked)
+                    completion.Invoke(new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError));
+            }
+        }
+
+        static ChartVaultAppSessionResult ReadAppSessionResult(UnityWebRequest request)
+        {
+            if (request != null && request.responseCode == 401)
+                return new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError, true);
+            if (!RequestSucceeded(request) || request.downloadHandler == null)
+                return new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError);
+            var payload = JsonConvert.DeserializeObject<AppSessionResponse>(request.downloadHandler.text);
+            return payload?.Player != null && !string.IsNullOrEmpty(payload.Player.DisplayName)
+                ? new ChartVaultAppSessionResult(payload.Player.DisplayName, payload.ExpiresAt, payload.DeviceCount,
+                    string.Empty)
+                : new ChartVaultAppSessionResult(null, null, 0, AppSessionInfoError);
+        }
+
         internal static bool TryPrepareDownload(RemoteChartSummary chart, string destinationPath,
             out Uri uri, out string error)
         {
@@ -287,6 +344,8 @@ namespace Gugarhythm
         {
             try
             {
+                if (request != null && request.responseCode == 401)
+                    return new ChartVaultCatalogResult(null, CatalogDownloadError, true);
                 if (!RequestSucceeded(request) || request.downloadHandler == null ||
                     request.downloadedBytes == 0 || request.downloadedBytes > MaxCatalogResponseBytes)
                     return CatalogFailure(CatalogDownloadError);
@@ -306,6 +365,8 @@ namespace Gugarhythm
         {
             try
             {
+                if (request != null && request.responseCode == 401)
+                    return new ChartVaultDownloadResult(GgrDownloadError, -1, null, true);
                 if (!RequestSucceeded(request)) return DownloadFailure(GgrDownloadError);
                 var contentLength = TryParseGgrSizeHeaders(
                     request.GetResponseHeader("Content-Length"), request.GetResponseHeader("X-GGR-Size"),
@@ -394,10 +455,17 @@ namespace Gugarhythm
         static bool RequestSucceeded(UnityWebRequest request) =>
             request != null && request.result == UnityWebRequest.Result.Success;
 
-        static void ApplySessionCookie(UnityWebRequest request, string sessionToken)
+        // App sessions are Bearer-only. They must never be sent as the website's
+        // __Host-ggr_session Cookie: that cookie authenticates full read/write
+        // website sessions, while a Bearer token only resolves through
+        // resolveReader() into the read-only charts:read scope. Sending an App
+        // token as a Cookie would not upgrade its privileges (the backend keeps
+        // app_sessions and sessions in separate tables), but it also must never
+        // be relied upon — Bearer is the only supported channel for the App.
+        static void ApplyBearer(UnityWebRequest request, string sessionToken)
         {
             if (request == null || !IsSessionToken(sessionToken)) return;
-            request.SetRequestHeader("Cookie", SessionCookieName + "=" + sessionToken);
+            request.SetRequestHeader("Authorization", "Bearer " + sessionToken);
         }
 
         static bool IsValidChartId(string value)
@@ -466,6 +534,20 @@ namespace Gugarhythm
         sealed class AppLoginExchangeResponse
         {
             [JsonProperty("sessionToken")] public string SessionToken;
+        }
+
+        [Serializable]
+        sealed class AppSessionResponse
+        {
+            [JsonProperty("player")] public AppSessionPlayer Player;
+            [JsonProperty("expiresAt")] public string ExpiresAt;
+            [JsonProperty("deviceCount")] public int DeviceCount;
+        }
+
+        [Serializable]
+        sealed class AppSessionPlayer
+        {
+            [JsonProperty("displayName")] public string DisplayName;
         }
 
         sealed class CompletionGate<T>

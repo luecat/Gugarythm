@@ -53,6 +53,15 @@ namespace Gugarhythm
             if (catalog == null) throw new ArgumentNullException(nameof(catalog));
             if (catalog.CachedAtUnixMilliseconds < 0)
                 throw new ArgumentException("Cache timestamp cannot be negative.", nameof(catalog));
+            if (ContainsPrivateChart(catalog))
+            {
+#if UNITY_EDITOR
+                throw new InvalidOperationException(
+                    "RemoteChartCatalogCache.Save must never persist a private-scope catalog to disk.");
+#else
+                return;
+#endif
+            }
             if (!RemoteChartCatalogCodec.TryParse(JsonConvert.SerializeObject(catalog), out _, out var error))
                 throw new ArgumentException(error, nameof(catalog));
 
@@ -63,6 +72,14 @@ namespace Gugarhythm
                 Catalog = catalog,
             };
             ChartVaultAtomicJsonFile.Write(path, JsonConvert.SerializeObject(cache, Formatting.Indented));
+        }
+
+        static bool ContainsPrivateChart(RemoteChartCatalog catalog)
+        {
+            if (catalog.Charts == null) return false;
+            foreach (var chart in catalog.Charts)
+                if (chart != null && chart.IsPrivate) return true;
+            return false;
         }
     }
 }

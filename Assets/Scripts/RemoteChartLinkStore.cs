@@ -43,6 +43,23 @@ namespace Gugarhythm
             }
         }
 
+        public bool TryGetLatestForChart(string chartId, out RemoteChartLink link)
+        {
+            link = null;
+            if (string.IsNullOrWhiteSpace(chartId)) return false;
+
+            lock (sync)
+            {
+                var found = LoadFromDisk()
+                    .Where(candidate => string.Equals(candidate.ChartId, chartId, StringComparison.Ordinal))
+                    .OrderByDescending(candidate => candidate.Version)
+                    .FirstOrDefault();
+                if (found == null) return false;
+                link = Copy(found);
+                return true;
+            }
+        }
+
         public void Upsert(RemoteChartLink link)
         {
             if (!IsValid(link)) throw new ArgumentException("Remote chart link is invalid.", nameof(link));
