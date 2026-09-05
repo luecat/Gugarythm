@@ -159,10 +159,12 @@ namespace Gugarhythm
                 fallbackReason = "GPU ribbon initialization is missing chart or Canvas state.";
                 return false;
             }
-            // Guide geometry is immutable after chart load. Hold bodies still
-            // require CPU runtime clipping/tessellation for reversing or
-            // discontinuous TimeScale, hard corners, and fallback connectors.
-            // Keep the hybrid ownership boundary deterministic for every chart.
+            // Guide geometry is immutable after chart load. Hold runs that
+            // fail GpuRibbonHoldRouting (TimeScale reversal/discontinuity) and
+            // fallback connectors still require CPU runtime clipping —
+            // GugarhythmLandscapePrototype mixes GPU and CPU rendering per
+            // run at draw time (see exactCpuHoldRuns), matching how Guides
+            // already mix per guide via exactCpuGuides.
             var renderGuides = false;
             foreach (var guide in chart.Guides)
             {
@@ -171,7 +173,18 @@ namespace Gugarhythm
                 renderGuides = true;
                 break;
             }
-            const bool renderHolds = false;
+            var renderHolds = false;
+            foreach (var path in chart.HoldPaths)
+            {
+                if (path == null) continue;
+                foreach (var run in path.RenderRuns)
+                {
+                    if (GpuRibbonHoldRouting.RequiresCpu(chart, path, run)) continue;
+                    renderHolds = true;
+                    break;
+                }
+                if (renderHolds) break;
+            }
             if (!renderGuides)
             {
                 fallbackReason = "GPU Guide renderer has no decoration paths; using the CPU Hold renderer.";

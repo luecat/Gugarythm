@@ -47,13 +47,71 @@ namespace Gugarhythm
         }
     }
 
+    // Mirrors GpuRibbonGuideRouting's reasoning for Hold bodies. Only the two
+    // provably-safe conditions are checked here: a coarse GPU mesh edge must
+    // not represent a TimeScale reversal (the mesh is ordered by authored
+    // time, so a backwards jump draws the ribbon inside out) or a jump wider
+    // than one fast-scroll approach window (an extreme TimeScale could
+    // otherwise interpolate an entire visible span from one edge). A run
+    // failing either check keeps rendering on the CPU adaptive path exactly
+    // as it always has. Curved-lane "hard corner" faceting is not routed
+    // here — verifying a screen-space tolerance safely needs the runtime
+    // perspective projection, which isn't available at chart-load time —
+    // and is instead bounded by raising HoldSubdivisionCount to match
+    // Guide's already-proven density.
+    public static class GpuRibbonHoldRouting
+    {
+        public const double MaximumGpuVisualStep = GpuRibbonGuideRouting.MaximumGpuVisualStep;
+
+        public static bool RequiresCpu(RuntimeChart chart, RuntimeHoldPath path, HoldRenderRun run)
+        {
+            if (chart == null || path == null || run == null) return true;
+            if (run.FirstSegmentIndex < 0 || run.LastSegmentIndex < run.FirstSegmentIndex ||
+                run.LastSegmentIndex >= path.Segments.Count) return true;
+
+            var previous = double.NaN;
+            for (var segmentIndex = run.FirstSegmentIndex; segmentIndex <= run.LastSegmentIndex; segmentIndex++)
+            {
+                var segment = path.Segments[segmentIndex];
+                if (segment?.Start == null || segment.End == null) return true;
+                var group = string.IsNullOrEmpty(segment.Start.TimeScaleGroup)
+                    ? segment.End.TimeScaleGroup : segment.Start.TimeScaleGroup;
+                group = string.IsNullOrEmpty(group) ? chart.DefaultTimeScaleGroup ?? string.Empty : group;
+
+                var progressValues = new SortedSet<float>();
+                for (var index = 0; index <= GpuRibbonMeshBuilder.HoldSubdivisionCount; index++)
+                    progressValues.Add(index / (float)GpuRibbonMeshBuilder.HoldSubdivisionCount);
+                GpuRibbonMeshBuilder.AppendTimeScaleBoundaries(chart, group, segment.Start.Time, segment.End.Time, progressValues);
+
+                foreach (var progress in progressValues)
+                {
+                    var time = segment.Start.Time + (segment.End.Time - segment.Start.Time) * progress;
+                    var position = chart.VisualPosition(time, group);
+                    if (!double.IsFinite(position)) return true;
+                    if (double.IsFinite(previous))
+                    {
+                        // A hold that hasn't started moving forward yet
+                        // (waiting offscreen) can hold position flat across a
+                        // boundary; only a genuine backwards step disqualifies it.
+                        if (position < previous - 1e-6) return true;
+                        if (position - previous > MaximumGpuVisualStep) return true;
+                    }
+                    previous = position;
+                }
+            }
+            return false;
+        }
+    }
+
     // Converts chart-space ribbons into immutable UI metadata meshes.  All
     // sampling and time-scale evaluation happens here, never in the frame loop.
     public static class GpuRibbonMeshBuilder
     {
         internal const int GuideSubdivisionCount = 128;
-        const int HoldSubdivisionCount = 32;
-        const int LegacySubdivisionCount = 128;
+        // Matches Guide's density now that eligible Holds render through this
+        // same fixed mesh: a coarser count that was fine for a debug-only,
+        // never-enabled path is not fine once real charts render through it.
+        internal const int HoldSubdivisionCount = 128;
         const int MaximumVerticesPerChunk = 32000;
 
         struct RibbonPoint
@@ -198,6 +256,7 @@ namespace Gugarhythm
                 var stateIndex = StateIndex(result.HoldRootStates, path.RootIndex);
                 foreach (var run in path.RenderRuns)
                 {
+                    if (GpuRibbonHoldRouting.RequiresCpu(chart, path, run)) continue;
                     var kind = run.Critical ? GpuRibbonKind.HoldCritical : GpuRibbonKind.HoldNormal;
                     if (TryAddHoldRun(chart, path, run, kind, stateIndex, result, groupIndices,
                             AccumulatorFor(kind), points, progressValues))
@@ -205,38 +264,9 @@ namespace Gugarhythm
                 }
             }
 
-            foreach (var connector in chart.FallbackConnectors)
-            {
-                if (connector?.Start == null || connector.End == null) continue;
-                var group = ResolveGroup(chart, string.IsNullOrEmpty(connector.Start.TimeScaleGroup)
-                    ? connector.End.TimeScaleGroup : connector.Start.TimeScaleGroup);
-                var root = connector.Start.HoldRootIndex;
-                var stateIndex = StateIndex(result.HoldRootStates, root);
-                var groupIndex = GroupIndex(result, groupIndices, group);
-                progressValues.Clear();
-                for (var index = 0; index <= LegacySubdivisionCount; index++)
-                    progressValues.Add(index / (float)LegacySubdivisionCount);
-                AppendTimeScaleBoundaries(chart, group, connector.Start.Time, connector.End.Time, progressValues);
-                points.Clear();
-                var complete = true;
-                foreach (var progress in progressValues)
-                {
-                    var eased = HoldPathMath.EaseProgress(progress, connector.Ease);
-                    var time = connector.Start.Time + (connector.End.Time - connector.Start.Time) * progress;
-                    var lane = Mathf.Lerp(connector.Start.Lane, connector.End.Lane, eased);
-                    var size = Mathf.Lerp(connector.Start.Size, connector.End.Size, eased);
-                    var visualPosition = chart.VisualPosition(time, group);
-                    if (!IsRepresentable(time, lane, size, visualPosition))
-                    {
-                        complete = false;
-                        break;
-                    }
-                    points.Add(new RibbonPoint(lane, size, visualPosition, 1));
-                }
-                var kind = connector.Critical ? GpuRibbonKind.HoldCritical : GpuRibbonKind.HoldNormal;
-                if (complete && AccumulatorFor(kind).AddPath(kind, groupIndex, stateIndex, points))
-                    result.HoldPathCount++;
-            }
+            // Fallback connectors are legacy/edge-case geometry that never
+            // goes through the routing check above; keep them on the CPU
+            // path unconditionally rather than risk misclassifying them.
             guideAccumulator.Flush();
             normalHoldAccumulator.Flush();
             criticalHoldAccumulator.Flush();
@@ -296,7 +326,7 @@ namespace Gugarhythm
             AppendTimeScaleBoundaries(chart, group, cache.HeadTime, cache.TailTime, output);
         }
 
-        static void AppendTimeScaleBoundaries(RuntimeChart chart, string group, double startTime, double endTime,
+        internal static void AppendTimeScaleBoundaries(RuntimeChart chart, string group, double startTime, double endTime,
             SortedSet<float> output)
         {
             if (string.IsNullOrEmpty(group) || !chart.TimeScaleGroups.TryGetValue(group, out var map)) return;

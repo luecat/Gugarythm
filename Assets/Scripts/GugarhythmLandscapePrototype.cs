@@ -213,6 +213,22 @@ namespace Gugarhythm
             }
         }
 
+        // Which per-texture body batch a non-Flick note draws into, and which
+        // Trace diamond batch (if any) it also needs. Resolved once per note
+        // on first visibility and cached by index (see UpdateVisuals) instead
+        // of re-deriving the archetype/traceKey classification every frame.
+        readonly struct NoteBodyVisual
+        {
+            public readonly Texture2D Body;
+            public readonly Texture2D TraceDiamond;
+
+            public NoteBodyVisual(Texture2D body, Texture2D traceDiamond)
+            {
+                Body = body;
+                TraceDiamond = traceDiamond;
+            }
+        }
+
         public enum HoldConnectorRenderMode { AnchorClipped, NaturalPassThrough }
 
         [Flags]
@@ -381,6 +397,17 @@ namespace Gugarhythm
         readonly Dictionary<JudgmentTiming, Texture2D> judgmentTimingSprites = new();
         readonly JudgmentTimingStatistics judgmentTimingStatistics = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> noteViews = new();
+        // Two tiers, bottom to top: Trace body < regular note body
+        // (Tap/Sustain/Damage/Critical). A hold head has no tier of its own —
+        // it is classified exactly like any other note, by IsTrace(note)
+        // (the same check ShouldUseTracePersistentHoldVisual already uses
+        // for the anchored/Persistent Hold Head state): a Trace-styled hold
+        // head joins the Trace tier, a solid one joins the regular tier.
+        readonly Dictionary<Texture2D, NoteBodyBatchGraphic> traceBodyBatches = new();
+        readonly Dictionary<Texture2D, NoteBodyBatchGraphic> noteBodyBatches = new();
+        readonly Dictionary<int, NoteBodyVisual> noteBodyVisualCache = new();
+        readonly Dictionary<Texture2D, int> traceBodyCapacityByTexture = new();
+        readonly Dictionary<Texture2D, int> noteBodyCapacityByTexture = new();
         readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
         readonly HashSet<int> renderedPersistentHoldHeads = new();
         readonly HashSet<int> renderedNoteIds = new();
@@ -419,6 +446,7 @@ namespace Gugarhythm
         readonly List<RuntimeGuide> visibleGuides = new();
         readonly Dictionary<RuntimeGuide, GuideRenderCache> guideRenderCaches = new();
         readonly HashSet<RuntimeGuide> exactCpuGuides = new();
+        readonly HashSet<HoldRenderRun> exactCpuHoldRuns = new();
         readonly Dictionary<RuntimeHoldPath, HoldRenderCache> holdRenderCaches = new();
         readonly Dictionary<string, HoldVisualRange> holdVisualRanges = new(StringComparer.Ordinal);
         readonly List<int> noteViewReleaseKeys = new();
@@ -486,6 +514,7 @@ namespace Gugarhythm
         AudioSource music;
         AudioSource effects;
         AudioSource holdEffects;
+        float keyVolume = 1f;
         readonly AudioSource[] calibrationTickSources = new AudioSource[CalibrationTickCount];
         RectTransform canvasRoot;
         RectTransform backgroundLayer;
@@ -506,6 +535,21 @@ namespace Gugarhythm
         RectTransform noteLayer;
         NoteParticleBatchGraphic holdMidMintBatch;
         NoteParticleBatchGraphic holdMidYellowBatch;
+        // Holds both Trace diamonds and Hold mid ticks — the "particle" tier
+        // that sits above every note body, per the confirmed z-order.
+        RectTransform particleLayer;
+        // Flick still uses a pooled per-note view (see UpdateVisuals), so it
+        // cannot join a body batch. Without a tier-specific parent it would
+        // fall back to AcquireNoteView's SetAsLastSibling and always render
+        // above every batch — including a Trace-styled Flick sitting over a
+        // plain Tap, which breaks the confirmed Trace-under-note ordering.
+        // These two thin anchors sit at the same tier boundaries the batches
+        // do, so a Flick note's view lands at the correct tier instead.
+        RectTransform traceFlickAnchor;
+        RectTransform flickAnchor;
+        NoteParticleBatchGraphic traceDiamondMintBatch;
+        NoteParticleBatchGraphic traceDiamondPinkBatch;
+        NoteParticleBatchGraphic traceDiamondYellowBatch;
         RectMask2D connectorUpperHiddenClip;
         RectMask2D persistentHoldHeadUpperHiddenClip;
         RectMask2D noteUpperHiddenClip;
@@ -678,6 +722,7 @@ namespace Gugarhythm
         float upperHiddenBarPercent;
         bool fastLateDisplayEnabled;
         bool autoPlayEnabled;
+        bool autoPlayUsedThisRun;
         HitParticleEffectMode hitParticleEffectMode;
         bool touchCallbacksSubscribed;
         float judgmentHideAt = -1f;
@@ -750,6 +795,16 @@ namespace Gugarhythm
         static float NoteExitY => -TopY - NoteExitMargin;
         static float NearTrackProgress => (TopY - NoteExitY) / Mathf.Max(1, TopY - HitY);
         static float NearTrackApproach => 1f + (NearTrackProgress - 1f) / PerspectiveDepthRatio;
+        // A note stops being visible at NearTrackApproach (the approach value
+        // at NoteExitY — the same boundary GPU near-clipping already uses),
+        // not a full ApproachDuration past the judgment line. Querying a flat
+        // 1x behind made every already-hit or missed note keep paying
+        // ApproachProgress/quad-build cost for seconds after it left the
+        // screen. The 1.5x factor is a safety margin against float error at
+        // extreme scroll speeds or time-scale warps; Min keeps this from ever
+        // exceeding the original 1x behind.
+        static float NoteQueryBehindMargin(float approachDuration) =>
+            Mathf.Min(approachDuration, Mathf.Max(0f, (NearTrackApproach - 1f) * approachDuration) * 1.5f);
         // HitSourceY is the centre of the 45px judgment strip. Notes and
         // gameplay connectors leave only after reaching its lower edge.
         static float JudgmentBottomApproach => 1f + (JudgmentStripSourceHeight * .5f / HitSourceY) / PerspectiveDepthRatio;
@@ -830,9 +885,15 @@ namespace Gugarhythm
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.deepLinkActivated += HandleChartVaultDeepLink;
             RefreshPresentationClockHardResetThreshold();
-            Application.targetFrameRate = 120;
+            // Previously targetFrameRate=120 with vSyncCount=0 on a 60Hz panel:
+            // the renderer paced itself to a cadence the display can't present,
+            // so every other frame missed the actual flip and read as stutter
+            // despite the profiler reporting a high FPS number. Syncing to the
+            // display's own flip cadence (vSyncCount=1) removes that mismatch;
+            // targetFrameRate is ignored while vSync is enabled.
+            QualitySettings.vSyncCount = 1;
+            Application.targetFrameRate = -1;
             LandscapeOrientation.Lock();
-            QualitySettings.vSyncCount = 0;
             scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarhythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
             upperHiddenBarPercent = ClampUpperHiddenBarPercent(
                 PlayerPrefs.GetFloat("gugarhythm-upper-hidden-bar-percent", 0f));
@@ -1139,6 +1200,7 @@ namespace Gugarhythm
             // Input remains fully routed to JudgmentEngine below.  Do not draw
             // a full-depth lane flash here: it reads as a reflected Hold bar
             // beneath the button rather than input feedback.
+            if (autoPlayEnabled) autoPlayUsedThisRun = true;
             var judgmentTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
             judgmentEngine.ProcessInto(authoritativeSongTime, inputBatch, contacts, contactPaths,
                 autoPlayEnabled, judgmentEvents,
@@ -1373,8 +1435,13 @@ namespace Gugarhythm
         void SetSettingsKeyVolume(float value)
         {
             value = Mathf.Clamp01(value);
+            keyVolume = value;
             if (effects != null) effects.volume = value;
-            if (holdEffects != null) holdEffects.volume = value;
+            // The Hold loop fades toward HoldLoopVolume * keyVolume rather than
+            // a bare AudioSource.volume, so an already-playing loop must be
+            // re-targeted immediately instead of waiting for the next
+            // judgment to pick up the new keyVolume.
+            if (holdEffects != null && holdAudioState.ShouldPlay) TransitionHoldSound(true);
             if (settingsKeyVolumeLabel != null) settingsKeyVolumeLabel.text = $"{value * 100f:0}%";
             PlayerPrefs.SetFloat("gugarhythm-key-volume", value);
             PlayerPrefs.Save();
@@ -1752,6 +1819,7 @@ namespace Gugarhythm
             CancelResumeCountdown();
             presentationClock.Invalidate();
             BeginInputDiagnosticsRunIfNeeded();
+            autoPlayUsedThisRun = false;
             ResetRuntime();
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
@@ -2015,6 +2083,10 @@ namespace Gugarhythm
                 }
                 holdRenderCaches.Clear();
                 foreach (var path in chart.HoldPaths) holdRenderCaches.Add(path, new HoldRenderCache(path, chart));
+                exactCpuHoldRuns.Clear();
+                foreach (var path in chart.HoldPaths)
+                    foreach (var run in path.RenderRuns)
+                        if (GpuRibbonHoldRouting.RequiresCpu(chart, path, run)) exactCpuHoldRuns.Add(run);
             }
             var pathCapacity = 0;
             foreach (var cache in guideRenderCaches.Values) pathCapacity += cache.VisualSpanCount;
@@ -2035,6 +2107,37 @@ namespace Gugarhythm
             }
             holdMidMintBatch?.Prepare(midMintCapacity);
             holdMidYellowBatch?.Prepare(midYellowCapacity);
+            var traceMintCapacity = 0;
+            var tracePinkCapacity = 0;
+            var traceYellowCapacity = 0;
+            foreach (var note in chart.Notes)
+            {
+                if (!note.IsTraceArchetype) continue;
+                if (note.Critical) traceYellowCapacity++;
+                else if ((note.Archetype ?? string.Empty).IndexOf("Flick", StringComparison.OrdinalIgnoreCase) >= 0) tracePinkCapacity++;
+                else traceMintCapacity++;
+            }
+            traceDiamondMintBatch?.Prepare(traceMintCapacity);
+            traceDiamondPinkBatch?.Prepare(tracePinkCapacity);
+            traceDiamondYellowBatch?.Prepare(traceYellowCapacity);
+            traceBodyCapacityByTexture.Clear();
+            noteBodyCapacityByTexture.Clear();
+            foreach (var note in chart.Notes)
+            {
+                // Flick keeps its own pooled per-note view (see UpdateVisuals),
+                // so it never draws from a body batch and must not reserve
+                // capacity here.
+                if (note.IsHoldMidArchetype || note.Kind == RuntimeNoteKind.Flick) continue;
+                var body = ResolveNoteBodyVisual(note).Body;
+                if (body == null) continue;
+                var capacities = note.IsTraceArchetype ? traceBodyCapacityByTexture : noteBodyCapacityByTexture;
+                capacities.TryGetValue(body, out var count);
+                capacities[body] = count + 1;
+            }
+            foreach (var pair in traceBodyBatches)
+                pair.Value.Prepare(traceBodyCapacityByTexture.TryGetValue(pair.Key, out var traceCapacity) ? traceCapacity : 0);
+            foreach (var pair in noteBodyBatches)
+                pair.Value.Prepare(noteBodyCapacityByTexture.TryGetValue(pair.Key, out var capacity) ? capacity : 0);
             if (gpuRibbonRenderer == null || !ReferenceEquals(gpuRibbonRenderer.Chart, chart))
             {
                 gpuRibbonRenderer?.Dispose();
@@ -2047,7 +2150,8 @@ namespace Gugarhythm
                 }
             }
             var cpuGuides = gpuRibbonRenderer?.RendersGuides != true || exactCpuGuides.Count > 0;
-            var cpuHolds = gpuRibbonRenderer?.RendersHolds != true;
+            var cpuHolds = gpuRibbonRenderer?.RendersHolds != true || exactCpuHoldRuns.Count > 0 ||
+                chart.FallbackConnectors.Count > 0;
             if (guideBatch != null) guideBatch.gameObject.SetActive(cpuGuides);
             if (holdGreenBatch != null) holdGreenBatch.gameObject.SetActive(cpuHolds);
             if (holdYellowBatch != null) holdYellowBatch.gameObject.SetActive(cpuHolds);
@@ -2349,7 +2453,11 @@ namespace Gugarhythm
         {
             CancelHoldSoundFade();
             if (holdEffects == null) return;
-            if (shouldPlay)
+            var targetVolume = HoldLoopVolume * keyVolume;
+            // Muting the key volume must silence the loop outright rather than
+            // starting a voice that only fades toward zero volume: an inaudible
+            // AudioSource left Playing still decodes every frame.
+            if (shouldPlay && targetVolume > .0001f)
             {
                 if (holdSound == null) return;
                 if (!holdEffects.isPlaying)
@@ -2358,7 +2466,7 @@ namespace Gugarhythm
                     holdEffects.volume = 0;
                     holdEffects.Play();
                 }
-                holdFadeCoroutine = StartCoroutine(FadeHoldSound(HoldLoopVolume, false));
+                holdFadeCoroutine = StartCoroutine(FadeHoldSound(targetVolume, false));
             }
             else if (holdEffects.isPlaying)
                 holdFadeCoroutine = StartCoroutine(FadeHoldSound(0, true));
@@ -2521,7 +2629,12 @@ namespace Gugarhythm
             renderedNoteIds.Clear();
             holdMidMintBatch?.BeginFrame();
             holdMidYellowBatch?.BeginFrame();
-            chartRenderIndex.QueryNotes(visualFrameContext, ApproachDuration, ApproachDuration * 2, visibleNotes);
+            traceDiamondMintBatch?.BeginFrame();
+            traceDiamondPinkBatch?.BeginFrame();
+            traceDiamondYellowBatch?.BeginFrame();
+            foreach (var pair in traceBodyBatches) pair.Value.BeginFrame();
+            foreach (var pair in noteBodyBatches) pair.Value.BeginFrame();
+            chartRenderIndex.QueryNotes(visualFrameContext, NoteQueryBehindMargin(ApproachDuration), ApproachDuration * 2, visibleNotes);
             foreach (var note in visibleNotes)
             {
                 var approachProgress = ApproachProgress(note, visualTime);
@@ -2543,14 +2656,9 @@ namespace Gugarhythm
                     continue;
                 }
                 renderedNoteIds.Add(note.Index);
-                if (!noteViews.TryGetValue(note.Index, out var view))
-                {
-                    view = AcquireNoteView(noteLayer);
-                    noteViews[note.Index] = view;
-                    ApplyNoteTexture(view, note);
-                }
+                var isHoldHead = note.HoldRootIndex == note.Index;
                 var height = NoteSurfaceHeight(screenProgress);
-                if (note.HoldRootIndex == note.Index)
+                if (isHoldHead)
                     height = HoldHeadRenderHeight(height);
                 // The sprite has transparent side padding.  Expand only the
                 // quad required for its visible body to meet the authored left
@@ -2559,44 +2667,100 @@ namespace Gugarhythm
                 var bodyWidth = LaneWidth(note.Lane, note.Size, screenProgress);
                 var renderWidth = NoteRenderQuadWidth(bodyWidth, height, note);
                 var renderSize = note.Size * renderWidth / Mathf.Max(.001f, bodyWidth);
-                if (note.HoldRootIndex == note.Index)
-                    ApplyNoteSurfaceQuad(view, BuildHoldHeadSurface(note.Lane, renderSize, screenProgress, height));
-                else
-                    ApplyNoteSurfaceQuad(view, BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height));
-                view.color = Color.white;
-                var traceParticle = view.TraceParticle;
-                if (traceParticle != null)
+                var quad = isHoldHead
+                    ? BuildHoldHeadSurface(note.Lane, renderSize, screenProgress, height)
+                    : BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height);
+
+                if (note.Kind == RuntimeNoteKind.Flick)
                 {
-                    // Both official tick layouts use the same square as the
-                    // note's depth-scaled height. Their textures distinguish
-                    // the larger SlideTick from the smaller Trace diamond.
-                    var particleAspect = traceParticle.texture == null ? 1f :
-                        traceParticle.texture.width / (float)Mathf.Max(1, traceParticle.texture.height);
-                    traceParticle.rectTransform.sizeDelta = new Vector2(height * particleAspect, height);
-                    traceParticle.color = Color.white;
+                    // Flick keeps its own pooled per-note view: its arrow
+                    // overlay animates outward from the note and needs a
+                    // per-note RectTransform to anchor to, so it is not
+                    // worth folding into the shared body batch below.
+                    // Parent into the tier-matched anchor (not noteLayer
+                    // directly) so a Trace-styled Flick still renders under
+                    // the regular-note tier instead of always on top.
+                    if (!noteViews.TryGetValue(note.Index, out var view))
+                    {
+                        view = AcquireNoteView(IsTrace(note) ? traceFlickAnchor : flickAnchor);
+                        noteViews[note.Index] = view;
+                        ApplyNoteTexture(view, note);
+                    }
+                    ApplyNoteSurfaceQuad(view, quad);
+                    view.color = Color.white;
+                    var traceParticle = view.TraceParticle;
+                    if (traceParticle != null && ShouldShowNoteParticle(note, traceParticle.texture != null))
+                    {
+                        var particleTexture = traceParticle.texture;
+                        var particleAspect = particleTexture.width / (float)Mathf.Max(1, particleTexture.height);
+                        TraceDiamondBatchFor(particleTexture)?.AddQuad(
+                            NoteSurfaceQuadCenter(quad), new Vector2(height * particleAspect, height));
+                    }
+                    var flickArrow = view.FlickArrow;
+                    if (flickArrow != null && flickArrow.gameObject.activeSelf && flickArrow.texture != null)
+                    {
+                        var spriteIndex = FlickSpriteIndex(note.Size);
+                        var arrowBaseWidth = LaneWidth(note.Lane, Mathf.Min(note.Size, 3f) * .5f, screenProgress) * FlickArrowScale;
+                        var logicalSize = FlickLogicalSizes[spriteIndex];
+                        var arrowWidth = arrowBaseWidth * flickArrow.texture.width / logicalSize;
+                        var arrowHeight = arrowBaseWidth * flickArrow.texture.height / logicalSize;
+                        // The source layout is logically square, but its atlas crop
+                        // is not. Applying the width expansion to both axes was the
+                        // reason side arrows became huge and vertically stretched.
+                        flickArrow.rectTransform.sizeDelta = new Vector2(arrowWidth, arrowHeight);
+                        var animationProgress = Mathf.Repeat(Time.unscaledTime, .5f) / .5f;
+                        var laneUnit = LaneWidth(0, 1f, screenProgress) * .5f;
+                        flickArrow.rectTransform.anchoredPosition = new Vector2(
+                            note.Direction * laneUnit * animationProgress,
+                            arrowHeight * .5f + laneUnit * 2 * animationProgress);
+                        flickArrow.color = new Color(1, 1, 1, 1 - animationProgress * animationProgress * animationProgress);
+                    }
                 }
-                var flickArrow = view.FlickArrow;
-                if (flickArrow != null && flickArrow.gameObject.activeSelf && flickArrow.texture != null)
+                else
                 {
-                    var spriteIndex = FlickSpriteIndex(note.Size);
-                    var arrowBaseWidth = LaneWidth(note.Lane, Mathf.Min(note.Size, 3f) * .5f, screenProgress) * FlickArrowScale;
-                    var logicalSize = FlickLogicalSizes[spriteIndex];
-                    var arrowWidth = arrowBaseWidth * flickArrow.texture.width / logicalSize;
-                    var arrowHeight = arrowBaseWidth * flickArrow.texture.height / logicalSize;
-                    // The source layout is logically square, but its atlas crop
-                    // is not. Applying the width expansion to both axes was the
-                    // reason side arrows became huge and vertically stretched.
-                    flickArrow.rectTransform.sizeDelta = new Vector2(arrowWidth, arrowHeight);
-                    var animationProgress = Mathf.Repeat(Time.unscaledTime, .5f) / .5f;
-                    var laneUnit = LaneWidth(0, 1f, screenProgress) * .5f;
-                    flickArrow.rectTransform.anchoredPosition = new Vector2(
-                        note.Direction * laneUnit * animationProgress,
-                        arrowHeight * .5f + laneUnit * 2 * animationProgress);
-                    flickArrow.color = new Color(1, 1, 1, 1 - animationProgress * animationProgress * animationProgress);
+                    // Tap/Trace/Sustain/Damage/Hold-head bodies never need
+                    // their own RectTransform (no child overlay depends on
+                    // one), so they draw straight into the shared per-texture
+                    // batch instead of a pooled view. The texture/Trace
+                    // diamond classification is resolved once per note index
+                    // and cached, matching how ApplyNoteTexture used to run
+                    // only on a pooled view's first acquire rather than every
+                    // frame.
+                    if (!noteBodyVisualCache.TryGetValue(note.Index, out var visual))
+                    {
+                        visual = ResolveNoteBodyVisual(note);
+                        noteBodyVisualCache[note.Index] = visual;
+                    }
+                    // A hold head has no tier of its own: it joins the Trace
+                    // tier or the regular tier exactly like any other note,
+                    // by the same IsTrace check ShouldUseTracePersistentHoldVisual
+                    // already uses for the anchored/Persistent Hold Head state.
+                    var bodyBatches = IsTrace(note) ? traceBodyBatches : noteBodyBatches;
+                    if (visual.Body != null && bodyBatches.TryGetValue(visual.Body, out var bodyBatch))
+                        bodyBatch.AddQuad(quad.UpperLeft, quad.UpperRight, quad.LowerRight, quad.LowerLeft);
+                    if (visual.TraceDiamond != null && ShouldShowNoteParticle(note, true))
+                    {
+                        var particleAspect = visual.TraceDiamond.width / (float)Mathf.Max(1, visual.TraceDiamond.height);
+                        TraceDiamondBatchFor(visual.TraceDiamond)?.AddQuad(
+                            NoteSurfaceQuadCenter(quad), new Vector2(height * particleAspect, height));
+                    }
                 }
             }
             holdMidMintBatch?.EndFrame();
             holdMidYellowBatch?.EndFrame();
+            traceDiamondMintBatch?.EndFrame();
+            traceDiamondPinkBatch?.EndFrame();
+            traceDiamondYellowBatch?.EndFrame();
+            foreach (var pair in traceBodyBatches) pair.Value.EndFrame();
+            foreach (var pair in noteBodyBatches) pair.Value.EndFrame();
+            // Flick keeps SetAsLastSibling on acquire (see AcquireNoteView),
+            // which would otherwise draw a newly acquired Flick body over the
+            // particle tier. Keep the particle layer pinned above every note
+            // body without touching per-note sibling order; skip the reorder
+            // on frames where nothing new was acquired so it doesn't dirty
+            // the Canvas every frame.
+            if (particleLayer != null && particleLayer.GetSiblingIndex() != noteLayer.childCount - 1)
+                particleLayer.SetAsLastSibling();
 
             noteViewReleaseKeys.Clear();
             foreach (var pair in noteViews)
@@ -2614,12 +2778,11 @@ namespace Gugarhythm
             if (performanceDiagnosticsEnabled) HoldsProfiler.Begin();
 #endif
             holdVisualRanges.Clear();
-            if (gpuRibbonRenderer?.RendersHolds == true)
+            var hasGpuHolds = gpuRibbonRenderer?.RendersHolds == true;
+            if (hasGpuHolds && exactCpuHoldRuns.Count == 0 && chart.FallbackConnectors.Count == 0)
             {
                 chartRenderIndex.QueryHoldRuns(visualFrameContext, 0, ApproachDuration, visibleHoldRuns);
                 foreach (var run in visibleHoldRuns) RenderGpuPersistentHoldHead(run, visualTime);
-                foreach (var connector in chart.FallbackConnectors)
-                    RenderGpuPersistentHoldHead(connector, visualTime);
             }
             else
             {
@@ -2629,7 +2792,19 @@ namespace Gugarhythm
                 missedHoldYellowBatch.BeginFrame();
                 chartRenderIndex.QueryHoldRuns(visualFrameContext, 0, ApproachDuration, visibleHoldRuns);
                 foreach (var run in visibleHoldRuns)
+                {
+                    // A run whose body is drawn by the GPU ribbon mesh still
+                    // needs its persistent head handled here — only the body
+                    // ownership is split between the two paths.
+                    if (hasGpuHolds && !exactCpuHoldRuns.Contains(run))
+                    {
+                        RenderGpuPersistentHoldHead(run, visualTime);
+                        continue;
+                    }
                     RenderHoldRun(run, visualTime);
+                }
+                // Fallback connectors never enter the GPU mesh (see
+                // GpuRibbonMeshBuilder.Build), so they always render here.
                 foreach (var connector in chart.FallbackConnectors)
                 {
                     if (!CanRenderLegacyConnector(connector)) continue;
@@ -2693,19 +2868,6 @@ namespace Gugarhythm
             var nearTime = range.NearTime;
             if (nearTime < run.Start.Time - 1e-9 || nearTime > run.End.Time + 1e-9) return;
             RenderPersistentHoldHead(root, path.Evaluator.Evaluate(nearTime));
-        }
-
-        void RenderGpuPersistentHoldHead(RuntimeConnector connector, double visualTime)
-        {
-            if (!CanRenderLegacyConnector(connector)) return;
-            var rootIndex = connector.Start.HoldRootIndex;
-            if (rootIndex < 0 || !holdRoots.TryGetValue(rootIndex, out var root) ||
-                !ShouldRenderPersistentHoldHead(root)) return;
-            var startApproach = ApproachProgress(connector.Start, visualTime);
-            var endApproach = ApproachProgress(connector.End, visualTime);
-            if (startApproach < 1f || endApproach > 1f) return;
-            var headT = FindConnectorProgress(connector, visualTime, 1f, startApproach, endApproach);
-            RenderPersistentHoldHead(root, connector, headT);
         }
 
         bool RenderHoldRun(HoldRenderRun run, double visualTime)
@@ -3274,10 +3436,11 @@ namespace Gugarhythm
             RefreshHud();
             var wasInputDiagnostics = InputDiagnosticsSession.IsDebugEntry(currentLibraryEntry);
             EndInputDiagnosticsRun("chart-completed", true);
-            if (currentLibraryEntry != null && !wasInputDiagnostics)
+            if (currentLibraryEntry != null && !wasInputDiagnostics && !autoPlayUsedThisRun)
                 LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
             resultPanel.gameObject.SetActive(true);
-            resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}\n\nFAST      LATE\n{judgmentTimingStatistics.Fast:N0}          {judgmentTimingStatistics.Late:N0}";
+            var autoPlayHint = autoPlayUsedThisRun && !wasInputDiagnostics ? "\n\n(AUTO PLAY，成績不計入最佳紀錄)" : "";
+            resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}\n\nFAST      LATE\n{judgmentTimingStatistics.Fast:N0}          {judgmentTimingStatistics.Late:N0}{autoPlayHint}";
         }
 
         void LoadArtwork()
@@ -3393,6 +3556,21 @@ namespace Gugarhythm
             }
             var missedHoldShader = Shader.Find("Gugarhythm/Desaturate UI");
             if (missedHoldShader != null) missedHoldMaterial = new Material(missedHoldShader);
+            // Confirmed z-order, bottom to top: Hold Connectors (長條中間) <
+            // Decoration Guides (裝飾線) < Trace body (trace) < Hold head
+            // (長條頭, both the approaching batch and the anchored
+            // Persistent Hold Head pool) < regular note body (各種按鍵) <
+            // particles (顆粒: Trace diamonds + Hold mid ticks), topmost.
+            // Every tier below is a stage-level sibling created in that
+            // order except the hold-head pool and the particle tier, which
+            // are built as noteLayer children further down so they can sit
+            // between (and above) the batches created before them.
+            connectorLayer = Layer("Hold Connectors", stage);
+            connectorUpperHiddenClip = connectorLayer.gameObject.AddComponent<RectMask2D>();
+            holdGreenBatch = CreateHoldBatch("Legacy Hold Green Batch", holdGreenConnectorTexture, null);
+            holdYellowBatch = CreateHoldBatch("Legacy Hold Yellow Batch", holdYellowConnectorTexture, null);
+            missedHoldGreenBatch = CreateHoldBatch("Legacy Missed Hold Green Batch", holdGreenConnectorTexture, missedHoldMaterial);
+            missedHoldYellowBatch = CreateHoldBatch("Legacy Missed Hold Yellow Batch", holdYellowConnectorTexture, missedHoldMaterial);
             guideLayer = Layer("Decoration Guides", stage);
             // GPU ribbon geometry is static after chart load. A child Canvas keeps
             // unrelated note and input changes from rebuilding the Guide batches.
@@ -3400,22 +3578,61 @@ namespace Gugarhythm
             var guideBatchObject = new GameObject("Decoration Guide Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(GuideBatchGraphic));
             var guideBatchRect = guideBatchObject.GetComponent<RectTransform>(); guideBatchRect.SetParent(guideLayer, false); Fill(guideBatchRect);
             guideBatch = guideBatchObject.GetComponent<GuideBatchGraphic>(); guideBatch.raycastTarget = false; guideBatch.color = Color.white;
-            connectorLayer = Layer("Hold Connectors", stage);
-            connectorUpperHiddenClip = connectorLayer.gameObject.AddComponent<RectMask2D>();
-            holdGreenBatch = CreateHoldBatch("Legacy Hold Green Batch", holdGreenConnectorTexture, null);
-            holdYellowBatch = CreateHoldBatch("Legacy Hold Yellow Batch", holdYellowConnectorTexture, null);
-            missedHoldGreenBatch = CreateHoldBatch("Legacy Missed Hold Green Batch", holdGreenConnectorTexture, missedHoldMaterial);
-            missedHoldYellowBatch = CreateHoldBatch("Legacy Missed Hold Yellow Batch", holdYellowConnectorTexture, missedHoldMaterial);
             simLineLayer = Layer("Synchronization Lines", stage);
-            persistentHoldHeadLayer = Layer("Persistent Hold Heads", stage);
-            persistentHoldHeadUpperHiddenClip = persistentHoldHeadLayer.gameObject.AddComponent<RectMask2D>();
             noteLayer = Layer("Notes", stage);
             noteUpperHiddenClip = noteLayer.gameObject.AddComponent<RectMask2D>();
-            // Pooled note views always SetAsLastSibling on acquire, so
-            // creating the mid particle batches first keeps them permanently
-            // behind every tap/hold-head view without per-frame reordering.
-            holdMidMintBatch = CreateNoteParticleBatch("Hold Mid Mint Batch", holdMidMintTexture);
-            holdMidYellowBatch = CreateNoteParticleBatch("Hold Mid Yellow Batch", holdMidYellowTexture);
+            // Trace body (trace-only textures) is the lowest tier inside
+            // noteLayer, so it draws under regular note bodies. A hold head
+            // has no tier of its own — it joins whichever tier matches its
+            // own style, by the same IsTrace check
+            // ShouldUseTracePersistentHoldVisual already uses for the
+            // anchored/Persistent Hold Head state.
+            CreateNoteBodyBatchSet(traceBodyBatches, "Trace Body Batch", includeButtons: false, includeDamage: false);
+            // A Trace-styled Flick's pooled view parents here instead of
+            // noteLayer directly, so it stays at the Trace tier (see
+            // traceFlickAnchor's field comment and UpdateVisuals).
+            traceFlickAnchor = Layer("Trace Flick Anchor", noteLayer);
+            // The pooled Persistent Hold Head layer (anchored heads) can be
+            // either style per instance, so it is built here between the two
+            // tiers rather than split further: a Trace-styled anchored head
+            // still draws above the Trace tier, a solid one draws at the
+            // regular tier's position. Two different notes rarely occupy the
+            // exact same screen point, so this is an accepted compromise
+            // rather than a fourth batch set.
+            persistentHoldHeadLayer = Layer("Persistent Hold Heads", noteLayer);
+            persistentHoldHeadUpperHiddenClip = persistentHoldHeadLayer.gameObject.AddComponent<RectMask2D>();
+            // Regular note bodies (Tap/Sustain/Damage/Critical, and any
+            // solid-styled hold head — never Trace, that is its own tier
+            // below) share one batch per texture instead of a pooled
+            // per-note view: this is the numerically dominant note type in a
+            // dense chart, so it is what actually drove both the draw-call
+            // count and RectMask2D's per-target clip cost on noteLayer.
+            // Flick is the one exception — its arrow overlay still needs a
+            // per-note RectTransform to anchor to, so it keeps the old
+            // pooled-view path, parenting into flickAnchor at this tier
+            // (or traceFlickAnchor at the Trace tier below) instead of
+            // noteLayer directly. Two batched notes of different textures
+            // overlapping the same screen position no longer resolve by
+            // spawn order but by which batch was created first; this is an
+            // accepted, narrow z-order trade against the per-frame
+            // CanvasRenderer and clip cost of giving every body its own view.
+            CreateNoteBodyBatchSet(noteBodyBatches, "Note Body Batch", includeTrace: false);
+            // A plain (non-Trace) Flick's pooled view parents here (see
+            // traceFlickAnchor's field comment and UpdateVisuals).
+            flickAnchor = Layer("Flick Anchor", noteLayer);
+            // Particles (顆粒) — Trace diamonds and Hold mid ticks — are the
+            // topmost tier, above every note body. Both used to be per-note
+            // or bottom-pinned children; batching them into one shared layer
+            // keeps their draw calls low while satisfying the confirmed
+            // order. The layer is kept pinned to the top of noteLayer's
+            // children (see UpdateVisuals) so it stays above Flick's pooled
+            // views too, since those still get SetAsLastSibling'd on acquire.
+            particleLayer = Layer("Particle Layer", noteLayer);
+            holdMidMintBatch = CreateNoteParticleBatch("Hold Mid Mint Batch", holdMidMintTexture, particleLayer);
+            holdMidYellowBatch = CreateNoteParticleBatch("Hold Mid Yellow Batch", holdMidYellowTexture, particleLayer);
+            traceDiamondMintBatch = CreateNoteParticleBatch("Trace Diamond Mint Batch", traceDiamondMintTexture, particleLayer);
+            traceDiamondPinkBatch = CreateNoteParticleBatch("Trace Diamond Pink Batch", traceDiamondPinkTexture, particleLayer);
+            traceDiamondYellowBatch = CreateNoteParticleBatch("Trace Diamond Yellow Batch", traceDiamondYellowTexture, particleLayer);
             var upperHiddenMaskObject = new GameObject("Upper Hidden Bar", typeof(RectTransform),
                 typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var upperHiddenMaskRect = upperHiddenMaskObject.GetComponent<RectTransform>();
@@ -3535,7 +3752,7 @@ namespace Gugarhythm
             var gcBytes = gcAllocationRecorder.Valid ? gcAllocationRecorder.LastValue : -1;
             var ribbonStatus = gpuRibbonRenderer != null
                 ? $"{(gpuRibbonRenderer.RendersGuides ? $"GPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount}" : "CPU GUIDE")} + " +
-                  $"{(gpuRibbonRenderer.RendersHolds ? $"GPU HOLD {gpuRibbonRenderer.HoldPathCount}" : "CPU HOLD")} " +
+                  $"{(gpuRibbonRenderer.RendersHolds ? $"GPU HOLD {gpuRibbonRenderer.HoldPathCount}{(exactCpuHoldRuns.Count > 0 || chart.FallbackConnectors.Count > 0 ? $"+CPU{exactCpuHoldRuns.Count}" : "")}" : "CPU HOLD")} " +
                   $"C {gpuRibbonRenderer.ChunkCount} V {gpuRibbonRenderer.VertexCount} " +
                   $"B {gpuRibbonRenderer.StaticBuildCount} CACHE {(gpuRibbonRenderer.CacheHit ? "HIT" : "MISS")}"
                 : $"CPU GUIDE {sourceGuidePathCount}>{renderedGuidePathCount} + HOLD {gpuRibbonFallbackReason}";
@@ -5841,6 +6058,33 @@ namespace Gugarhythm
             return view;
         }
 
+        // The non-Flick equivalent of ApplyNoteTexture's texture selection,
+        // for notes that draw from a shared NoteBodyBatchGraphic instead of a
+        // pooled per-note view. Keep the two selectors in sync: both must
+        // pick the same body texture and Trace diamond for the same note.
+        NoteBodyVisual ResolveNoteBodyVisual(RuntimeNote note)
+        {
+            var archetype = note.Archetype ?? string.Empty;
+            var trace = IsTrace(note);
+            var damage = IsDamage(note);
+            var traceKey = note.Critical ? "yellow" :
+                archetype.IndexOf("Flick", StringComparison.OrdinalIgnoreCase) >= 0 ? "pink" : "mint";
+            var buttonKey = note.Critical ? "yellow" :
+                archetype.IndexOf("Slide", StringComparison.OrdinalIgnoreCase) >= 0 ? "mint" :
+                note.Kind == RuntimeNoteKind.Sustain ? "mint" : "cyan";
+
+            Texture2D body;
+            if (damage) body = damageTexture;
+            else if (trace) body = traceTextures.TryGetValue(traceKey, out var traceTexture) ? traceTexture : null;
+            else body = buttonTextures.TryGetValue(buttonKey, out var buttonTexture) ? buttonTexture : null;
+
+            var traceDiamond = trace
+                ? traceKey == "yellow" ? traceDiamondYellowTexture :
+                    traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture
+                : null;
+            return new NoteBodyVisual(body, traceDiamond);
+        }
+
         void ApplyNoteTexture(HorizontalSlicedRawImage view, RuntimeNote note)
         {
             var archetype = note.Archetype ?? string.Empty;
@@ -5873,7 +6117,12 @@ namespace Gugarhythm
                     ? note.Critical ? holdMidYellowTexture : holdMidMintTexture
                     : traceKey == "yellow" ? traceDiamondYellowTexture :
                     traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture;
-                particle.gameObject.SetActive(ShouldShowNoteParticle(note, particle.texture != null));
+                // A Trace's diamond now renders from the shared per-color batch
+                // (see the note loop's TraceDiamondBatchFor call), so this
+                // child RawImage stays inactive; only its texture reference is
+                // still used, to pick which batch a given note belongs to
+                // without re-deriving the archetype/traceKey every frame.
+                particle.gameObject.SetActive(false);
             }
             var flickArrow = view.FlickArrow;
             if (flickArrow != null)
@@ -5956,13 +6205,52 @@ namespace Gugarhythm
             return batch;
         }
 
-        NoteParticleBatchGraphic CreateNoteParticleBatch(string name, Texture2D texture)
+        NoteParticleBatchGraphic CreateNoteParticleBatch(string name, Texture2D texture) =>
+            CreateNoteParticleBatch(name, texture, noteLayer);
+
+        NoteParticleBatchGraphic CreateNoteParticleBatch(string name, Texture2D texture, RectTransform parent)
         {
             var go = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(NoteParticleBatchGraphic));
-            var rect = go.GetComponent<RectTransform>(); rect.SetParent(noteLayer, false); Fill(rect);
+            var rect = go.GetComponent<RectTransform>(); rect.SetParent(parent, false); Fill(rect);
             var batch = go.GetComponent<NoteParticleBatchGraphic>();
             batch.raycastTarget = false;
             batch.texture = texture;
+            batch.color = Color.white;
+            return batch;
+        }
+
+        NoteParticleBatchGraphic TraceDiamondBatchFor(Texture texture)
+        {
+            if (ReferenceEquals(texture, traceDiamondYellowTexture)) return traceDiamondYellowBatch;
+            if (ReferenceEquals(texture, traceDiamondPinkTexture)) return traceDiamondPinkBatch;
+            if (ReferenceEquals(texture, traceDiamondMintTexture)) return traceDiamondMintBatch;
+            return null;
+        }
+
+        void CreateNoteBodyBatchSet(Dictionary<Texture2D, NoteBodyBatchGraphic> batches, string namePrefix,
+            bool includeButtons = true, bool includeTrace = true, bool includeDamage = true)
+        {
+            if (includeButtons)
+                foreach (var texture in buttonTextures.Values)
+                    if (texture != null && !batches.ContainsKey(texture))
+                        batches[texture] = CreateNoteBodyBatch(texture, namePrefix);
+            if (includeTrace)
+                foreach (var texture in traceTextures.Values)
+                    if (texture != null && !batches.ContainsKey(texture))
+                        batches[texture] = CreateNoteBodyBatch(texture, namePrefix);
+            if (includeDamage && damageTexture != null && !batches.ContainsKey(damageTexture))
+                batches[damageTexture] = CreateNoteBodyBatch(damageTexture, namePrefix);
+        }
+
+        NoteBodyBatchGraphic CreateNoteBodyBatch(Texture2D texture, string namePrefix)
+        {
+            var go = new GameObject(namePrefix + " (" + texture.name + ")", typeof(RectTransform),
+                typeof(CanvasRenderer), typeof(NoteBodyBatchGraphic));
+            var rect = go.GetComponent<RectTransform>(); rect.SetParent(noteLayer, false); Fill(rect);
+            var batch = go.GetComponent<NoteBodyBatchGraphic>();
+            batch.raycastTarget = false;
+            batch.texture = texture;
+            batch.capRatio = NoteCapRatio;
             batch.color = Color.white;
             return batch;
         }
@@ -6002,6 +6290,10 @@ namespace Gugarhythm
             foreach (var pair in noteViews) noteViewReleaseKeys.Add(pair.Key);
             foreach (var key in noteViewReleaseKeys)
                 if (noteViews.TryGetValue(key, out var note)) ReleaseNoteView(key, note);
+            // Note indices are only meaningful within the chart that produced
+            // them; a reloaded chart must not resolve a batched note's body
+            // texture from stale entries keyed by a previous chart's indices.
+            noteBodyVisualCache.Clear();
 
             holdRunReleaseKeys.Clear();
             foreach (var pair in holdRunViews) holdRunReleaseKeys.Add(pair.Key);

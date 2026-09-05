@@ -20,7 +20,12 @@ namespace Gugarhythm
     {
         public const int MaxPointsPerSegment = 64;
         public const int MaxPointsPerRun = 256;
-        public const float DefaultScreenErrorPixels = .75f;
+        // Widened from .75f: Hold CPU cost dominates the frame budget (~96% per
+        // HUD measurement), and subdivision depth/point count scale directly
+        // with how tight this tolerance is. 1.5px of on-screen curve error is
+        // still imperceptible for a scrolling ribbon this thin, and halves the
+        // typical point count for curved runs.
+        public const float DefaultScreenErrorPixels = 1.5f;
 
         const int MaxSubdivisionDepth = 5;
         readonly List<HoldTessellationPoint> fallbackPoints = new(MaxPointsPerRun);

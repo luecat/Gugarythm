@@ -14,7 +14,10 @@ namespace Gugarhythm
     public static class GpuRibbonCache
     {
         const int Magic = 0x47525055; // UPRG
-        const int FormatVersion = 6;
+        // Bumped: Build() now routes eligible Hold runs onto the GPU mesh
+        // (GpuRibbonHoldRouting) and raised HoldSubdivisionCount, so a cache
+        // written by the old always-CPU-holds builder must not be reused.
+        const int FormatVersion = 7;
         const int BuildKeyVersion = 5;
         const int MaximumChunkCount = 4096;
         const int MaximumVertexCount = 8_000_000;
