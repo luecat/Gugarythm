@@ -17,7 +17,19 @@ namespace Gugarhythm
         sealed class Entry
         {
             public GpuRibbonGraphic Graphic;
+            public int GroupIndex;
+            public double MinVisualPosition;
+            public double MaxVisualPosition;
+            public bool Culled;
         }
+
+        // A chunk whose whole visual-position span cannot be on screen this
+        // frame is skipped via CanvasRenderer.cull instead of vertex-level
+        // clipping. Unlike SetActive, toggling cull does not re-invoke
+        // OnPopulateMesh or force sibling Graphics to rebuild, and the
+        // static per-chunk mesh never changes, so this is a pure submission
+        // skip. The margin absorbs float rounding at the exact span edges.
+        const double CullMarginVisualSeconds = .05d;
 
         readonly List<Entry> entries = new();
         readonly List<Material> materials = new();
@@ -134,6 +146,9 @@ namespace Gugarhythm
                 entries.Add(new Entry
                 {
                     Graphic = graphic,
+                    GroupIndex = chunk.GroupIndex,
+                    MinVisualPosition = chunk.MinVisualPosition,
+                    MaxVisualPosition = chunk.MaxVisualPosition,
                 });
                 validChunkCount++;
                 visibleVertexCount += vertices.Length;
@@ -185,9 +200,9 @@ namespace Gugarhythm
                 }
                 if (renderHolds) break;
             }
-            if (!renderGuides)
+            if (!renderGuides && !renderHolds)
             {
-                fallbackReason = "GPU Guide renderer has no decoration paths; using the CPU Hold renderer.";
+                fallbackReason = "GPU ribbon renderer has no eligible decoration or Hold paths; using the CPU renderer.";
                 return false;
             }
             var shader = Resources.Load<Shader>("Shaders/GpuRibbonUI");
@@ -241,6 +256,29 @@ namespace Gugarhythm
             appliedApproachDuration = nextApproachDuration;
             appliedCanvasHeight = nextCanvasHeight;
             appliedNearTrackProgress = nextNearTrackProgress;
+
+            // A vertex is only visible when its approach lands in [0, 1] (see
+            // the shader's frag clips), which is exactly when its authored
+            // visual position lands in [currentPosition, currentPosition +
+            // approachDuration]. A chunk whose whole span misses that window
+            // for its own time-scale group can never draw a visible pixel
+            // this frame, so skip submitting its (otherwise unchanged)
+            // static mesh entirely instead of relying on per-fragment clip.
+            var approachWindow = (double)nextApproachDuration;
+            for (var index = 0; index < entries.Count; index++)
+            {
+                var entry = entries[index];
+                var currentPosition = entry.GroupIndex >= 0 && entry.GroupIndex < groupPositions.Length
+                    ? groupPositions[entry.GroupIndex] : (float)frame.CurrentPosition(null);
+                var visible = entry.MaxVisualPosition >= currentPosition - CullMarginVisualSeconds &&
+                    entry.MinVisualPosition <= currentPosition + approachWindow + CullMarginVisualSeconds;
+                var shouldCull = !visible;
+                if (entry.Culled == shouldCull) continue;
+                entry.Culled = shouldCull;
+                // Never writes canvasRenderer.cull directly: RectMask2D owns
+                // that flag (see GpuRibbonGraphic.SetWindowCulled).
+                entry.Graphic.SetWindowCulled(shouldCull);
+            }
         }
 
         public static bool SupportsGroupPositionCount(int count) =>

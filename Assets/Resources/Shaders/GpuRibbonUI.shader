@@ -64,6 +64,18 @@ Shader "Gugarhythm/GPU Ribbon UI"
                 float4 vertex : POSITION;
                 float4 color : COLOR;
                 float4 texcoord : TEXCOORD0;
+                // (center constant, center slope, width constant, width slope):
+                // GpuRibbonProjection.Vertex bakes LaneX's per-lane algebra
+                // into this affine form at chart-load time (lane and size are
+                // fixed per vertex), so the vertex stage below needs two
+                // multiply-adds instead of the Intercepts/Slopes lookups
+                // LaneX itself performs.
+                float4 laneProjection : TEXCOORD1;
+                // (time-scale group index, auxiliary index): a Canvas streams
+                // TEXCOORD0 with two components only, so these cannot ride in
+                // texcoord.zw -- they would arrive as zeroes, pinning every
+                // ribbon to group 0 and every Guide to colour 0.
+                float4 ribbonIndices : TEXCOORD2;
             };
 
             struct v2f
@@ -88,17 +100,6 @@ Shader "Gugarhythm/GPU Ribbon UI"
             float _HoldStateCount;
             float _GroupPositions[256];
 
-            static const float Intercepts[13] =
-            {
-                616.0356, 620.9612, 624.5489, 628.4903, 631.5389, 635.4715, 638.8049,
-                642.5187, 646.0649, 649.5068, 653.0450, 656.5548, 660.2418
-            };
-            static const float Slopes[13] =
-            {
-                -0.8379661, -0.7036342, -0.5590519, -0.4198532, -0.2774788, -0.1406074, 0.0000444,
-                0.1412126, 0.2827021, 0.4205463, 0.5611308, 0.7017399, 0.8439814
-            };
-
             float Perspective(float approach)
             {
                 if (approach <= 0) return approach / 3.2;
@@ -111,19 +112,6 @@ Shader "Gugarhythm/GPU Ribbon UI"
                 float top = _CanvasHeight * 0.5;
                 float hit = top - 500.0 / 732.0 * _CanvasHeight;
                 return lerp(top, hit, progress);
-            }
-
-            float LaneX(float lane, float progress)
-            {
-                float sourceY = (_CanvasHeight * 0.5 - ScreenY(progress)) * 732.0 / _CanvasHeight;
-                int guide = (int)clamp(floor(lane + 6.0), 0.0, 11.0);
-                float guideLane = -6.0 + guide;
-                float t = lane - guideLane;
-                float left = Intercepts[guide] + Slopes[guide] * sourceY;
-                float right = Intercepts[guide + 1] + Slopes[guide + 1] * sourceY;
-                float sourceX = lerp(left, right, t);
-                float sourceCenter = Intercepts[6] + Slopes[6] * sourceY;
-                return (sourceX - sourceCenter) / 1280.0 * 1920.0;
             }
 
             fixed4 GuideColor(float index)
@@ -140,18 +128,17 @@ Shader "Gugarhythm/GPU Ribbon UI"
             v2f vert(appdata_t input)
             {
                 v2f output;
-                float lane = input.vertex.x;
-                float size = input.vertex.y;
                 float targetPosition = input.vertex.z;
                 float side = input.texcoord.x * 2.0 - 1.0;
-                float groupIndex = round(input.texcoord.z);
-                float auxiliaryIndex = round(input.texcoord.w);
+                float groupIndex = round(input.ribbonIndices.x);
+                float auxiliaryIndex = round(input.ribbonIndices.y);
                 int currentGroup = (int)clamp(groupIndex, 0.0, min(255.0, _GroupCount - 1.0));
                 float currentPosition = _GroupPositions[currentGroup];
                 float approach = 1.0 - (targetPosition - currentPosition) / max(0.0001, _ApproachDuration);
                 float progress = clamp(Perspective(approach), 0.0, _NearTrackProgress);
-                float centerX = LaneX(lane, progress);
-                float width = max(12.0, LaneX(lane + size, progress) - LaneX(lane - size, progress));
+                float sourceY = (_CanvasHeight * 0.5 - ScreenY(progress)) * 732.0 / _CanvasHeight;
+                float centerX = input.laneProjection.x + input.laneProjection.y * sourceY;
+                float width = max(12.0, input.laneProjection.z + input.laneProjection.w * sourceY);
                 input.vertex = float4(centerX + side * width * 0.5, ScreenY(progress), 0, 1);
                 output.worldPosition = input.vertex;
                 output.vertex = UnityObjectToClipPos(input.vertex);
@@ -169,6 +156,13 @@ Shader "Gugarhythm/GPU Ribbon UI"
             fixed4 frag(v2f input) : SV_Target
             {
                 clip(input.clipState.x - input.clipState.y);
+                // Holds and Guides alike stop at the judgment line: the span
+                // a Hold has already been held through is consumed, and its
+                // remaining body is anchored there by the persistent head.
+                // (An earlier attempt to keep Hold bodies past approach > 1
+                // was chasing a different failure -- the group index never
+                // reaching the shader -- and only made passed Holds sweep on
+                // past the judgment line instead of being destroyed at it.)
                 clip(input.clipState.z - input.clipState.x);
                 fixed4 color = tex2D(_MainTex, input.texcoord) * input.color;
                 float stateU = input.worldPosition.w;

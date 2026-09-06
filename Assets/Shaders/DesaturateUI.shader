@@ -19,7 +19,14 @@ Shader "Gugarhythm/Desaturate UI"
             fixed l = dot(c.rgb, fixed3(.2126, .7152, .0722));
             c.rgb = lerp(l.xxx, c.rgb, .2);
             float edgeDistance = min(i.uv.x, 1 - i.uv.x);
-            float edgeWidth = max(fwidth(i.uv.x), 1e-5);
+            // fwidth(uv.x) is the screen-space derivative of the ribbon's
+            // across-width UV. Where adjacent quads meet at a sharp angle, or
+            // under an extreme local TimeScale, that derivative can spike past
+            // the 0-0.5 range edgeDistance ever reaches, which would fade a
+            // whole span toward alpha 0 instead of just softening its edge.
+            // Capping it keeps the intended anti-aliasing on ordinary geometry
+            // and bounds the worst case.
+            float edgeWidth = clamp(fwidth(i.uv.x), 1e-5, .1);
             c.a *= smoothstep(0, edgeWidth, edgeDistance);
             #ifdef UNITY_UI_CLIP_RECT
             c.a *= UnityGet2DClipping(i.worldPosition, _ClipRect);

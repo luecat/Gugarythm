@@ -87,7 +87,8 @@ namespace Gugarhythm
         public void EndFrame()
         {
             AddHash(activePathCount);
-            if (renderedPathCount == activePathCount && renderedHash == frameHash) return;
+            var skippedRebuild = renderedPathCount == activePathCount && renderedHash == frameHash;
+            if (skippedRebuild) return;
             renderedPathCount = activePathCount;
             renderedHash = frameHash;
             SetVerticesDirty();

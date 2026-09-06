@@ -3317,21 +3317,26 @@ public static class RuntimeValidation
         Require(first.HoldPathCount == expectedHoldPathCount,
             $"GPU ribbon Hold ownership count drifted: expected {expectedHoldPathCount} requested " +
             $"render runs/fallback connectors, actual {first.HoldPathCount}");
-        Require(first.Chunks.Count == expectedChunkKinds.Count,
-            $"GPU ribbon immutable batch count drifted: expected {expectedChunkKinds.Count} material kinds " +
-            $"[{string.Join(", ", expectedChunkKinds.OrderBy(kind => kind))}], actual {first.Chunks.Count} chunks " +
-            $"[{string.Join(", ", first.Chunks.Select(chunk => chunk.Kind))}]");
-        foreach (var kind in expectedChunkKinds)
-        {
-            actualChunkKindCounts.TryGetValue(kind, out var actualKindCount);
-            Require(actualKindCount == 1,
-                $"GPU ribbon material kind {kind} must use one immutable batch: expected 1, " +
-                $"actual {actualKindCount}");
-        }
+        // A material kind may now span multiple chunks: ChunkAccumulator
+        // splits on a TimeScale-group change (not just a kind change) so
+        // every chunk has one authored visual-position span for per-frame
+        // culling (GpuRibbonRenderer.UpdateFrame), and a smaller per-chunk
+        // vertex cap gives that culling finer granularity. "Exactly one
+        // batch per kind" was only ever true of the old, uncullable
+        // single-blob-per-kind mesh, so the invariant worth keeping is "at
+        // least one chunk per requested kind, and nothing unrequested".
+        Require(expectedChunkKinds.All(kind =>
+                    actualChunkKindCounts.TryGetValue(kind, out var actualKindCount) && actualKindCount >= 1),
+            $"GPU ribbon must produce at least one chunk per requested material kind: expected " +
+            $"[{string.Join(", ", expectedChunkKinds.OrderBy(kind => kind))}], actual " +
+            $"[{string.Join(", ", actualChunkKindCounts.Select(pair => $"{pair.Key}:{pair.Value}").OrderBy(x => x))}]");
         Require(actualChunkKindCounts.Keys.All(expectedChunkKinds.Contains),
             $"GPU ribbon produced an unrequested material kind: expected " +
             $"[{string.Join(", ", expectedChunkKinds.OrderBy(kind => kind))}], actual " +
             $"[{string.Join(", ", actualChunkKindCounts.Keys.OrderBy(kind => kind))}]");
+        Require(first.Chunks.All(chunk => chunk.Vertices.Select(vertex => Mathf.RoundToInt(vertex.uv0.z)).Distinct().Count() <= 1),
+            "Every GPU ribbon chunk must carry vertices from exactly one TimeScaleGroup, so its visual-position " +
+            "span (and therefore its per-frame culling) is well-defined");
         Require(first.HoldRootStates.ContainsKey(10),
             "GPU ribbon mesh build must allocate an event-driven state texel for every Hold root");
         Require(first.VertexCount > 0 && first.Chunks.All(chunk => chunk.Vertices.Length % 2 == 0 &&
@@ -3341,9 +3346,31 @@ public static class RuntimeValidation
                 first.Chunks.Select(chunk => chunk.Indices.Length).SequenceEqual(second.Chunks.Select(chunk => chunk.Indices.Length)),
             "GPU ribbon chart-load mesh generation must be deterministic");
         Require(first.Chunks.SelectMany(chunk => chunk.Vertices).All(vertex =>
-                    vertex.position != Vector3.zero && vertex.uv1 == Vector4.zero &&
-                    vertex.uv2 == Vector4.zero && vertex.uv3 == Vector4.zero),
-            "GPU ribbon metadata must use only standard Canvas POSITION, COLOR, and UV0 channels");
+                    vertex.position != Vector3.zero && vertex.uv3 == Vector4.zero),
+            "GPU ribbon metadata must use only standard Canvas POSITION, COLOR, UV0, baked-projection UV1, " +
+            "and index-carrying UV2 channels");
+        // The shader reads the group and auxiliary indices from uv2, because a
+        // Canvas streams TexCoord0 with two components and strips uv0.zw before
+        // the draw. uv0 keeps them only as the authoring-side source of truth,
+        // so the two copies must not drift apart.
+        Require(first.Chunks.SelectMany(chunk => chunk.Vertices).All(vertex =>
+                    Mathf.RoundToInt(vertex.uv2.x) == Mathf.RoundToInt(vertex.uv0.z) &&
+                    Mathf.RoundToInt(vertex.uv2.y) == Mathf.RoundToInt(vertex.uv0.w) &&
+                    vertex.uv2.z == 0 && vertex.uv2.w == 0),
+            "GPU ribbon must carry the TimeScaleGroup and auxiliary indices in UV2, matching UV0.zw");
+        Require(first.Chunks.SelectMany(chunk => chunk.Vertices).All(vertex =>
+                {
+                    var lane = vertex.position.x;
+                    var size = vertex.position.y;
+                    GpuRibbonProjection.LaneProjectionCoefficients(lane, out var centerConstant, out var centerSlope);
+                    GpuRibbonProjection.LaneProjectionCoefficients(lane - size, out var leftConstant, out var leftSlope);
+                    GpuRibbonProjection.LaneProjectionCoefficients(lane + size, out var rightConstant, out var rightSlope);
+                    return Mathf.Abs(vertex.uv1.x - centerConstant) < 1e-3f &&
+                        Mathf.Abs(vertex.uv1.y - centerSlope) < 1e-4f &&
+                        Mathf.Abs(vertex.uv1.z - (rightConstant - leftConstant)) < 1e-3f &&
+                        Mathf.Abs(vertex.uv1.w - (rightSlope - leftSlope)) < 1e-4f;
+                }),
+            "GPU ribbon UV1 must carry the exact lane/size -> canvas-X affine coefficients LaneX would compute");
         var holdChunks = first.Chunks.Where(chunk => chunk.Kind != GpuRibbonKind.Guide).ToArray();
         Require(holdChunks.SelectMany(chunk => chunk.Vertices).All(vertex => vertex.color.a == 255),
             "GPU Hold source vertices must retain fully opaque source alpha before material opacity");
@@ -3378,7 +3405,9 @@ public static class RuntimeValidation
                         .SequenceEqual(first.Chunks.Select(chunk =>
                             (chunk.Kind, chunk.Vertices.Length, chunk.Indices.Length))) &&
                     restored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
-                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)),
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)) &&
+                    restored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv1)
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv1)),
                 "GPU ribbon disk cache must round-trip immutable display geometry exactly");
             Require(!GpuRibbonCache.TryRead(cachePath, new string('0', 64), out _),
                 "GPU ribbon disk cache must reject a stale chart fingerprint without throwing");
@@ -3407,14 +3436,18 @@ public static class RuntimeValidation
             Require(!rebuiltCacheHit && rebuilt != null &&
                     rebuilt.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
                         .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)) &&
+                    rebuilt.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv1)
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv1)) &&
                     GpuRibbonCache.TryRead(runtimeCachePath, cacheKey, out _),
-                "LoadOrBuild must reject a version-5 runtime cache and replace it with exact version-6 geometry");
+                "LoadOrBuild must reject a stale-version runtime cache and replace it with exact current geometry");
             ForgetGpuRibbonMemoryEntry(cacheKey);
             var diskRestored = GpuRibbonCache.LoadOrBuild(chart, caches, out var diskCacheHit);
             Require(diskCacheHit && diskRestored != null &&
                     diskRestored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)
-                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)),
-                "LoadOrBuild must read the rebuilt version-6 geometry through its real disk-cache path");
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv0)) &&
+                    diskRestored.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv1)
+                        .SequenceEqual(first.Chunks.SelectMany(chunk => chunk.Vertices).Select(vertex => vertex.uv1)),
+                "LoadOrBuild must read the rebuilt geometry through its real disk-cache path");
         }
         finally
         {

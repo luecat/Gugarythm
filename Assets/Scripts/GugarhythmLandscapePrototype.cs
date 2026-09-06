@@ -448,7 +448,6 @@ namespace Gugarhythm
         readonly HashSet<RuntimeGuide> exactCpuGuides = new();
         readonly HashSet<HoldRenderRun> exactCpuHoldRuns = new();
         readonly Dictionary<RuntimeHoldPath, HoldRenderCache> holdRenderCaches = new();
-        readonly Dictionary<string, HoldVisualRange> holdVisualRanges = new(StringComparer.Ordinal);
         readonly List<int> noteViewReleaseKeys = new();
         readonly List<int> persistentHeadReleaseKeys = new();
         readonly List<HoldRenderRun> holdRunReleaseKeys = new();
@@ -466,6 +465,18 @@ namespace Gugarhythm
         readonly TimingSampleWindow inputQueueDelaySamples = new(1200, 10f);
         readonly HotPathFrameMetrics hotPathFrameMetrics = new();
         readonly HotPathTimingSampleSet hotPathTimingSamples = new(1200, 10f);
+        // Per-point Guide/Hold projection cost is accumulated as raw ticks
+        // here (mirroring VisualFrameContext.Evaluate's own pattern) instead
+        // of calling RecordHotPathSample per point: a chart's visible span
+        // can drive this projector hundreds of times per frame, and paying
+        // for a division plus a method call on every single point would
+        // itself skew the very timings performanceDiagnosticsEnabled exists
+        // to measure. The accumulated total is reported once per frame
+        // alongside TimeScalePositionAt.
+        long guideProjectionTicks;
+        int guideProjectionCalls;
+        long holdProjectionTicks;
+        int holdProjectionCalls;
         readonly VisualFrameContext visualFrameContext = new();
         readonly FrameBudgetCounter frameBudgetCounter = new();
         readonly GuideRenderMetrics guideRenderMetrics = new();
@@ -743,18 +754,6 @@ namespace Gugarhythm
 
         const double PresentationClockFallbackHardResetThreshold = .1d;
         double presentationClockHardResetThreshold = PresentationClockFallbackHardResetThreshold;
-
-        readonly struct HoldVisualRange
-        {
-            public readonly double NearTime;
-            public readonly double FarTime;
-
-            public HoldVisualRange(double nearTime, double farTime)
-            {
-                NearTime = nearTime;
-                FarTime = farTime;
-            }
-        }
 
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
         static float TopY => CanvasHeight * .5f;
@@ -2086,7 +2085,9 @@ namespace Gugarhythm
                 exactCpuHoldRuns.Clear();
                 foreach (var path in chart.HoldPaths)
                     foreach (var run in path.RenderRuns)
+                    {
                         if (GpuRibbonHoldRouting.RequiresCpu(chart, path, run)) exactCpuHoldRuns.Add(run);
+                    }
             }
             var pathCapacity = 0;
             foreach (var cache in guideRenderCaches.Values) pathCapacity += cache.VisualSpanCount;
@@ -2515,6 +2516,8 @@ namespace Gugarhythm
         void UpdateVisuals(double visualTime)
         {
             hotPathFrameMetrics.Reset();
+            guideProjectionTicks = 0; guideProjectionCalls = 0;
+            holdProjectionTicks = 0; holdProjectionCalls = 0;
             visualFrameContext.BeginFrame(chart, visualTime, performanceDiagnosticsEnabled);
             var sectionStart = PerformanceTimestamp();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
@@ -2777,7 +2780,6 @@ namespace Gugarhythm
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled) HoldsProfiler.Begin();
 #endif
-            holdVisualRanges.Clear();
             var hasGpuHolds = gpuRibbonRenderer?.RendersHolds == true;
             if (hasGpuHolds && exactCpuHoldRuns.Count == 0 && chart.FallbackConnectors.Count == 0)
             {
@@ -2852,6 +2854,10 @@ namespace Gugarhythm
                 hotPathFrameMetrics.Record(HotPathStage.TimeScalePositionAt,
                     visualFrameContext.PositionAtMilliseconds, visualFrameContext.PositionAtCallCount);
                 hotPathFrameMetrics.SetTimeScaleSearchSteps(visualFrameContext.PositionAtSearchStepCount);
+                hotPathFrameMetrics.Record(HotPathStage.GuideProjection,
+                    MillisecondsFromTicks(guideProjectionTicks), guideProjectionCalls);
+                hotPathFrameMetrics.Record(HotPathStage.HoldProjection,
+                    MillisecondsFromTicks(holdProjectionTicks), holdProjectionCalls);
                 latestHotPathFrameSnapshot = hotPathFrameMetrics.Snapshot();
             }
             else latestHotPathFrameSnapshot = default;
@@ -2862,23 +2868,39 @@ namespace Gugarhythm
             var path = run?.Path;
             if (path == null || !holdRoots.TryGetValue(path.RootIndex, out var root) ||
                 !ShouldRenderPersistentHoldHead(root)) return;
-            var group = string.IsNullOrEmpty(run.Start.TimeScaleGroup)
-                ? run.End.TimeScaleGroup : run.Start.TimeScaleGroup;
-            var range = HoldVisualRangeFor(group, visualTime);
-            var nearTime = range.NearTime;
-            if (nearTime < run.Start.Time - 1e-9 || nearTime > run.End.Time + 1e-9) return;
-            RenderPersistentHoldHead(root, path.Evaluator.Evaluate(nearTime));
+            // visualTime is already "now"; deriving it instead by inverting
+            // the current visual position back through run.Start's single
+            // TimeScale group used to hide the head outright whenever a run
+            // spanned a mid-run TimeScale change or sat on an extreme local
+            // multiplier, because that inversion can land far outside
+            // [Start, End].
+            if (visualTime < run.Start.Time - 1e-9 || visualTime > run.End.Time + 1e-9) return;
+            RenderPersistentHoldHead(root, path.Evaluator.Evaluate(visualTime));
         }
 
         bool RenderHoldRun(HoldRenderRun run, double visualTime)
         {
             var path = run.Path;
-            var group = string.IsNullOrEmpty(run.Start.TimeScaleGroup) ? run.End.TimeScaleGroup : run.Start.TimeScaleGroup;
-            var range = HoldVisualRangeFor(group, visualTime);
-            var firstVisibleTime = Math.Max(run.Start.Time, Math.Min(range.NearTime, range.FarTime));
-            var lastVisibleTime = Math.Min(run.End.Time, Math.Max(range.NearTime, range.FarTime));
-            if (lastVisibleTime < firstVisibleTime - 1e-9)
-                return false;
+            // NearTime/FarTime invert the approach window back into ONE
+            // TimeScale group (run.Start's). That is only correct when the
+            // whole run stays on that one group. A run that crosses a mid-run
+            // TimeScale/speed change, or that bends through a corner needing
+            // multiple segments — exactly the cases GpuRibbonHoldRouting.
+            // RequiresCpu routes here instead of the GPU mesh — can have later
+            // segments on a different group (or one an extreme local
+            // multiplier compresses to a sliver of real time), so re-deriving
+            // a single [firstVisibleTime,lastVisibleTime] window from
+            // run.Start's group alone can land outside those segments'
+            // authored range entirely, clipping the whole run to nothing.
+            // ChartRenderIndex.QueryHoldRuns already established — per
+            // segment, in position space, boundary-aware — that this run
+            // belongs on screen this frame, so simply tessellate its own full
+            // [Start,End]; BuildProjected already skips any segment outside
+            // that (a no-op here) and the adaptive tolerance keeps far
+            // off-screen portions cheap since their clamped screen position
+            // barely moves.
+            var firstVisibleTime = run.Start.Time;
+            var lastVisibleTime = run.End.Time;
 
             projectingHoldPath = path;
             projectingHoldCache = holdRenderCaches[path];
@@ -2905,21 +2927,10 @@ namespace Gugarhythm
             if (performanceDiagnosticsEnabled) HoldMeshSubmissionProfiler.End();
 #endif
 
-            if (firstVisibleTime <= range.NearTime + 1e-9 && range.NearTime <= lastVisibleTime + 1e-9 &&
+            if (visualTime >= firstVisibleTime - 1e-9 && visualTime <= lastVisibleTime + 1e-9 &&
                 holdRoots.TryGetValue(path.RootIndex, out var root) && ShouldRenderPersistentHoldHead(root))
-                RenderPersistentHoldHead(root, path.Evaluator.Evaluate(range.NearTime));
+                RenderPersistentHoldHead(root, path.Evaluator.Evaluate(visualTime));
             return true;
-        }
-
-        HoldVisualRange HoldVisualRangeFor(string group, double visualTime)
-        {
-            var key = string.IsNullOrEmpty(group) ? chart.DefaultTimeScaleGroup ?? string.Empty : group;
-            if (holdVisualRanges.TryGetValue(key, out var range)) return range;
-            var position = visualFrameContext.CurrentPosition(key);
-            range = new HoldVisualRange(chart.TimeAtVisualPosition(position, key),
-                chart.TimeAtVisualPosition(position + ApproachDuration, key));
-            holdVisualRanges.Add(key, range);
-            return range;
         }
 
         HoldProjectedPoint ProjectHoldPoint(HoldTessellationPoint point)
@@ -2931,10 +2942,20 @@ namespace Gugarhythm
             var visualPosition = projectingHoldCache.TryVisualPosition(point, out var cachedPosition)
                 ? cachedPosition : visualFrameContext.PositionAt(point.Time, group);
             var approach = visualFrameContext.Approach(visualPosition, group, ApproachDuration);
-            var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, NearTrackProgress);
+            // Hold runs are AnchorClipped (ResolveHoldConnectorRenderMode), so
+            // the body stops at the judgment line and the persistent head owns
+            // everything nearer. Clamping to NearTrackProgress instead let the
+            // consumed span keep sweeping below the line, where the perspective
+            // extrapolation also blew its width past the whole canvas -- a wide
+            // Hold pair rendered there as one opaque slab.
+            var screenProgress = Mathf.Clamp(PerspectiveProgress(approach), 0, 1);
             var projected = new Vector2(X(point.Sample.Lane, screenProgress), ScreenY(screenProgress));
             var width = HoldConnectorLaneWidth(LaneWidth(point.Sample.Lane, point.Sample.Size, screenProgress));
-            RecordHotPathSample(HotPathStage.HoldProjection, projectionStart);
+            if (performanceDiagnosticsEnabled)
+            {
+                holdProjectionTicks += System.Diagnostics.Stopwatch.GetTimestamp() - projectionStart;
+                holdProjectionCalls++;
+            }
             return new HoldProjectedPoint(point, projected, width);
         }
 
@@ -3038,7 +3059,11 @@ namespace Gugarhythm
             var center = new Vector2(X(sample.Lane, screenProgress), ScreenY(screenProgress));
             var projected = new GuideProjectedPoint(sample.Progress, center,
                 LaneWidth(sample.Lane, sample.Size, screenProgress), sample.Alpha);
-            RecordHotPathSample(HotPathStage.GuideProjection, projectionStart);
+            if (performanceDiagnosticsEnabled)
+            {
+                guideProjectionTicks += System.Diagnostics.Stopwatch.GetTimestamp() - projectionStart;
+                guideProjectionCalls++;
+            }
             return projected;
         }
 
@@ -3164,7 +3189,11 @@ namespace Gugarhythm
             var bodyWidth = LaneWidth(lane, size, screenProgress);
             var position = new Vector2(X(lane, screenProgress), ScreenY(screenProgress));
             var width = HoldConnectorLaneWidth(bodyWidth);
-            RecordHotPathSample(HotPathStage.HoldProjection, projectionStart);
+            if (performanceDiagnosticsEnabled)
+            {
+                holdProjectionTicks += System.Diagnostics.Stopwatch.GetTimestamp() - projectionStart;
+                holdProjectionCalls++;
+            }
             line.SetPathPoint(index, position, width);
         }
 
@@ -3178,7 +3207,11 @@ namespace Gugarhythm
             var screenProgress = Mathf.Clamp(PerspectiveProgress(approachProgress), 0, NearTrackProgress);
             var position = new Vector2(X(lane, screenProgress), ScreenY(screenProgress));
             var width = HoldConnectorLaneWidth(LaneWidth(lane, size, screenProgress));
-            RecordHotPathSample(HotPathStage.HoldProjection, projectionStart);
+            if (performanceDiagnosticsEnabled)
+            {
+                holdProjectionTicks += System.Diagnostics.Stopwatch.GetTimestamp() - projectionStart;
+                holdProjectionCalls++;
+            }
             batch.SetPathPoint(index, position, width);
         }
 
@@ -3536,6 +3569,7 @@ namespace Gugarhythm
             backgroundLayer = RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
             gameplayStageCanvas = stage.gameObject.AddComponent<Canvas>();
+            EnableRibbonVertexChannels(gameplayStageCanvas);
             var trackObject = new GameObject("Track Depth", typeof(RectTransform), typeof(CanvasRenderer), typeof(TaperedConnectorGraphic));
             var trackRect = trackObject.GetComponent<RectTransform>(); trackRect.SetParent(stage, false); Fill(trackRect);
             var trackGraphic = trackObject.GetComponent<TaperedConnectorGraphic>(); trackGraphic.raycastTarget = false; trackGraphic.color = new Color(0, 0, .035f, .72f);
@@ -3566,6 +3600,13 @@ namespace Gugarhythm
             // are built as noteLayer children further down so they can sit
             // between (and above) the batches created before them.
             connectorLayer = Layer("Hold Connectors", stage);
+            // The GPU ribbon's Hold mesh is static after chart load, and even
+            // the CPU Hold batches only change when a Hold run's own visible
+            // window moves — neither depends on the note/particle/sim-line
+            // batches that redraw every frame as siblings under the main
+            // stage Canvas. A child Canvas here isolates Hold rebuilds from
+            // those, the same way guideLayer already isolates Guides below.
+            EnableRibbonVertexChannels(connectorLayer.gameObject.AddComponent<Canvas>());
             connectorUpperHiddenClip = connectorLayer.gameObject.AddComponent<RectMask2D>();
             holdGreenBatch = CreateHoldBatch("Legacy Hold Green Batch", holdGreenConnectorTexture, null);
             holdYellowBatch = CreateHoldBatch("Legacy Hold Yellow Batch", holdYellowConnectorTexture, null);
@@ -3574,7 +3615,7 @@ namespace Gugarhythm
             guideLayer = Layer("Decoration Guides", stage);
             // GPU ribbon geometry is static after chart load. A child Canvas keeps
             // unrelated note and input changes from rebuilding the Guide batches.
-            guideLayer.gameObject.AddComponent<Canvas>();
+            EnableRibbonVertexChannels(guideLayer.gameObject.AddComponent<Canvas>());
             var guideBatchObject = new GameObject("Decoration Guide Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(GuideBatchGraphic));
             var guideBatchRect = guideBatchObject.GetComponent<RectTransform>(); guideBatchRect.SetParent(guideLayer, false); Fill(guideBatchRect);
             guideBatch = guideBatchObject.GetComponent<GuideBatchGraphic>(); guideBatch.raycastTarget = false; guideBatch.color = Color.white;
@@ -3836,6 +3877,9 @@ namespace Gugarhythm
 
         static float MillisecondsBetween(long startTimestamp, long endTimestamp) =>
             (float)((endTimestamp - startTimestamp) * 1000d / System.Diagnostics.Stopwatch.Frequency);
+
+        static float MillisecondsFromTicks(long elapsedTicks) =>
+            (float)(elapsedTicks * 1000d / System.Diagnostics.Stopwatch.Frequency);
 
         static string FormatBytes(long bytes)
         {
@@ -6771,6 +6815,24 @@ namespace Gugarhythm
         {
             var layer = new GameObject(name, typeof(RectTransform)).GetComponent<RectTransform>();
             layer.SetParent(parent, false); Fill(layer); return layer;
+        }
+
+        // A Canvas streams only position, color and TexCoord0 to its shaders
+        // unless a channel is declared here; anything else is stripped while
+        // the Canvas builds its batches, with no warning. TexCoord0 itself is
+        // streamed as a two-component channel, so a declared channel is also
+        // the only place a ribbon vertex can carry more than two extra floats.
+        // The GPU ribbon shader reads its baked lane-projection coefficients
+        // from TexCoord1 and its time-scale group and auxiliary indices from
+        // TexCoord2 (GpuRibbonProjection.Vertex writes uv1/uv2), so every
+        // Canvas that a GpuRibbonGraphic renders under has to opt into both
+        // or the shader silently receives zeroes: uv1 collapses every ribbon
+        // vertex onto the track centre, and uv2 pins every vertex to group 0.
+        static void EnableRibbonVertexChannels(Canvas canvas)
+        {
+            if (canvas == null) return;
+            canvas.additionalShaderChannels |= AdditionalCanvasShaderChannels.TexCoord1 |
+                AdditionalCanvasShaderChannels.TexCoord2;
         }
 
         static Slider MakeSlider(RectTransform parent, Vector2 position, float minimum, float maximum, float initial, Action<float> changed)

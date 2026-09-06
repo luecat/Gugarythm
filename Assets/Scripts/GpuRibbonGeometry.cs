@@ -11,17 +11,30 @@ namespace Gugarhythm
         HoldCritical,
     }
 
+    // A chunk's time-scale group and authored visual-position span, used to
+    // cull whole chunks that cannot possibly be on screen this frame without
+    // touching the (immutable) vertex data itself. Group -1 or an infinite
+    // span means "unknown span" and always renders, matching the behavior
+    // before per-chunk culling existed.
     public sealed class GpuRibbonChunkData
     {
         public readonly GpuRibbonKind Kind;
         public readonly UIVertex[] Vertices;
         public readonly int[] Indices;
+        public readonly int GroupIndex;
+        public readonly double MinVisualPosition;
+        public readonly double MaxVisualPosition;
 
-        public GpuRibbonChunkData(GpuRibbonKind kind, UIVertex[] vertices, int[] indices)
+        public GpuRibbonChunkData(GpuRibbonKind kind, UIVertex[] vertices, int[] indices,
+            int groupIndex = -1, double minVisualPosition = double.NegativeInfinity,
+            double maxVisualPosition = double.PositiveInfinity)
         {
             Kind = kind;
             Vertices = vertices ?? Array.Empty<UIVertex>();
             Indices = indices ?? Array.Empty<int>();
+            GroupIndex = groupIndex;
+            MinVisualPosition = minVisualPosition;
+            MaxVisualPosition = maxVisualPosition;
         }
     }
 
@@ -86,6 +99,27 @@ namespace Gugarhythm
             return new Vector2(center + side * width * .5f, ScreenY(screen, canvasHeight));
         }
 
+        // For a fixed lane, LaneX(lane, sourceY) is affine in sourceY (the
+        // only runtime-varying input once lane is baked): its guide segment,
+        // interpolation weight t, and therefore its Intercepts/Slopes lerp
+        // are all constant. This returns that affine form as
+        // LaneX(lane, sourceY) == constant + slope * sourceY, letting a
+        // caller bake per-vertex lane/size into plain coefficients so the
+        // vertex shader never re-derives them per frame (see Vertex below
+        // and GpuRibbonUI.shader). Kept in exact algebraic lock-step with
+        // LaneX above — any change there must be mirrored here.
+        public static void LaneProjectionCoefficients(float lane, out float constant, out float slope)
+        {
+            var guide = Mathf.Clamp(Mathf.FloorToInt(lane + CentralHalfLanes), 0, Intercepts.Length - 2);
+            var guideLane = -CentralHalfLanes + guide;
+            var t = lane - guideLane;
+            var sourceXIntercept = Mathf.LerpUnclamped(Intercepts[guide], Intercepts[guide + 1], t);
+            var sourceXSlope = Mathf.LerpUnclamped(Slopes[guide], Slopes[guide + 1], t);
+            var centerIndex = (int)CentralHalfLanes;
+            constant = (sourceXIntercept - Intercepts[centerIndex]) / LaneTextureWidth * ReferenceWidth;
+            slope = (sourceXSlope - Slopes[centerIndex]) / LaneTextureWidth * ReferenceWidth;
+        }
+
         public static UIVertex Vertex(float lane, float size, double visualPosition, float side,
             float textureV, int groupIndex, int auxiliaryIndex, float alpha)
         {
@@ -94,8 +128,24 @@ namespace Gugarhythm
             vertex.color = new Color32(255, 255, 255,
                 (byte)Mathf.RoundToInt(Mathf.Clamp01(alpha) * 255));
             vertex.uv0 = new Vector4(side < 0 ? 0 : 1, textureV, groupIndex, auxiliaryIndex);
-            vertex.uv1 = Vector4.zero;
-            vertex.uv2 = Vector4.zero;
+            // uv1 carries the baked (center constant, center slope, width
+            // constant, width slope) quadruple described above, so the GPU
+            // ribbon shader's vertex stage needs only two multiply-adds
+            // instead of the Intercepts/Slopes array lookups LaneX performs.
+            LaneProjectionCoefficients(lane, out var centerConstant, out var centerSlope);
+            LaneProjectionCoefficients(lane - size, out var leftConstant, out var leftSlope);
+            LaneProjectionCoefficients(lane + size, out var rightConstant, out var rightSlope);
+            vertex.uv1 = new Vector4(centerConstant, centerSlope,
+                rightConstant - leftConstant, rightSlope - leftSlope);
+            // A Canvas streams TexCoord0 as a two-component channel: only its
+            // xy survive batching, so the group and auxiliary indices these
+            // used to ride in (uv0.zw) reached the shader as zeroes. Every
+            // ribbon outside time-scale group 0 then resolved its approach
+            // against group 0's position and left the screen entirely, and
+            // every Guide drew with colour index 0. Carry them in TexCoord2
+            // instead, which EnableRibbonVertexChannels declares and which
+            // therefore arrives intact.
+            vertex.uv2 = new Vector4(groupIndex, auxiliaryIndex, 0, 0);
             vertex.uv3 = Vector4.zero;
             return vertex;
         }

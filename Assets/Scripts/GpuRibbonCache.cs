@@ -17,7 +17,22 @@ namespace Gugarhythm
         // Bumped: Build() now routes eligible Hold runs onto the GPU mesh
         // (GpuRibbonHoldRouting) and raised HoldSubdivisionCount, so a cache
         // written by the old always-CPU-holds builder must not be reused.
-        const int FormatVersion = 7;
+        // v8: chunks now carry a group index and visual-position span for
+        // per-frame culling; a v7 cache has neither field on disk.
+        // v9: vertices now carry baked lane-projection coefficients in uv1
+        // (see GpuRibbonProjection.Vertex); a v8 cache zeroed uv1 on read,
+        // which the shader now depends on for its screen position.
+        // v10: adaptive subdivision (AppendAdaptiveProgress) now refines on
+        // the curve's own (lane, size) shape, not just on visual-position
+        // span. A v9 cache could under-sample a short-but-sharply-curved
+        // Guide/Hold segment (e.g. a Guide's cubic spline through distant
+        // Start/End control points) badly enough to visibly misplace the
+        // ribbon; that stale geometry must not be reused.
+        // v11: the time-scale group and auxiliary indices moved from uv0.zw
+        // to uv2.xy, because a Canvas streams TexCoord0 with only two
+        // components and silently dropped them. A v10 cache has no uv2 on
+        // disk, so reusing it would keep every ribbon pinned to group 0.
+        const int FormatVersion = 11;
         const int BuildKeyVersion = 5;
         const int MaximumChunkCount = 4096;
         const int MaximumVertexCount = 8_000_000;
@@ -172,6 +187,9 @@ namespace Gugarhythm
             foreach (var chunk in result.Chunks)
             {
                 writer.Write((byte)chunk.Kind);
+                writer.Write(chunk.GroupIndex);
+                writer.Write(chunk.MinVisualPosition);
+                writer.Write(chunk.MaxVisualPosition);
                 writer.Write(chunk.Vertices.Length);
                 foreach (var vertex in chunk.Vertices)
                 {
@@ -186,6 +204,12 @@ namespace Gugarhythm
                     writer.Write(vertex.uv0.y);
                     writer.Write(vertex.uv0.z);
                     writer.Write(vertex.uv0.w);
+                    writer.Write(vertex.uv1.x);
+                    writer.Write(vertex.uv1.y);
+                    writer.Write(vertex.uv1.z);
+                    writer.Write(vertex.uv1.w);
+                    writer.Write(vertex.uv2.x);
+                    writer.Write(vertex.uv2.y);
                 }
                 writer.Write(chunk.Indices.Length);
                 foreach (var index in chunk.Indices) writer.Write(index);
@@ -219,6 +243,9 @@ namespace Gugarhythm
                 {
                     var kind = (GpuRibbonKind)reader.ReadByte();
                     if (!Enum.IsDefined(typeof(GpuRibbonKind), kind)) return false;
+                    var groupIndex = reader.ReadInt32();
+                    var minVisualPosition = reader.ReadDouble();
+                    var maxVisualPosition = reader.ReadDouble();
                     var vertexCount = ReadCount(reader, MaximumVertexCount);
                     actualVertices += vertexCount;
                     if (actualVertices > MaximumVertexCount) return false;
@@ -231,7 +258,10 @@ namespace Gugarhythm
                         vertex.color = new Color32(reader.ReadByte(), reader.ReadByte(), reader.ReadByte(), reader.ReadByte());
                         vertex.uv0 = new Vector4(reader.ReadSingle(), reader.ReadSingle(),
                             reader.ReadSingle(), reader.ReadSingle());
-                        vertex.uv1 = vertex.uv2 = vertex.uv3 = Vector4.zero;
+                        vertex.uv1 = new Vector4(reader.ReadSingle(), reader.ReadSingle(),
+                            reader.ReadSingle(), reader.ReadSingle());
+                        vertex.uv2 = new Vector4(reader.ReadSingle(), reader.ReadSingle(), 0, 0);
+                        vertex.uv3 = Vector4.zero;
                         vertices[vertexIndex] = vertex;
                     }
                     var indexCount = ReadCount(reader, MaximumIndexCount);
@@ -242,7 +272,8 @@ namespace Gugarhythm
                         indices[index] = reader.ReadInt32();
                         if (indices[index] < 0 || indices[index] >= vertexCount) return false;
                     }
-                    restored.Chunks.Add(new GpuRibbonChunkData(kind, vertices, indices));
+                    restored.Chunks.Add(new GpuRibbonChunkData(kind, vertices, indices,
+                        groupIndex, minVisualPosition, maxVisualPosition));
                 }
                 if (actualVertices != restored.VertexCount || stream.Position != stream.Length) return false;
                 result = restored;
