@@ -207,6 +207,14 @@ namespace Gugarhythm
     // when a RuntimeChart is replaced, never while the song clock advances.
     public sealed class GuideRenderCache
     {
+        // TEMPORARY / EXPERIMENTAL — Bug 2 prototype (guide curve angle).
+        // guide.Ease is never authored as -1 by the USC importer, so the
+        // Catmull-Rom branch in EvaluateCurve below is normally dead code.
+        // Tried true against Never Say Goodbye measure 65: made the fan
+        // shape visibly worse (curves overshoot/tangle), not better. Ruled
+        // out — Bug 2's real cause is not this dead branch. Leave false.
+        internal const bool ExperimentalForceCatmullRomGuides = false;
+
         readonly RuntimeGuide guide;
         readonly float laneP0;
         readonly float laneP1;
@@ -306,7 +314,7 @@ namespace Gugarhythm
 
         float EvaluateCurve(float p0, float p1, float p2, float p3, float progress)
         {
-            if (guide.Ease != -1)
+            if (!ExperimentalForceCatmullRomGuides && guide.Ease != -1)
                 return Mathf.Lerp(p1, p2, HoldPathMath.EaseProgress(progress, guide.Ease));
 
             var t2 = progress * progress;

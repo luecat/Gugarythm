@@ -179,7 +179,7 @@ namespace Gugarhythm
                 {
                     Index = index++, SourceId = "usc-slide:" + index, Archetype = archetype,
                     Beat = beat, Time = tempo.SecondsAt(beat), Lane = lane,
-                    Size = size, Critical = (bool?)connection["critical"] ?? (bool?)slide["critical"] ?? false,
+                    Size = size, Critical = (bool?)connection["critical"] ?? false,
                     Direction = FlickDirection(connection["direction"]),
                     Kind = semantics.Kind,
                     Visible = semantics.Visible,
@@ -191,13 +191,15 @@ namespace Gugarhythm
                 };
                 if ((isAttach || isTick) && holdRoot != null) point.HoldRootIndex = holdRoot.Index;
                 if (point.Visible) chart.Notes.Add(point);
-                if (isPathPoint && previousPoint != null) chart.Connectors.Add(new RuntimeConnector
-                {
-                    Start = previousPoint,
-                    End = point,
-                    Critical = point.Critical,
-                    Ease = previousEase,
-                });
+                // A connector renders critical (gold) only when BOTH ends are
+                // critical, not just one. A single node's own critical mark
+                // already colors that node's own icon; using only the tail's
+                // value here would bleed gold across an entire lead-in
+                // segment whenever it happens to end on a critical node,
+                // even though the segment itself is not critical.
+                if (isPathPoint && previousPoint != null)
+                    AddConnectorSegment(chart, previousPoint, point, previousPoint.Critical && point.Critical,
+                        previousEase, holdRoot.Index);
                 if (isPathPoint)
                 {
                     previousPoint = point;
@@ -205,6 +207,47 @@ namespace Gugarhythm
                     previousEase = EaseType(connection["ease"]);
                 }
             }
+        }
+
+        static void AddConnectorSegment(RuntimeChart chart, RuntimeNote start, RuntimeNote end, bool critical,
+            int ease, int rootIndex)
+        {
+            if (string.Equals(start.TimeScaleGroup, end.TimeScaleGroup, StringComparison.Ordinal))
+            {
+                chart.Connectors.Add(new RuntimeConnector { Start = start, End = end, Critical = critical, Ease = ease });
+                return;
+            }
+
+            // A connector whose two endpoints fall in different TimeScaleGroups
+            // has no single group under which the whole connector renders
+            // correctly (every consumer keys off one group per connector).
+            // Split it at its beat midpoint into two connectors that each
+            // fully belong to one group. This breaks the connector graph at
+            // the split, so the tail half would otherwise re-root as its own
+            // Hold; propagate the original Hold's root index onto both
+            // synthetic nodes so judgment and checkpoint grouping still
+            // treat this as one continuous Hold.
+            var progress = HoldPathMath.EaseProgress(.5f, ease);
+            var boundaryBeat = start.Beat + (end.Beat - start.Beat) * progress;
+            var boundaryTime = start.Time + (end.Time - start.Time) * progress;
+            var boundaryLane = start.Lane + (end.Lane - start.Lane) * progress;
+            var boundarySize = Math.Max(.25f, start.Size + (end.Size - start.Size) * progress);
+            var startSideBoundary = new RuntimeNote
+            {
+                Index = start.Index, SourceId = start.SourceId + ":tsgBoundary", Archetype = start.Archetype,
+                Beat = boundaryBeat, Time = boundaryTime, Lane = boundaryLane, Size = boundarySize,
+                Kind = RuntimeNoteKind.Sustain, Visible = false, Judged = false,
+                TimeScaleGroup = start.TimeScaleGroup, HoldRootIndex = rootIndex,
+            };
+            var endSideBoundary = new RuntimeNote
+            {
+                Index = end.Index, SourceId = end.SourceId + ":tsgBoundary", Archetype = end.Archetype,
+                Beat = boundaryBeat, Time = boundaryTime, Lane = boundaryLane, Size = boundarySize,
+                Kind = RuntimeNoteKind.Sustain, Visible = false, Judged = false,
+                TimeScaleGroup = end.TimeScaleGroup, HoldRootIndex = rootIndex,
+            };
+            chart.Connectors.Add(new RuntimeConnector { Start = start, End = startSideBoundary, Critical = critical, Ease = ease });
+            chart.Connectors.Add(new RuntimeConnector { Start = endSideBoundary, End = end, Critical = critical, Ease = ease });
         }
 
         static bool TryFindNextPathConnection(JObject[] connections, int startIndex, out JObject pathConnection)
@@ -302,22 +345,62 @@ namespace Gugarhythm
             var duration = Math.Max(1e-7, points[^1].Beat - firstBeat);
             for (var pointIndex = 0; pointIndex < points.Length - 1; pointIndex++)
             {
-                var headProgress = (points[pointIndex].Beat - firstBeat) / duration;
-                var tailProgress = (points[pointIndex + 1].Beat - firstBeat) / duration;
-                chart.Guides.Add(new RuntimeGuide
+                var head = points[pointIndex];
+                var tail = points[pointIndex + 1];
+                var ease = EaseType(source[pointIndex]["ease"]);
+                var contextStart = points[Math.Max(0, pointIndex - 1)];
+                var contextEnd = points[Math.Min(points.Length - 1, pointIndex + 2)];
+                if (string.Equals(head.TimeScaleGroup, tail.TimeScaleGroup, StringComparison.Ordinal))
                 {
-                    Start = points[Math.Max(0, pointIndex - 1)],
-                    Head = points[pointIndex],
-                    Tail = points[pointIndex + 1],
-                    End = points[Math.Min(points.Length - 1, pointIndex + 2)],
-                    Color = color,
-                    Fade = fade,
-                    Ease = EaseType(source[pointIndex]["ease"]),
-                    FadeOut = fade == 2,
-                    HeadOpacity = GuideOpacity(fade, headProgress),
-                    TailOpacity = GuideOpacity(fade, tailProgress),
-                });
+                    AddGuideSegment(chart, contextStart, head, tail, contextEnd, color, fade, ease,
+                        GuideOpacity(fade, (head.Beat - firstBeat) / duration),
+                        GuideOpacity(fade, (tail.Beat - firstBeat) / duration));
+                    continue;
+                }
+
+                // A segment whose two authored points fall in different
+                // TimeScaleGroups has no single group under which the whole
+                // segment renders correctly (every consumer keys off one
+                // group per segment). Split it at its beat midpoint into two
+                // segments that each fully belong to one group.
+                var progress = HoldPathMath.EaseProgress(.5f, ease);
+                var boundaryBeat = head.Beat + (tail.Beat - head.Beat) * progress;
+                var boundaryTime = head.Time + (tail.Time - head.Time) * progress;
+                var boundaryLane = head.Lane + (tail.Lane - head.Lane) * progress;
+                var boundarySize = Math.Max(.01f, head.Size + (tail.Size - head.Size) * progress);
+                var boundaryOpacity = GuideOpacity(fade, (boundaryBeat - firstBeat) / duration);
+                var headSideBoundary = new RuntimeGuidePoint
+                {
+                    Beat = boundaryBeat, Time = boundaryTime, Lane = boundaryLane, Size = boundarySize,
+                    TimeScaleGroup = head.TimeScaleGroup,
+                };
+                var tailSideBoundary = headSideBoundary;
+                tailSideBoundary.TimeScaleGroup = tail.TimeScaleGroup;
+
+                AddGuideSegment(chart, contextStart, head, headSideBoundary, tail, color, fade, ease,
+                    GuideOpacity(fade, (head.Beat - firstBeat) / duration), boundaryOpacity);
+                AddGuideSegment(chart, head, tailSideBoundary, tail, contextEnd, color, fade, ease,
+                    boundaryOpacity, GuideOpacity(fade, (tail.Beat - firstBeat) / duration));
             }
+        }
+
+        static void AddGuideSegment(RuntimeChart chart, RuntimeGuidePoint start, RuntimeGuidePoint head,
+            RuntimeGuidePoint tail, RuntimeGuidePoint end, int color, int fade, int ease,
+            float headOpacity, float tailOpacity)
+        {
+            chart.Guides.Add(new RuntimeGuide
+            {
+                Start = start,
+                Head = head,
+                Tail = tail,
+                End = end,
+                Color = color,
+                Fade = fade,
+                Ease = ease,
+                FadeOut = fade == 2,
+                HeadOpacity = headOpacity,
+                TailOpacity = tailOpacity,
+            });
         }
 
         static string TimeScaleGroupKey(RuntimeChart chart, JToken token)

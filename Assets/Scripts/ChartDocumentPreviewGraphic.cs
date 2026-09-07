@@ -883,7 +883,9 @@ namespace Gugarhythm
         static float EvaluateGuideCurve(RuntimeGuide guide, float p0, float p1, float p2, float p3, float progress)
         {
             progress = Mathf.Clamp01(progress);
-            if (guide.Ease != -1)
+            // Shares GuideRenderCache's Bug 2 prototype toggle so the preview
+            // panel and gameplay renderer show the same experimental curve.
+            if (!GuideRenderCache.ExperimentalForceCatmullRomGuides && guide.Ease != -1)
                 return Mathf.Lerp(p1, p2, HoldPathMath.EaseProgress(progress, guide.Ease));
 
             var squared = progress * progress;
