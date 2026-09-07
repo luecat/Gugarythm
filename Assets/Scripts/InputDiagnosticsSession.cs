@@ -17,6 +17,7 @@ namespace Gugarhythm
         const string LastReportPathPreferenceKey = "gugarhythm-input-diagnostics-last-report";
         const string RecordAllChartsPreferenceKey = "gugarhythm-input-diagnostics-record-all-charts";
         const string JudgmentProtectionPreferenceKey = "gugarhythm-input-diagnostics-protection";
+        const string PerformanceHudPreferenceKey = "gugarhythm-show-fps";
         const int WriterFlushInterval = 256;
 
         [Serializable]
@@ -70,6 +71,8 @@ namespace Gugarhythm
         public static string LastReportPath { get; private set; } = string.Empty;
         public static bool RecordAllChartsEnabled =>
             PlayerPrefs.GetInt(RecordAllChartsPreferenceKey, 0) != 0;
+        public static bool PerformanceHudEnabled =>
+            PlayerPrefs.GetInt(PerformanceHudPreferenceKey, 0) != 0;
 
         public static bool IsDebugEntry(LocalChartEntry entry) => entry != null && IsDebugEntry(entry.Id);
         public static bool IsDebugEntry(string entryId) => string.Equals(entryId, DebugEntryId, StringComparison.Ordinal);
@@ -83,6 +86,12 @@ namespace Gugarhythm
         public static void SetJudgmentProtectionEnabled(bool enabled)
         {
             PlayerPrefs.SetInt(JudgmentProtectionPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        public static void SetPerformanceHudEnabled(bool enabled)
+        {
+            PlayerPrefs.SetInt(PerformanceHudPreferenceKey, enabled ? 1 : 0);
             PlayerPrefs.Save();
         }
 

@@ -805,8 +805,8 @@ namespace Gugarhythm
                 AcquirePreviewGuideBatch().AddSegment(
                     ColumnPoint(left, bottom, top, columnIndex, cursorBeat, cursorLane),
                     ColumnPoint(left, bottom, top, columnIndex, splitBeat, splitLane),
-                    ColumnLaneSpan(Mathf.Max(.01f, cursorSize * .16f)),
-                    ColumnLaneSpan(Mathf.Max(.01f, splitSize * .16f)),
+                    ColumnLaneSpan(Mathf.Max(.01f, cursorSize)),
+                    ColumnLaneSpan(Mathf.Max(.01f, splitSize)),
                     cursorTint, splitTint);
                 activePreviewGuideSegments++;
                 if (splitBeat >= endBeat - 1e-8d) return;
@@ -874,6 +874,7 @@ namespace Gugarhythm
                 1 => new Color(214f / 255f, 115f / 255f, 205f / 255f),
                 5 => new Color(115f / 255f, 214f / 255f, 205f / 255f),
                 6 => new Color(28f / 255f, 34f / 255f, 48f / 255f),
+                7 => Color.white,
                 _ => new Color(115f / 255f, 214f / 255f, 157f / 255f),
             };
             tint.a = Mathf.Clamp01(opacity);

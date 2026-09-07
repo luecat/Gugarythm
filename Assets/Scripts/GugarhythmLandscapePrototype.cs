@@ -694,6 +694,7 @@ namespace Gugarhythm
         readonly bool[] calibrationRoundSucceeded = new bool[CalibrationRoundCount];
         Toggle autoPlayToggle;
         Toggle fastLateDisplayToggle;
+        Toggle performanceHudToggle;
         readonly Button[] hitParticleEffectButtons = new Button[3];
         Slider speedSlider;
         Slider upperHiddenBarSlider;
@@ -940,7 +941,7 @@ namespace Gugarhythm
             BuildInterface();
             if (!string.IsNullOrWhiteSpace(Application.absoluteURL))
                 HandleChartVaultDeepLink(Application.absoluteURL);
-            SetPerformanceDiagnosticsEnabled(false);
+            SetPerformanceDiagnosticsEnabled(InputDiagnosticsSession.PerformanceHudEnabled);
             SetStatus("請匯入 GGR 封包。");
         }
 
@@ -1399,6 +1400,15 @@ namespace Gugarhythm
             autoPlayToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
             PlayerPrefs.SetInt(AutoPlayPreferenceKey, enabled ? 1 : 0);
             PlayerPrefs.Save();
+        }
+
+        void SetPerformanceHudEnabled(bool enabled)
+        {
+            if (performanceHudToggle != null && performanceHudToggle.isOn != enabled)
+                performanceHudToggle.SetIsOnWithoutNotify(enabled);
+            performanceHudToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
+            SetPerformanceDiagnosticsEnabled(enabled);
+            InputDiagnosticsSession.SetPerformanceHudEnabled(enabled);
         }
 
         public static HitParticleEffectMode NormalizeHitParticleEffectMode(int value) =>
@@ -3075,6 +3085,7 @@ namespace Gugarhythm
             1 => new Color(214 / 255f, 115 / 255f, 205 / 255f, .32f),
             5 => new Color(115 / 255f, 214 / 255f, 205 / 255f, .32f),
             6 => new Color(28 / 255f, 34 / 255f, 48 / 255f, .32f),
+            7 => new Color(1f, 1f, 1f, .32f),
             _ => new Color(115 / 255f, 214 / 255f, 157 / 255f, .32f),
         };
 
@@ -3729,7 +3740,7 @@ namespace Gugarhythm
             performanceHudLabel.rectTransform.offsetMax = new Vector2(-12, -10);
         }
 
-        public static bool ShouldShowPerformanceDiagnosticsToggle() => false;
+        public static bool ShouldShowPerformanceDiagnosticsToggle() => true;
 
         void SetPerformanceDiagnosticsEnabled(bool enabled)
         {

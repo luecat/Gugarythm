@@ -431,6 +431,7 @@ namespace Gugarhythm
             "yellow" => 4,
             "cyan" => 5,
             "black" => 6,
+            "neutral" => 7,
             _ => 0,
         };
 

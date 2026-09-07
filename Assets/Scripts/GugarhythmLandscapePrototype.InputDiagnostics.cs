@@ -54,13 +54,18 @@ namespace Gugarhythm
                 ConfigureInputDiagnosticsJudgmentEngine();
             });
 
+            performanceHudToggle = MakeFigmaSlidingToggle("顯示 FPS 面板",
+                settingsDebugPanel, new Vector2(0, 5), SettingsSliderWidth,
+                performanceDiagnosticsEnabled);
+            performanceHudToggle.onValueChanged.AddListener(SetPerformanceHudEnabled);
+
             inputDiagnosticsStartButton = MakeFlatButton("載入並開始測試譜面", settingsDebugPanel,
-                new Vector2(0, -15), () => StartCoroutine(StartInputDiagnosticsChart()),
+                new Vector2(0, -85), () => StartCoroutine(StartInputDiagnosticsChart()),
                 new Vector2(700, 68), new Color(.06f, .58f, .96f));
 
-            MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -115),
+            MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -185),
                 CopyLastInputDiagnosticsReport, new Vector2(320, 58));
-            MakeOutlinedButton("刪除上次報告", settingsDebugPanel, new Vector2(180, -115),
+            MakeOutlinedButton("刪除上次報告", settingsDebugPanel, new Vector2(180, -185),
                 ClearLastInputDiagnosticsReport, new Vector2(320, 58));
 
             inputDiagnosticsStatusLabel = Label("", settingsDebugPanel, 18);
@@ -68,8 +73,8 @@ namespace Gugarhythm
             inputDiagnosticsStatusLabel.color = new Color(.72f, .78f, .84f);
             inputDiagnosticsStatusLabel.horizontalOverflow = HorizontalWrapMode.Wrap;
             inputDiagnosticsStatusLabel.verticalOverflow = VerticalWrapMode.Overflow;
-            inputDiagnosticsStatusLabel.rectTransform.sizeDelta = new Vector2(900, 150);
-            inputDiagnosticsStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -245);
+            inputDiagnosticsStatusLabel.rectTransform.sizeDelta = new Vector2(900, 130);
+            inputDiagnosticsStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -315);
             RefreshInputDiagnosticsSettingsStatus();
             settingsDebugPanel.gameObject.SetActive(false);
         }

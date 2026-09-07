@@ -116,6 +116,7 @@ Shader "Gugarhythm/GPU Ribbon UI"
 
             fixed4 GuideColor(float index)
             {
+                if (index > 6.5) return fixed4(1, 1, 1, 1);
                 if (index > 5.5) return fixed4(28.0 / 255.0, 34.0 / 255.0, 48.0 / 255.0, 1);
                 if (index > 4.5) return fixed4(115.0 / 255.0, 214.0 / 255.0, 205.0 / 255.0, 1);
                 if (index > 3.5) return fixed4(214.0 / 255.0, 179.0 / 255.0, 98.0 / 255.0, 1);
