@@ -113,6 +113,25 @@ namespace Gugarhythm
             }
         }
 
+        // Whole-group invertibility (SupportsVisualTimeInversion) disqualifies
+        // every consumer sharing this group the moment ANY keyframe anywhere
+        // in the song has scale <= 0, even a two-second reverse gimmick late
+        // in an otherwise ordinary song. A Hold path only actually needs its
+        // own visible span to be monotonic — the scale governing time outside
+        // [startTime, endTime] never affects position values sampled inside
+        // it. This checks just the points active across that span.
+        public bool SupportsVisualTimeInversionInRange(double startTime, double endTime)
+        {
+            if (endTime < startTime) (startTime, endTime) = (endTime, startTime);
+            var startIndex = PointIndexAt(startTime);
+            for (var index = startIndex; index < points.Count; index++)
+            {
+                if (points[index].Scale <= 1e-9) return false;
+                if (points[index].Time >= endTime) break;
+            }
+            return true;
+        }
+
         public double PositionAt(double time) => PositionAt(time, out _);
 
         public double PositionAt(double time, out int searchSteps)
@@ -353,10 +372,15 @@ namespace Gugarhythm
             return key != null && TimeScaleGroups.TryGetValue(key, out var map) ? map.TimeAtPosition(position) : position;
         }
 
-        public bool CanInvertVisualTime(string group)
+        // startTime/endTime scope the check to one Hold connector's own visible
+        // span (see RuntimeTimeScaleGroup.SupportsVisualTimeInversionInRange) so
+        // a reverse/stop gimmick elsewhere in the song no longer disqualifies
+        // every Hold sharing the group from the fast render path.
+        public bool CanInvertVisualTime(string group, double startTime, double endTime)
         {
             var key = string.IsNullOrEmpty(group) ? DefaultTimeScaleGroup : group;
-            return key == null || !TimeScaleGroups.TryGetValue(key, out var map) || map.SupportsVisualTimeInversion;
+            return key == null || !TimeScaleGroups.TryGetValue(key, out var map) ||
+                map.SupportsVisualTimeInversionInRange(startTime, endTime);
         }
     }
 

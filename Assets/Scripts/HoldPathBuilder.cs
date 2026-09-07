@@ -78,7 +78,7 @@ namespace Gugarhythm
                     warning = "Hold path changes TimeScaleGroup; using legacy connector rendering.";
                     return false;
                 }
-                if (!chart.CanInvertVisualTime(startGroup))
+                if (!chart.CanInvertVisualTime(startGroup, connector.Start.Time, connector.End.Time))
                 {
                     warning = "Hold path uses a non-invertible TimeScaleGroup; using legacy connector rendering.";
                     return false;
