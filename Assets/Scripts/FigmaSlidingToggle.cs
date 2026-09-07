@@ -65,6 +65,51 @@ namespace Gugarhythm
         }
     }
 
+    // A ring of dots with a brightness pulse traveling around it -- the
+    // common "iOS activity indicator" loading motif, built from the same
+    // FigmaRoundedRectangleGraphic used for the toggle so it needs no
+    // sprite asset (radius == half the dot size renders a filled circle).
+    public sealed class FigmaDotSpinnerVisual : MonoBehaviour
+    {
+        const float CycleSeconds = 1.1f;
+
+        FigmaRoundedRectangleGraphic[] dots;
+        Color baseColor;
+
+        public void Initialize(RectTransform root, int dotCount, float ringRadius, float dotDiameter, Color color)
+        {
+            baseColor = color;
+            dots = new FigmaRoundedRectangleGraphic[dotCount];
+            for (var index = 0; index < dotCount; index++)
+            {
+                var dotObject = new GameObject("Spinner Dot", typeof(RectTransform), typeof(CanvasRenderer), typeof(FigmaRoundedRectangleGraphic));
+                var dotRect = dotObject.GetComponent<RectTransform>();
+                dotRect.SetParent(root, false);
+                dotRect.sizeDelta = new Vector2(dotDiameter, dotDiameter);
+                var angle = index * Mathf.PI * 2f / dotCount;
+                dotRect.anchoredPosition = new Vector2(Mathf.Cos(angle), Mathf.Sin(angle)) * ringRadius;
+                var graphic = dotObject.GetComponent<FigmaRoundedRectangleGraphic>();
+                graphic.raycastTarget = false;
+                graphic.Configure(color, dotDiameter * .5f);
+                dots[index] = graphic;
+            }
+        }
+
+        // Runs on unscaled time so the spinner keeps animating while the
+        // loading overlay is up during a device-audio pause/reschedule.
+        void Update()
+        {
+            if (dots == null) return;
+            var time = Time.unscaledTime;
+            for (var index = 0; index < dots.Length; index++)
+            {
+                var phase = time / CycleSeconds * Mathf.PI * 2f - index * (Mathf.PI * 2f / dots.Length);
+                var pulse = (Mathf.Sin(phase) + 1f) * .5f;
+                dots[index].color = new Color(baseColor.r, baseColor.g, baseColor.b, Mathf.Lerp(.2f, 1f, pulse));
+            }
+        }
+    }
+
     public sealed class FigmaSlidingToggleVisual : MonoBehaviour
     {
         const float AnimationDuration = .12f;

@@ -310,8 +310,8 @@ public static class RuntimeValidation
 
     static void ValidatePerformanceDiagnosticsToggleVisibility()
     {
-        Require(!GugarhythmLandscapePrototype.ShouldShowPerformanceDiagnosticsToggle(),
-            "The player-facing performance diagnostics toggle must remain hidden");
+        Require(GugarhythmLandscapePrototype.ShouldShowPerformanceDiagnosticsToggle(),
+            "The performance diagnostics toggle is now exposed on the Settings > 偵錯 tab");
     }
 
     static void ValidateTimingSampleWindow()

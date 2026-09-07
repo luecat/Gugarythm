@@ -43,6 +43,7 @@ namespace Gugarhythm
         float appliedCanvasHeight = float.NaN;
         float appliedNearTrackProgress = float.NaN;
         bool disposed;
+        bool holdStateTextureDirty;
 
         public RuntimeChart Chart => chart;
         public int ChunkCount => entries.Count;
@@ -290,8 +291,7 @@ namespace Gugarhythm
             var value = missed ? (byte)255 : (byte)0;
             if (statePixels[index].r == value) return;
             statePixels[index] = new Color32(value, value, value, 255);
-            stateTexture.SetPixels32(statePixels);
-            stateTexture.Apply(false, false);
+            holdStateTextureDirty = true;
         }
 
         public void ClearHoldStates()
@@ -305,6 +305,20 @@ namespace Gugarhythm
                 changed = true;
             }
             if (!changed) return;
+            holdStateTextureDirty = true;
+            FlushHoldStateTexture();
+        }
+
+        // Judgment events can register several holds' missed state in the
+        // same frame (e.g. CommitMisses resolving a batch of overdue notes).
+        // Each SetHoldMissed used to re-upload the whole state texture and
+        // Apply() it immediately, so a busy frame could pay for that GPU
+        // sync many times over. Callers now mark the pixel buffer dirty and
+        // call this once per frame after all judgments for the frame are in.
+        public void FlushHoldStateTexture()
+        {
+            if (disposed || !holdStateTextureDirty) return;
+            holdStateTextureDirty = false;
             stateTexture.SetPixels32(statePixels);
             stateTexture.Apply(false, false);
         }

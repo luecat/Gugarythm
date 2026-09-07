@@ -197,6 +197,14 @@ namespace Gugarhythm
         const double StackedTimeTolerance = 1e-9;
         public bool JudgmentProtectionEnabled { get; set; } = true;
 
+        // Diagnostics only (Phantom Crisis bar 85~97 frame-drop investigation):
+        // how many (input, candidate note) edges were considered last frame.
+        // A spike here during real play but not auto-play would confirm the
+        // dense-stream section is costing more due to candidate-set size, not
+        // rendering. Never read by judgment logic itself.
+        public int LastFrameCandidateEdgeCount { get; private set; }
+        public int LastFrameInputCount { get; private set; }
+
         readonly List<RuntimeNote> notes;
         readonly ScoreState score;
         readonly Dictionary<int, TapProtectionPair[]> tapProtectionPairs;
@@ -316,9 +324,12 @@ namespace Gugarhythm
             inputDiagnostics?.Clear();
             if (autoPlay)
             {
+                LastFrameCandidateEdgeCount = 0;
+                LastFrameInputCount = 0;
                 ResolveAutoPlay(songTime, output);
                 return;
             }
+            LastFrameInputCount = inputBatch?.Count ?? 0;
             RecordContactPaths(songTime, contactPaths);
             MatchDiscreteInputs(inputBatch, output, inputDiagnostics);
             ResolveContactNotes(songTime, contacts, contactPaths, output);
@@ -345,7 +356,11 @@ namespace Gugarhythm
         void MatchDiscreteInputs(IReadOnlyList<InputToken> inputs, List<JudgmentEvent> output,
             List<JudgmentInputDiagnostic> inputDiagnostics)
         {
-            if (inputs == null || inputs.Count == 0) return;
+            if (inputs == null || inputs.Count == 0)
+            {
+                LastFrameCandidateEdgeCount = 0;
+                return;
+            }
             PrepareInputWorkspaces(inputs.Count);
             if (inputDiagnostics != null)
             {
@@ -407,6 +422,7 @@ namespace Gugarhythm
             }
             if (retainedCount < edgeWorkspace.Count)
                 edgeWorkspace.RemoveRange(retainedCount, edgeWorkspace.Count - retainedCount);
+            LastFrameCandidateEdgeCount = edgeWorkspace.Count;
 
             for (var edgeIndex = 0; edgeIndex < edgeWorkspace.Count; edgeIndex++)
             {

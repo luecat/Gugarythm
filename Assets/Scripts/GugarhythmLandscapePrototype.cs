@@ -700,6 +700,9 @@ namespace Gugarhythm
         Slider upperHiddenBarSlider;
         Slider settingsMusicVolumeSlider;
         Slider settingsKeyVolumeSlider;
+        Slider pauseSeekSlider;
+        Text pauseSeekTimeLabel;
+        bool seekUsedThisRun;
         Material laneMaterial;
         Material missedHoldMaterial;
         bool running;
@@ -749,9 +752,16 @@ namespace Gugarhythm
         float latestHoldsMilliseconds;
         float latestGuidesMilliseconds;
         float latestSimLinesMilliseconds;
+        float latestJudgmentMilliseconds;
+        int latestInputBatchCount;
+        int latestJudgmentCandidateEdgeCount;
         GuideFrameSnapshot latestGuideFrameSnapshot;
         HotPathFrameSnapshot latestHotPathFrameSnapshot;
         ProfilerRecorder gcAllocationRecorder;
+        // TEMPORARY / DIAGNOSTIC — Phantom Crisis bar 85~97 frame-drop investigation.
+        // Mirrors the Performance HUD numbers to disk (4/s) so they can be read
+        // back without needing a screenshot. Safe to delete once that's resolved.
+        string performanceLogPath;
 
         const double PresentationClockFallbackHardResetThreshold = .1d;
         double presentationClockHardResetThreshold = PresentationClockFallbackHardResetThreshold;
@@ -885,6 +895,17 @@ namespace Gugarhythm
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
             Application.deepLinkActivated += HandleChartVaultDeepLink;
             RefreshPresentationClockHardResetThreshold();
+#if UNITY_IOS
+            // iOS/iPadOS ignores QualitySettings.vSyncCount entirely; frame
+            // pacing is driven solely by Application.targetFrameRate (Unity
+            // maps it to CADisplayLink.preferredFramesPerSecond). Leaving it
+            // at -1 does not mean "match the display" here the way it does on
+            // Android -- it falls back to a conservative default well below
+            // a ProMotion panel's 120Hz, so a ProMotion iPad silently ran
+            // capped under its own refresh rate. Ask for 120 explicitly; on
+            // a 60Hz iOS device this clamps down to that device's own max.
+            Application.targetFrameRate = 120;
+#else
             // Previously targetFrameRate=120 with vSyncCount=0 on a 60Hz panel:
             // the renderer paced itself to a cadence the display can't present,
             // so every other frame missed the actual flip and read as stutter
@@ -893,6 +914,7 @@ namespace Gugarhythm
             // targetFrameRate is ignored while vSync is enabled.
             QualitySettings.vSyncCount = 1;
             Application.targetFrameRate = -1;
+#endif
             LandscapeOrientation.Lock();
             scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarhythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
             upperHiddenBarPercent = ClampUpperHiddenBarPercent(
@@ -1105,6 +1127,25 @@ namespace Gugarhythm
             if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
         }
 
+        // Covers the app switcher / recents view, the power/lock button, and
+        // an incoming call interrupting playback -- OS platforms report these
+        // through OnApplicationPause and/or OnApplicationFocus depending on
+        // the interruption, so both are wired to the same guarded pause path.
+        void OnApplicationPause(bool pauseStatus)
+        {
+            if (pauseStatus) AutoPauseGameplay();
+        }
+
+        void OnApplicationFocus(bool hasFocus)
+        {
+            if (!hasFocus) AutoPauseGameplay();
+        }
+
+        void AutoPauseGameplay()
+        {
+            if (running && !paused) PauseGame();
+        }
+
         void SubscribeTouchCallbacks()
         {
             if (touchCallbacksSubscribed) return;
@@ -1207,10 +1248,15 @@ namespace Gugarhythm
                 InputDiagnosticsSession.CaptureActive ? inputDiagnosticsDecisions : null);
             RecordInputDiagnosticsDecisions();
             if (measurePerformance)
+            {
+                latestJudgmentMilliseconds = MillisecondsBetween(judgmentTimingStart, System.Diagnostics.Stopwatch.GetTimestamp());
+                latestInputBatchCount = inputBatch?.Count ?? 0;
+                latestJudgmentCandidateEdgeCount = judgmentEngine.LastFrameCandidateEdgeCount;
                 RecordFramePacingDiagnostics(rawDspTime, presentationDspTime,
-                    MillisecondsBetween(judgmentTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
-                    Time.unscaledDeltaTime);
+                    latestJudgmentMilliseconds, Time.unscaledDeltaTime);
+            }
             for (var index = 0; index < judgmentEvents.Count; index++) OnJudgment(judgmentEvents[index]);
+            gpuRibbonRenderer?.FlushHoldStateTexture();
             UpdateVisuals(presentationSongTime + visualOffsetSeconds);
             RefreshHud();
             if (measurePerformance)
@@ -1829,6 +1875,7 @@ namespace Gugarhythm
             presentationClock.Invalidate();
             BeginInputDiagnosticsRunIfNeeded();
             autoPlayUsedThisRun = false;
+            seekUsedThisRun = false;
             ResetRuntime();
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
@@ -1899,6 +1946,49 @@ namespace Gugarhythm
             pauseMenuContent.gameObject.SetActive(true);
             resumeCountdownLabel.gameObject.SetActive(false);
             pauseOverlay.gameObject.SetActive(true);
+            SyncPauseSeekSlider();
+        }
+
+        void SyncPauseSeekSlider()
+        {
+            if (pauseSeekSlider == null || chart == null || music.clip == null || music.clip.length <= 0f) return;
+            var clipTime = GameplayTiming.ClipTimeForChartTime(lastObservedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
+            var normalized = Mathf.Clamp01(clipTime / music.clip.length);
+            pauseSeekSlider.SetValueWithoutNotify(normalized);
+            UpdatePauseSeekLabel(normalized);
+        }
+
+        void UpdatePauseSeekLabel(float normalized)
+        {
+            if (pauseSeekTimeLabel == null || music.clip == null) return;
+            var total = music.clip.length;
+            pauseSeekTimeLabel.text = $"{FormatSeekTime(Mathf.Clamp01(normalized) * total)} / {FormatSeekTime(total)}";
+        }
+
+        static string FormatSeekTime(float seconds)
+        {
+            var total = Mathf.Max(0, Mathf.FloorToInt(seconds));
+            return $"{total / 60}:{total % 60:00}";
+        }
+
+        // Dragging the pause-menu progress bar jumps the chart to that point
+        // in the song. Reuses the same reset-and-reschedule path as the
+        // audio-device-interruption recovery flow (resumeNeedsAudioReschedule)
+        // so Continue restarts playback exactly at the chosen time. Combo and
+        // score are wiped because the run's history no longer matches the
+        // notes -- seeking always disqualifies the run from best-record saving.
+        void SeekToProgress(float normalized)
+        {
+            if (!running || !paused || chart == null || music.clip == null || music.clip.length <= 0f) return;
+            normalized = Mathf.Clamp01(normalized);
+            var targetSongTime = normalized * music.clip.length - chart.BgmOffset + audioOffsetSeconds;
+            seekUsedThisRun = true;
+            ResetRuntime();
+            ClearJudgment();
+            lastObservedSongTime = targetSongTime;
+            interruptedSongTime = targetSongTime;
+            resumeNeedsAudioReschedule = true;
+            UpdateVisuals(targetSongTime + visualOffsetSeconds);
         }
 
         public static bool ShouldPauseForAudioConfigurationChange(bool deviceWasChanged, bool isRunning, bool isPaused) =>
@@ -1930,6 +2020,7 @@ namespace Gugarhythm
             pauseMenuContent.gameObject.SetActive(true);
             resumeCountdownLabel.gameObject.SetActive(false);
             pauseOverlay.gameObject.SetActive(true);
+            SyncPauseSeekSlider();
         }
 
         void ContinueGame()
@@ -3480,10 +3571,12 @@ namespace Gugarhythm
             RefreshHud();
             var wasInputDiagnostics = InputDiagnosticsSession.IsDebugEntry(currentLibraryEntry);
             EndInputDiagnosticsRun("chart-completed", true);
-            if (currentLibraryEntry != null && !wasInputDiagnostics && !autoPlayUsedThisRun)
+            if (currentLibraryEntry != null && !wasInputDiagnostics && !autoPlayUsedThisRun && !seekUsedThisRun)
                 LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
             resultPanel.gameObject.SetActive(true);
-            var autoPlayHint = autoPlayUsedThisRun && !wasInputDiagnostics ? "\n\n(AUTO PLAY，成績不計入最佳紀錄)" : "";
+            var autoPlayHint = !wasInputDiagnostics && autoPlayUsedThisRun ? "\n\n(AUTO PLAY，成績不計入最佳紀錄)"
+                : !wasInputDiagnostics && seekUsedThisRun ? "\n\n(已調整播放進度，成績不計入最佳紀錄)"
+                : "";
             resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}\n\nFAST      LATE\n{judgmentTimingStatistics.Fast:N0}          {judgmentTimingStatistics.Late:N0}{autoPlayHint}";
         }
 
@@ -3714,12 +3807,20 @@ namespace Gugarhythm
         void BuildGameplayLoadingOverlay(RectTransform root)
         {
             gameplayLoadingOverlay = Panel("Gameplay Loading Overlay", root, new Color(.015f, .02f, .06f, .82f), Vector2.zero, Vector2.zero, true);
-            var card = Panel("Gameplay Loading Card", gameplayLoadingOverlay, new Color(.08f, .12f, .20f, .96f), new Vector2(620, 220), Vector2.zero);
-            Outline(card.gameObject, new Color(.25f, .65f, .90f, .85f), 2);
-            gameplayLoadingLabel = Label("正在準備譜面…", card, 30);
+            var card = Panel("Gameplay Loading Card", gameplayLoadingOverlay, new Color(.07f, .07f, .07f, .99f), new Vector2(560, 240), Vector2.zero);
+            Outline(card.gameObject, new Color(.34f, .35f, .38f, .95f), 1);
+
+            var spinnerRoot = new GameObject("Loading Spinner", typeof(RectTransform)).GetComponent<RectTransform>();
+            spinnerRoot.SetParent(card, false);
+            spinnerRoot.sizeDelta = new Vector2(64, 64);
+            spinnerRoot.anchoredPosition = new Vector2(0, 42);
+            spinnerRoot.gameObject.AddComponent<FigmaDotSpinnerVisual>()
+                .Initialize(spinnerRoot, 8, 24f, 10f, new Color(.06f, .58f, .96f, 1f));
+
+            gameplayLoadingLabel = Label("正在準備譜面…", card, 26);
             gameplayLoadingLabel.alignment = TextAnchor.MiddleCenter;
-            gameplayLoadingLabel.rectTransform.sizeDelta = new Vector2(560, 120);
-            gameplayLoadingLabel.rectTransform.anchoredPosition = new Vector2(0, 8);
+            gameplayLoadingLabel.rectTransform.sizeDelta = new Vector2(500, 100);
+            gameplayLoadingLabel.rectTransform.anchoredPosition = new Vector2(0, -46);
             gameplayLoadingOverlay.gameObject.SetActive(false);
         }
 
@@ -3758,7 +3859,17 @@ namespace Gugarhythm
 
             if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
             if (enabled)
+            {
                 gcAllocationRecorder = ProfilerRecorder.StartNew(ProfilerCategory.Memory, "GC Allocated In Frame", 1);
+                performanceLogPath = Path.Combine(Application.persistentDataPath, "PerformanceDiagnostics",
+                    $"perf-{DateTime.UtcNow:yyyyMMdd-HHmmss}.jsonl");
+                try { Directory.CreateDirectory(Path.GetDirectoryName(performanceLogPath)); }
+                catch (Exception exception) { Debug.LogWarning("效能 log 目錄建立失敗：" + exception.Message); performanceLogPath = null; }
+            }
+            else
+            {
+                performanceLogPath = null;
+            }
 
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
@@ -3834,6 +3945,26 @@ namespace Gugarhythm
                 $">8.33 {frameBudgetCounter.Over120HzBudget}  >16.67 {frameBudgetCounter.Over60HzBudget}  >33.33 {frameBudgetCounter.Over30HzBudget}\n" +
                 $"{Screen.width} × {Screen.height}   @ {refreshRate:0.##} Hz   {snapshot.SampleCount} frames\n" +
                 BuildIdentity.Display;
+
+            if (!string.IsNullOrEmpty(performanceLogPath))
+            {
+                var inv = CultureInfo.InvariantCulture;
+                var line = "{\"songTime\":" + lastObservedSongTime.ToString("F4", inv) +
+                    ",\"fps\":" + snapshot.CurrentFps.ToString("F1", inv) +
+                    ",\"frameMs\":" + (1000f / snapshot.CurrentFps).ToString("F2", inv) +
+                    ",\"cpuMs\":" + latestCpuFrameTimeMs.ToString("F2", inv) +
+                    ",\"gpuMs\":" + latestGpuFrameTimeMs.ToString("F2", inv) +
+                    ",\"gcBytes\":" + gcBytes.ToString(inv) +
+                    ",\"notesMs\":" + latestNotesMilliseconds.ToString("F2", inv) +
+                    ",\"holdsMs\":" + latestHoldsMilliseconds.ToString("F2", inv) +
+                    ",\"guidesMs\":" + latestGuidesMilliseconds.ToString("F2", inv) +
+                    ",\"simLinesMs\":" + latestSimLinesMilliseconds.ToString("F2", inv) +
+                    ",\"judgmentMs\":" + latestJudgmentMilliseconds.ToString("F2", inv) +
+                    ",\"inputCount\":" + latestInputBatchCount.ToString(inv) +
+                    ",\"candidateEdges\":" + latestJudgmentCandidateEdgeCount.ToString(inv) + "}";
+                try { File.AppendAllText(performanceLogPath, line + "\n"); }
+                catch (Exception exception) { Debug.LogWarning("效能 log 寫入失敗：" + exception.Message); performanceLogPath = null; }
+            }
         }
 
         static string FormatMilliseconds(double value) =>
@@ -3965,7 +4096,8 @@ namespace Gugarhythm
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
             FitChartPreviewPanel(chartPreviewPanel, 32f);
-            FitOverlayPanel(pauseMenuContent, new Vector2(620, 520), logicalSafeSize);
+            FitOverlayPanel(pauseMenuContent, new Vector2(620, 560), logicalSafeSize);
+            if (pauseMenuContent != null) pauseMenuContent.anchoredPosition = new Vector2(0, 100);
             FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
         }
 
@@ -6019,14 +6151,24 @@ namespace Gugarhythm
         {
             pauseOverlay = Panel("Pause Overlay", root, new Color(0, 0, 0, .72f), Vector2.zero, Vector2.zero, true);
             pauseOverlay.GetComponent<Image>().raycastTarget = true;
-            pauseMenuContent = Panel("Pause Menu", pauseOverlay, new Color(.04f, .06f, .14f, .98f), new Vector2(620, 520), Vector2.zero);
-            Outline(pauseMenuContent.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
+            pauseMenuContent = Panel("Pause Menu", pauseOverlay, new Color(.07f, .07f, .07f, .99f), new Vector2(620, 560), Vector2.zero);
+            Outline(pauseMenuContent.gameObject, new Color(.34f, .35f, .38f, .95f), 1);
             pauseTitle = Label("暫停", pauseMenuContent, 42);
-            pauseTitle.rectTransform.sizeDelta = new Vector2(560, 120);
-            pauseTitle.rectTransform.anchoredPosition = new Vector2(0, 180);
-            MakeButton("繼續", pauseMenuContent, new Vector2(0, 80), ContinueGame, new Vector2(360, 82));
-            MakeButton("重新開始", pauseMenuContent, new Vector2(0, -30), RestartGame, new Vector2(360, 82));
-            MakeButton("退出", pauseMenuContent, new Vector2(0, -140), ExitToMenu, new Vector2(360, 82));
+            pauseTitle.rectTransform.sizeDelta = new Vector2(560, 90);
+            pauseTitle.rectTransform.anchoredPosition = new Vector2(0, 211);
+            MakeFlatButton("繼續", pauseMenuContent, new Vector2(0, 105), ContinueGame, new Vector2(360, 82), new Color(.06f, .58f, .96f));
+            MakeFlatButton("重新開始", pauseMenuContent, new Vector2(0, 0), RestartGame, new Vector2(360, 82), new Color(.18f, .18f, .18f));
+            MakeOutlinedButton("退出", pauseMenuContent, new Vector2(0, -107), ExitToMenu, new Vector2(360, 82));
+            pauseSeekSlider = MakeSlider(pauseMenuContent, new Vector2(0, -197), 0f, 1f, 0f, UpdatePauseSeekLabel, new Vector2(16, 26));
+            pauseSeekSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(520, 18);
+            var seekTrigger = pauseSeekSlider.gameObject.AddComponent<EventTrigger>();
+            var seekReleaseEntry = new EventTrigger.Entry { eventID = EventTriggerType.PointerUp };
+            seekReleaseEntry.callback.AddListener(_ => SeekToProgress(pauseSeekSlider.value));
+            seekTrigger.triggers = new List<EventTrigger.Entry> { seekReleaseEntry };
+            pauseSeekTimeLabel = Label("0:00 / 0:00", pauseMenuContent, 20);
+            pauseSeekTimeLabel.color = new Color(.7f, .7f, .7f);
+            pauseSeekTimeLabel.rectTransform.sizeDelta = new Vector2(520, 32);
+            pauseSeekTimeLabel.rectTransform.anchoredPosition = new Vector2(0, -236);
             resumeCountdownLabel = Label("3", pauseOverlay, 128);
             Fill(resumeCountdownLabel.rectTransform);
             resumeCountdownLabel.gameObject.SetActive(false);
@@ -6846,13 +6988,23 @@ namespace Gugarhythm
                 AdditionalCanvasShaderChannels.TexCoord2;
         }
 
-        static Slider MakeSlider(RectTransform parent, Vector2 position, float minimum, float maximum, float initial, Action<float> changed)
+        static Slider MakeSlider(RectTransform parent, Vector2 position, float minimum, float maximum, float initial, Action<float> changed, Vector2? handleSize = null)
         {
             var root = Panel("Speed Slider", parent, new Color(.08f, .13f, .26f, .95f), new Vector2(520, 18), position);
             Outline(root.gameObject, new Color(.45f, .75f, 1f, .8f), 2);
             var fill = Panel("Fill", root, new Color(.25f, 1f, .76f, .9f), Vector2.zero, Vector2.zero, true);
             fill.offsetMin = new Vector2(3, 3); fill.offsetMax = new Vector2(-3, -3);
-            var handle = Panel("Handle", root, new Color(.95f, 1f, 1f), new Vector2(28, 42), Vector2.zero);
+            var size = handleSize ?? new Vector2(28, 42);
+            // Handle slides within an area inset by half its own width on each
+            // side, so at value 0/1 the handle sits flush with the track's
+            // edges instead of overhanging past it.
+            var handleArea = new GameObject("Handle Slide Area", typeof(RectTransform)).GetComponent<RectTransform>();
+            handleArea.SetParent(root, false);
+            handleArea.anchorMin = new Vector2(0f, .5f);
+            handleArea.anchorMax = new Vector2(1f, .5f);
+            handleArea.offsetMin = new Vector2(size.x * .5f, -size.y * .5f);
+            handleArea.offsetMax = new Vector2(-size.x * .5f, size.y * .5f);
+            var handle = Panel("Handle", handleArea, new Color(.95f, 1f, 1f), size, Vector2.zero);
             Outline(handle.gameObject, new Color(.4f, 1f, .8f), 2);
             var slider = root.gameObject.AddComponent<Slider>();
             slider.minValue = minimum; slider.maxValue = maximum; slider.value = initial; slider.direction = Slider.Direction.LeftToRight;

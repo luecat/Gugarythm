@@ -111,17 +111,35 @@ namespace Gugarhythm
         {
             var targetMinimum = Math.Min(target.Head.Time, target.Tail.Time);
             var targetMaximum = Math.Max(target.Head.Time, target.Tail.Time);
+            LaneBand(target, out var targetLaneMinimum, out var targetLaneMaximum);
             for (var index = firstIndex + 1; index < nextIndex; index++)
             {
                 var candidate = guides[index];
                 if (candidate == null || SameGuide(target, candidate)) continue;
                 var candidateMinimum = Math.Min(candidate.Head.Time, candidate.Tail.Time);
                 var candidateMaximum = Math.Max(candidate.Head.Time, candidate.Tail.Time);
-                if (Math.Min(targetMaximum, candidateMaximum) >
+                if (Math.Min(targetMaximum, candidateMaximum) <=
                     Math.Max(targetMinimum, candidateMinimum) + 1e-9)
-                    return true;
+                    continue; // No shared time window: draw order between them can't matter.
+
+                LaneBand(candidate, out var candidateLaneMinimum, out var candidateLaneMaximum);
+                if (Math.Min(targetLaneMaximum, candidateLaneMaximum) >
+                    Math.Max(targetLaneMinimum, candidateLaneMinimum) + 1e-6)
+                    return true; // Shares both time and lane space: compositing order matters.
             }
             return false;
+        }
+
+        // Conservative screen-space lane footprint (Head/Tail lane +/- half width).
+        // Guide.Ease is authored as a monotonic ease in practice (see the dead
+        // Catmull-Rom branch above), so Head/Tail bound the traversed lane range;
+        // the half-width margin also covers any minor ease overshoot.
+        static void LaneBand(RuntimeGuide guide, out float minimum, out float maximum)
+        {
+            var headHalf = guide.Head.Size * .5f;
+            var tailHalf = guide.Tail.Size * .5f;
+            minimum = Math.Min(guide.Head.Lane - headHalf, guide.Tail.Lane - tailHalf);
+            maximum = Math.Max(guide.Head.Lane + headHalf, guide.Tail.Lane + tailHalf);
         }
 
         static bool SameGuide(RuntimeGuide left, RuntimeGuide right) =>
