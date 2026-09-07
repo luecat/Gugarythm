@@ -561,6 +561,10 @@ namespace Gugarhythm
         NoteParticleBatchGraphic traceDiamondMintBatch;
         NoteParticleBatchGraphic traceDiamondPinkBatch;
         NoteParticleBatchGraphic traceDiamondYellowBatch;
+        // Judgment hit bursts render into one shared batch instead of one
+        // GameObject+CanvasRenderer+coroutine per hit (see SpawnHitParticle),
+        // so a chord no longer multiplies Canvas rebuild cost by hit count.
+        HitBurstBatchGraphic hitBurstBatch;
         RectMask2D connectorUpperHiddenClip;
         RectMask2D persistentHoldHeadUpperHiddenClip;
         RectMask2D noteUpperHiddenClip;
@@ -1210,6 +1214,7 @@ namespace Gugarhythm
             }
             if (running && !paused && chart != null && judgmentEngine != null)
                 UpdateGameplayFrame(measurePerformance, gameplayTimingStart);
+            hitBurstBatch?.Advance(Time.unscaledDeltaTime);
             UpdatePerformanceHud();
             PollNativeImport();
             UpdateSafeAreaLayout();
@@ -3786,6 +3791,12 @@ namespace Gugarhythm
             upperHiddenMask = upperHiddenMaskObject.GetComponent<TaperedConnectorGraphic>();
             ConfigureUpperHiddenBarMask(upperHiddenMask);
             SetUpperHiddenBarPercent(upperHiddenBarPercent);
+            // Created last among stage children (and never re-parented after)
+            // so it renders above every note/particle tier, matching the
+            // per-spawn SetAsLastSibling the old per-hit GameObjects used.
+            var hitBurstBatchObject = new GameObject("Hit Burst Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(HitBurstBatchGraphic));
+            var hitBurstBatchRect = hitBurstBatchObject.GetComponent<RectTransform>(); hitBurstBatchRect.SetParent(stage, false); Fill(hitBurstBatchRect);
+            hitBurstBatch = hitBurstBatchObject.GetComponent<HitBurstBatchGraphic>(); hitBurstBatch.raycastTarget = false; hitBurstBatch.color = Color.white;
             safeAreaRoot = Layer("Safe Area UI", root);
             BuildHud(safeAreaRoot, root);
             BuildPerformanceHud(safeAreaRoot);
@@ -6515,20 +6526,12 @@ namespace Gugarhythm
 
         void SpawnHitParticle(JudgmentEvent judgment)
         {
+            if (!InputDiagnosticsSession.HitBurstEffectsEnabled) return;
             var note = judgment.Note;
             var tint = ResolveHitEffectColor(note);
             var x = X(ResolveHitEffectLane(judgment), 1f);
             var noteWidth = Mathf.Clamp(LaneWidth(note.Lane, note.Size, 1f), 64f, 154f);
-            var particleRoot = new GameObject("Judgment Pulse", typeof(RectTransform), typeof(CanvasRenderer), typeof(HitBurstGraphic)).GetComponent<RectTransform>();
-            particleRoot.SetParent(stage, false); particleRoot.sizeDelta = new Vector2(360, 600); particleRoot.anchoredPosition = new Vector2(x, HitY);
-            particleRoot.SetAsLastSibling();
-            var burst = particleRoot.GetComponent<HitBurstGraphic>();
-            burst.raycastTarget = false;
-            burst.color = tint;
-            burst.upperWidth = noteWidth;
-            burst.effectMode = hitParticleEffectMode;
-            burst.SetProgress(0);
-            StartCoroutine(AnimateHitEffect(particleRoot, burst));
+            hitBurstBatch?.Spawn(new Vector2(x, HitY), noteWidth, hitParticleEffectMode, tint);
         }
 
         public static float ResolveHitEffectLane(JudgmentEvent judgment) =>
@@ -6558,16 +6561,6 @@ namespace Gugarhythm
             JudgmentTiming.Late => "JudgmentSprites/late",
             _ => string.Empty,
         };
-
-        IEnumerator AnimateHitEffect(RectTransform particleRoot, HitBurstGraphic burst)
-        {
-            for (var elapsed = 0f; elapsed < HitBurstGraphic.DurationSeconds; elapsed += Time.unscaledDeltaTime)
-            {
-                burst.SetProgress(elapsed / HitBurstGraphic.DurationSeconds);
-                yield return null;
-            }
-            Destroy(particleRoot.gameObject);
-        }
 
         void RefreshHud()
         {

@@ -18,6 +18,7 @@ namespace Gugarhythm
         const string RecordAllChartsPreferenceKey = "gugarhythm-input-diagnostics-record-all-charts";
         const string JudgmentProtectionPreferenceKey = "gugarhythm-input-diagnostics-protection";
         const string PerformanceHudPreferenceKey = "gugarhythm-show-fps";
+        const string HitBurstEffectsPreferenceKey = "gugarhythm-hit-burst-effects";
         const int WriterFlushInterval = 256;
 
         [Serializable]
@@ -73,6 +74,11 @@ namespace Gugarhythm
             PlayerPrefs.GetInt(RecordAllChartsPreferenceKey, 0) != 0;
         public static bool PerformanceHudEnabled =>
             PlayerPrefs.GetInt(PerformanceHudPreferenceKey, 0) != 0;
+        // Debug-only kill switch to A/B whether the hit-burst effect
+        // (HitBurstBatchGraphic) is responsible for a reported stutter,
+        // without needing a profiler build. Defaults on (normal behavior).
+        public static bool HitBurstEffectsEnabled =>
+            PlayerPrefs.GetInt(HitBurstEffectsPreferenceKey, 1) != 0;
 
         public static bool IsDebugEntry(LocalChartEntry entry) => entry != null && IsDebugEntry(entry.Id);
         public static bool IsDebugEntry(string entryId) => string.Equals(entryId, DebugEntryId, StringComparison.Ordinal);
@@ -92,6 +98,12 @@ namespace Gugarhythm
         public static void SetPerformanceHudEnabled(bool enabled)
         {
             PlayerPrefs.SetInt(PerformanceHudPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        public static void SetHitBurstEffectsEnabled(bool enabled)
+        {
+            PlayerPrefs.SetInt(HitBurstEffectsPreferenceKey, enabled ? 1 : 0);
             PlayerPrefs.Save();
         }
 

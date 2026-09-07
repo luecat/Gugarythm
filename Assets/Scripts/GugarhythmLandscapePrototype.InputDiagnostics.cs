@@ -14,6 +14,7 @@ namespace Gugarhythm
         Button settingsDebugNavigationButton;
         Button inputDiagnosticsStartButton;
         Toggle inputDiagnosticsProtectionToggle;
+        Toggle hitBurstEffectsToggle;
         bool inputDiagnosticsLoading;
 
         void BuildInputDiagnosticsSettingsSection(RectTransform navigation)
@@ -23,7 +24,7 @@ namespace Gugarhythm
             settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, -35),
                 ShowSettingsDebug, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsDebugPanel = Panel("Settings Debug Panel", settingsPanel,
-                new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+                new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 830), new Vector2(90, -20));
 
             var title = Label("Tap 輸入診斷", settingsDebugPanel, 32);
             title.alignment = TextAnchor.MiddleLeft;
@@ -59,13 +60,22 @@ namespace Gugarhythm
                 performanceDiagnosticsEnabled);
             performanceHudToggle.onValueChanged.AddListener(SetPerformanceHudEnabled);
 
+            // A/B switch for isolating whether HitBurstBatchGraphic's per-hit
+            // draw cost is actually the cause of a reported chord-density
+            // stutter, without needing a profiler build: turn it off, replay
+            // the same section, see if the stutter is still there.
+            hitBurstEffectsToggle = MakeFigmaSlidingToggle("顯示打擊特效",
+                settingsDebugPanel, new Vector2(0, -65), SettingsSliderWidth,
+                InputDiagnosticsSession.HitBurstEffectsEnabled);
+            hitBurstEffectsToggle.onValueChanged.AddListener(InputDiagnosticsSession.SetHitBurstEffectsEnabled);
+
             inputDiagnosticsStartButton = MakeFlatButton("載入並開始測試譜面", settingsDebugPanel,
-                new Vector2(0, -85), () => StartCoroutine(StartInputDiagnosticsChart()),
+                new Vector2(0, -155), () => StartCoroutine(StartInputDiagnosticsChart()),
                 new Vector2(700, 68), new Color(.06f, .58f, .96f));
 
-            MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -185),
+            MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -255),
                 CopyLastInputDiagnosticsReport, new Vector2(320, 58));
-            MakeOutlinedButton("刪除上次報告", settingsDebugPanel, new Vector2(180, -185),
+            MakeOutlinedButton("刪除上次報告", settingsDebugPanel, new Vector2(180, -255),
                 ClearLastInputDiagnosticsReport, new Vector2(320, 58));
 
             inputDiagnosticsStatusLabel = Label("", settingsDebugPanel, 18);
@@ -74,7 +84,7 @@ namespace Gugarhythm
             inputDiagnosticsStatusLabel.horizontalOverflow = HorizontalWrapMode.Wrap;
             inputDiagnosticsStatusLabel.verticalOverflow = VerticalWrapMode.Overflow;
             inputDiagnosticsStatusLabel.rectTransform.sizeDelta = new Vector2(900, 130);
-            inputDiagnosticsStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -315);
+            inputDiagnosticsStatusLabel.rectTransform.anchoredPosition = new Vector2(0, -385);
             RefreshInputDiagnosticsSettingsStatus();
             settingsDebugPanel.gameObject.SetActive(false);
         }
