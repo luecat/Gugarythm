@@ -194,6 +194,15 @@ namespace Gugarhythm
         public const double SustainLookbackWindow = 9.0 / 60.0;
         public const double CommitGrace = .025;
         public const float LaneForgiveness = .85f;
+        // BuildTapProtectionPairs used to widen by LaneForgiveness (.85f) when
+        // deciding whether two nearby Tap/Flick notes' physical input areas
+        // overlap enough to need double-hit protection. LaneForgiveness is
+        // wider than a virtual-slider cell (VirtualSliderInput.CellWidth,
+        // .5f), so nearly any two notes close enough in lane counted as
+        // "overlapping" and a legitimate rub landing on the correct note but
+        // on the pair's "wrong half" got silently dropped (ProtectionBlocked)
+        // instead of judged. Protection now uses its own, narrower distance.
+        public const float ProtectionLaneForgiveness = .25f;
         const double StackedTimeTolerance = 1e-9;
         public bool JudgmentProtectionEnabled { get; set; } = true;
 
@@ -933,10 +942,10 @@ namespace Gugarhythm
                     // area, not only the visible note sprites. A rub can
                     // cross two adjacent playable regions whose artwork does
                     // not overlap, and that transition must retain protection.
-                    var sharedMinimum = Math.Max(earlier.Lane - earlier.Size - LaneForgiveness,
-                        later.Lane - later.Size - LaneForgiveness);
-                    var sharedMaximum = Math.Min(earlier.Lane + earlier.Size + LaneForgiveness,
-                        later.Lane + later.Size + LaneForgiveness);
+                    var sharedMinimum = Math.Max(earlier.Lane - earlier.Size - ProtectionLaneForgiveness,
+                        later.Lane - later.Size - ProtectionLaneForgiveness);
+                    var sharedMaximum = Math.Min(earlier.Lane + earlier.Size + ProtectionLaneForgiveness,
+                        later.Lane + later.Size + ProtectionLaneForgiveness);
                     if (sharedMinimum >= sharedMaximum) continue;
 
                     var pair = new TapProtectionPair(earlier, later, sharedMinimum, sharedMaximum);

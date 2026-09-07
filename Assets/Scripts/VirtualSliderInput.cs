@@ -20,7 +20,15 @@ namespace Gugarhythm
         public const int CellCount = 24;
         public const float CellWidth = (MaximumLane - MinimumLane) / CellCount;
         public const float TapDragActivationDistance = CellWidth;
-        public const float FlickActivationDistance = .35f;
+        // Was .35f (70% of one CellWidth) — large enough that a normal short
+        // physical flick gesture often never crossed it, reading as "flick
+        // didn't register" even when aimed correctly. Perspective/trapezoid
+        // screen mapping was checked and ruled out as the cause: measured at
+        // the input row (GugarhythmLandscapePrototype.X at HitY), per-lane
+        // screen width only varies ~5% across the whole track, not enough to
+        // explain the reported miss rate. This value is a starting point for
+        // playtesting, not a final calibration.
+        public const float FlickActivationDistance = .2f;
         public const float FlickGridRowLaneScale = CellWidth;
 
         readonly Dictionary<int, ContactState> contacts = new();
