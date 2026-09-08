@@ -8,6 +8,9 @@ namespace Gugarhythm
         ParticleScatter,
         ShardBreak,
         BrokenRing,
+        // Appended rather than inserted first so existing PlayerPrefs values
+        // saved under the old 3-mode enum keep pointing at the same mode.
+        None,
     }
 
     // A deterministic, texture-free judgment burst. All drawing lives in the
@@ -39,6 +42,7 @@ namespace Gugarhythm
         public static void Draw(VertexHelper helper, Vector2 origin, float upperWidth,
             HitParticleEffectMode effectMode, Color tint, float progress)
         {
+            if (effectMode == HitParticleEffectMode.None) return;
             DrawContact(helper, origin, upperWidth, tint, progress);
             switch (effectMode)
             {

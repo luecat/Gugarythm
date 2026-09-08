@@ -14,7 +14,6 @@ namespace Gugarhythm
         Button settingsDebugNavigationButton;
         Button inputDiagnosticsStartButton;
         Toggle inputDiagnosticsProtectionToggle;
-        Toggle hitBurstEffectsToggle;
         bool inputDiagnosticsLoading;
 
         void BuildInputDiagnosticsSettingsSection(RectTransform navigation)
@@ -60,17 +59,8 @@ namespace Gugarhythm
                 performanceDiagnosticsEnabled);
             performanceHudToggle.onValueChanged.AddListener(SetPerformanceHudEnabled);
 
-            // A/B switch for isolating whether HitBurstBatchGraphic's per-hit
-            // draw cost is actually the cause of a reported chord-density
-            // stutter, without needing a profiler build: turn it off, replay
-            // the same section, see if the stutter is still there.
-            hitBurstEffectsToggle = MakeFigmaSlidingToggle("顯示打擊特效",
-                settingsDebugPanel, new Vector2(0, -65), SettingsSliderWidth,
-                InputDiagnosticsSession.HitBurstEffectsEnabled);
-            hitBurstEffectsToggle.onValueChanged.AddListener(InputDiagnosticsSession.SetHitBurstEffectsEnabled);
-
             inputDiagnosticsStartButton = MakeFlatButton("載入並開始測試譜面", settingsDebugPanel,
-                new Vector2(0, -155), () => StartCoroutine(StartInputDiagnosticsChart()),
+                new Vector2(0, -65), () => StartCoroutine(StartInputDiagnosticsChart()),
                 new Vector2(700, 68), new Color(.06f, .58f, .96f));
 
             MakeOutlinedButton("複製上次報告", settingsDebugPanel, new Vector2(-180, -255),

@@ -26,6 +26,13 @@ namespace Gugarhythm
 
         public override Texture mainTexture => Texture2D.whiteTexture;
 
+        // Measured the same way GuideBatchGraphic.MeshBuildMilliseconds is:
+        // wall-clock cost of the last OnPopulateMesh call, read one frame
+        // late by the performance HUD/JSON log (Canvas rebuilds happen after
+        // Update, so this frame's Advance/Spawn calls are reflected on the
+        // next read). See perf-judgment-plan-2026-09-07.md section 9.8.
+        public float MeshBuildMilliseconds { get; private set; }
+
         // A dense chord section can hit far more notes per second than any
         // single burst's ~0.3s lifetime can drain, so overlapping bursts
         // accumulate. Each one still runs its full vertex/particle math in
@@ -77,6 +84,7 @@ namespace Gugarhythm
 
         protected override void OnPopulateMesh(VertexHelper helper)
         {
+            var start = System.Diagnostics.Stopwatch.GetTimestamp();
             helper.Clear();
             for (var index = 0; index < count; index++)
             {
@@ -84,6 +92,8 @@ namespace Gugarhythm
                 var progress = Mathf.Clamp01(burst.Elapsed / HitBurstGraphic.DurationSeconds);
                 HitBurstGraphic.Draw(helper, burst.Center, burst.UpperWidth, burst.EffectMode, burst.Tint, progress);
             }
+            MeshBuildMilliseconds = (float)((System.Diagnostics.Stopwatch.GetTimestamp() - start) * 1000d /
+                System.Diagnostics.Stopwatch.Frequency);
         }
     }
 }

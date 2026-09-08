@@ -699,7 +699,7 @@ namespace Gugarhythm
         Toggle autoPlayToggle;
         Toggle fastLateDisplayToggle;
         Toggle performanceHudToggle;
-        readonly Button[] hitParticleEffectButtons = new Button[3];
+        readonly Button[] hitParticleEffectButtons = new Button[4];
         Slider speedSlider;
         Slider upperHiddenBarSlider;
         Slider settingsMusicVolumeSlider;
@@ -756,6 +756,7 @@ namespace Gugarhythm
         float latestHoldsMilliseconds;
         float latestGuidesMilliseconds;
         float latestSimLinesMilliseconds;
+        float latestHitBurstMilliseconds;
         float latestJudgmentMilliseconds;
         int latestInputBatchCount;
         int latestJudgmentCandidateEdgeCount;
@@ -1266,10 +1267,15 @@ namespace Gugarhythm
             RefreshHud();
             if (measurePerformance)
             {
+                // hitBurstBatch's OnPopulateMesh runs during Canvas rebuild,
+                // after this Update — MeshBuildMilliseconds here is last
+                // frame's cost, same one-frame lag GuideBatchGraphic already
+                // has (see UpdateVisuals reading guideBatch.MeshBuildMilliseconds).
+                latestHitBurstMilliseconds = hitBurstBatch != null ? hitBurstBatch.MeshBuildMilliseconds : 0f;
                 gameplayTimingSamples.AddFrame(
                     MillisecondsBetween(gameplayTimingStart, System.Diagnostics.Stopwatch.GetTimestamp()),
                     latestNotesMilliseconds, latestHoldsMilliseconds, latestGuidesMilliseconds,
-                    latestSimLinesMilliseconds, Time.unscaledDeltaTime);
+                    latestSimLinesMilliseconds, latestHitBurstMilliseconds, Time.unscaledDeltaTime);
                 hotPathTimingSamples.AddFrame(latestHotPathFrameSnapshot, Time.unscaledDeltaTime);
             }
             if (authoritativeSongTime > chart.LastNoteTime + .75 && AreAllNotesResolved()) FinishGame();
@@ -1463,7 +1469,7 @@ namespace Gugarhythm
         }
 
         public static HitParticleEffectMode NormalizeHitParticleEffectMode(int value) =>
-            value >= (int)HitParticleEffectMode.ParticleScatter && value <= (int)HitParticleEffectMode.BrokenRing
+            value >= (int)HitParticleEffectMode.ParticleScatter && value <= (int)HitParticleEffectMode.None
                 ? (HitParticleEffectMode)value
                 : HitParticleEffectMode.ParticleScatter;
 
@@ -1893,6 +1899,7 @@ namespace Gugarhythm
             latestHoldsMilliseconds = 0;
             latestGuidesMilliseconds = 0;
             latestSimLinesMilliseconds = 0;
+            latestHitBurstMilliseconds = 0;
             latestGuideFrameSnapshot = default;
             latestHotPathFrameSnapshot = default;
             nextPerformanceHudRefresh = 0;
@@ -3937,6 +3944,7 @@ namespace Gugarhythm
                 "10S MAX/P95/P99 ms\n" +
                 $"NOTE  {FormatTimingTriplet(timings.Notes)}   HOLD  {FormatTimingTriplet(timings.Holds)}\n" +
                 $"GUIDE {FormatTimingTriplet(timings.Guides)}   SIM   {FormatTimingTriplet(timings.SimLines)}\n" +
+                $"BURST {FormatTimingTriplet(timings.HitBurst)} ({(hitBurstBatch != null ? hitBurstBatch.ActiveCount : 0)})\n" +
                 $"DSP Δ {FormatTimingTriplet(rawDspDelta)}   PRESENT Δ {FormatTimingTriplet(presentationDelta)}\n" +
                 $"PHASE {FormatTimingTriplet(phaseError)}   JUDGE {FormatTimingTriplet(judgmentDuration)}\n" +
                 $"INPUT {FormatTimingTriplet(inputQueueDelay)}\n" +
@@ -3970,6 +3978,8 @@ namespace Gugarhythm
                     ",\"holdsMs\":" + latestHoldsMilliseconds.ToString("F2", inv) +
                     ",\"guidesMs\":" + latestGuidesMilliseconds.ToString("F2", inv) +
                     ",\"simLinesMs\":" + latestSimLinesMilliseconds.ToString("F2", inv) +
+                    ",\"hitBurstMs\":" + latestHitBurstMilliseconds.ToString("F2", inv) +
+                    ",\"hitBurstActive\":" + (hitBurstBatch != null ? hitBurstBatch.ActiveCount : 0).ToString(inv) +
                     ",\"judgmentMs\":" + latestJudgmentMilliseconds.ToString("F2", inv) +
                     ",\"inputCount\":" + latestInputBatchCount.ToString(inv) +
                     ",\"candidateEdges\":" + latestJudgmentCandidateEdgeCount.ToString(inv) + "}";
@@ -4359,7 +4369,7 @@ namespace Gugarhythm
             musicVolumeTitle.alignment = TextAnchor.MiddleLeft;
             musicVolumeTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             musicVolumeTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
-            settingsMusicVolumeSlider = MakeSlider(card, new Vector2(0, 225), 0f, 1f, PlayerPrefs.GetFloat("gugarhythm-music-volume", 1f), SetSettingsMusicVolume);
+            settingsMusicVolumeSlider = MakeSlider(card, new Vector2(0, 225), 0f, 1f, PlayerPrefs.GetFloat("gugarhythm-music-volume", 1f), SetSettingsMusicVolume, new Vector2(18, 28));
             settingsMusicVolumeSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
             settingsMusicVolumeLabel = Label("100%", card, 20);
             settingsMusicVolumeLabel.rectTransform.sizeDelta = new Vector2(700, 36);
@@ -4369,7 +4379,7 @@ namespace Gugarhythm
             keyVolumeTitle.alignment = TextAnchor.MiddleLeft;
             keyVolumeTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             keyVolumeTitle.rectTransform.anchoredPosition = new Vector2(0, 105);
-            settingsKeyVolumeSlider = MakeSlider(card, new Vector2(0, 50), 0f, 1f, PlayerPrefs.GetFloat("gugarhythm-key-volume", 1f), SetSettingsKeyVolume);
+            settingsKeyVolumeSlider = MakeSlider(card, new Vector2(0, 50), 0f, 1f, PlayerPrefs.GetFloat("gugarhythm-key-volume", 1f), SetSettingsKeyVolume, new Vector2(18, 28));
             settingsKeyVolumeSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
             settingsKeyVolumeLabel = Label("100%", card, 20);
             settingsKeyVolumeLabel.rectTransform.sizeDelta = new Vector2(700, 36);
@@ -4382,7 +4392,8 @@ namespace Gugarhythm
             speedTitle.alignment = TextAnchor.MiddleLeft;
             speedTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             speedTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
-            speedSlider = MakeSlider(settingsGamePanel, new Vector2(0, 225), 1f, 20f, scrollSpeed, SetScrollSpeed);
+            speedSlider = MakeSlider(settingsGamePanel, new Vector2(0, 225), 1f, 20f, scrollSpeed, SetScrollSpeed,
+                new Vector2(18, 28));
             speedSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
             speedLabel = Label("", settingsGamePanel, 20);
             speedLabel.alignment = TextAnchor.MiddleLeft;
@@ -4395,7 +4406,7 @@ namespace Gugarhythm
             upperHiddenBarTitle.rectTransform.sizeDelta = new Vector2(760, 42);
             upperHiddenBarTitle.rectTransform.anchoredPosition = new Vector2(0, 45);
             upperHiddenBarSlider = MakeSlider(settingsGamePanel, new Vector2(0, -10), 0f, 100f,
-                upperHiddenBarPercent, SetUpperHiddenBarPercent);
+                upperHiddenBarPercent, SetUpperHiddenBarPercent, new Vector2(18, 28));
             upperHiddenBarSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(SettingsSliderWidth, 18);
             upperHiddenBarLabel = Label("", settingsGamePanel, 20);
             upperHiddenBarLabel.alignment = TextAnchor.MiddleLeft;
@@ -4427,20 +4438,24 @@ namespace Gugarhythm
             hitParticleEffectTitle.alignment = TextAnchor.MiddleLeft;
             hitParticleEffectTitle.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 42);
             hitParticleEffectTitle.rectTransform.anchoredPosition = new Vector2(0, -285);
-            const float HitParticleButtonWidth = 220f;
+            const float HitParticleButtonWidth = 160f;
             const float HitParticleButtonSpacing = 20f;
             var hitParticleButtonStep = HitParticleButtonWidth + HitParticleButtonSpacing;
             hitParticleEffectButtons[(int)HitParticleEffectMode.ParticleScatter] = MakeFlatButton(
-                "粒子飛散", settingsGamePanel, new Vector2(-hitParticleButtonStep, -335),
+                "粒子飛散", settingsGamePanel, new Vector2(-1.5f * hitParticleButtonStep, -335),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.ParticleScatter),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             hitParticleEffectButtons[(int)HitParticleEffectMode.ShardBreak] = MakeFlatButton(
-                "碎片裂解", settingsGamePanel, new Vector2(0, -335),
+                "碎片裂解", settingsGamePanel, new Vector2(-.5f * hitParticleButtonStep, -335),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.ShardBreak),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             hitParticleEffectButtons[(int)HitParticleEffectMode.BrokenRing] = MakeFlatButton(
-                "斷環粒子", settingsGamePanel, new Vector2(hitParticleButtonStep, -335),
+                "斷環粒子", settingsGamePanel, new Vector2(.5f * hitParticleButtonStep, -335),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.BrokenRing),
+                new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
+            hitParticleEffectButtons[(int)HitParticleEffectMode.None] = MakeFlatButton(
+                "關閉", settingsGamePanel, new Vector2(1.5f * hitParticleButtonStep, -335),
+                () => SetHitParticleEffectMode(HitParticleEffectMode.None),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             SetHitParticleEffectMode(hitParticleEffectMode);
             settingsGamePanel.gameObject.SetActive(false);
@@ -6526,7 +6541,6 @@ namespace Gugarhythm
 
         void SpawnHitParticle(JudgmentEvent judgment)
         {
-            if (!InputDiagnosticsSession.HitBurstEffectsEnabled) return;
             var note = judgment.Note;
             var tint = ResolveHitEffectColor(note);
             var x = X(ResolveHitEffectLane(judgment), 1f);

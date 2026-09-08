@@ -24,6 +24,14 @@ namespace Gugarhythm.Editor
             var plist = new PlistDocument();
             plist.ReadFromFile(plistPath);
             EnsureCallbackScheme(plist);
+            // Exposes persistentDataPath (== Documents on iOS, where the
+            // performance JSONL logs land) over USB file sharing / AFC, so
+            // logs can be pulled straight off the device (Finder's Files
+            // tab, or `afcclient --documents com.luecat.gugarhythm`) instead
+            // of needing a full idevicebackup2 backup each time. See
+            // perf-judgment-plan-2026-09-07.md section 9.8.
+            plist.root.SetBoolean("UIFileSharingEnabled", true);
+            plist.root.SetBoolean("LSSupportsOpeningDocumentsInPlace", true);
             plist.WriteToFile(plistPath);
         }
 

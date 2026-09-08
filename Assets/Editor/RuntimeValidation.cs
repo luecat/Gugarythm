@@ -466,18 +466,19 @@ public static class RuntimeValidation
     static void ValidateGameplayTimingSampleSet()
     {
         var samples = new GameplayTimingSampleSet(120, 10f);
-        samples.AddFrame(50f, 10f, 20f, 5f, 2f, .02f);
+        samples.AddFrame(50f, 10f, 20f, 5f, 2f, 3f, .02f);
         var snapshot = samples.Snapshot();
         Require(snapshot.Total.SampleCount == 1 && Math.Abs(snapshot.Total.MaximumMilliseconds - 50f) < .001f &&
                 Math.Abs(snapshot.Notes.MaximumMilliseconds - 10f) < .001f &&
                 Math.Abs(snapshot.Holds.MaximumMilliseconds - 20f) < .001f &&
                 Math.Abs(snapshot.Guides.MaximumMilliseconds - 5f) < .001f &&
                 Math.Abs(snapshot.SimLines.MaximumMilliseconds - 2f) < .001f &&
-                Math.Abs(snapshot.Other.MaximumMilliseconds - 13f) < .001f,
+                Math.Abs(snapshot.HitBurst.MaximumMilliseconds - 3f) < .001f &&
+                Math.Abs(snapshot.Other.MaximumMilliseconds - 10f) < .001f,
             "Gameplay timing samples must separate visual categories from the remaining CPU frame time");
 
-        samples.AddFrame(10f, 5f, 5f, 5f, 5f, .02f);
-        Require(Math.Abs(samples.Snapshot().Other.MaximumMilliseconds - 13f) < .001f,
+        samples.AddFrame(10f, 5f, 5f, 5f, 5f, 0f, .02f);
+        Require(Math.Abs(samples.Snapshot().Other.MaximumMilliseconds - 10f) < .001f,
             "Gameplay timing samples must clamp overlapping measurements instead of reporting negative other time");
 
         samples.Reset();

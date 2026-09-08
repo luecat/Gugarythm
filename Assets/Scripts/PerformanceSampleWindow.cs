@@ -214,16 +214,18 @@ namespace Gugarhythm
         public readonly TimingSnapshot Holds;
         public readonly TimingSnapshot Guides;
         public readonly TimingSnapshot SimLines;
+        public readonly TimingSnapshot HitBurst;
         public readonly TimingSnapshot Other;
 
         public GameplayTimingSnapshot(TimingSnapshot total, TimingSnapshot notes, TimingSnapshot holds,
-            TimingSnapshot guides, TimingSnapshot simLines, TimingSnapshot other)
+            TimingSnapshot guides, TimingSnapshot simLines, TimingSnapshot hitBurst, TimingSnapshot other)
         {
             Total = total;
             Notes = notes;
             Holds = holds;
             Guides = guides;
             SimLines = simLines;
+            HitBurst = hitBurst;
             Other = other;
         }
     }
@@ -235,6 +237,7 @@ namespace Gugarhythm
         readonly TimingSampleWindow holds;
         readonly TimingSampleWindow guides;
         readonly TimingSampleWindow simLines;
+        readonly TimingSampleWindow hitBurst;
         readonly TimingSampleWindow other;
 
         public GameplayTimingSampleSet(int capacity, float maximumDurationSeconds)
@@ -244,30 +247,34 @@ namespace Gugarhythm
             holds = new TimingSampleWindow(capacity, maximumDurationSeconds);
             guides = new TimingSampleWindow(capacity, maximumDurationSeconds);
             simLines = new TimingSampleWindow(capacity, maximumDurationSeconds);
+            hitBurst = new TimingSampleWindow(capacity, maximumDurationSeconds);
             other = new TimingSampleWindow(capacity, maximumDurationSeconds);
         }
 
         public void AddFrame(float totalMilliseconds, float notesMilliseconds, float holdsMilliseconds,
-            float guidesMilliseconds, float simLinesMilliseconds, float elapsedSeconds)
+            float guidesMilliseconds, float simLinesMilliseconds, float hitBurstMilliseconds, float elapsedSeconds)
         {
             if (!IsValid(totalMilliseconds) || !IsValid(notesMilliseconds) || !IsValid(holdsMilliseconds) ||
-                !IsValid(guidesMilliseconds) || !IsValid(simLinesMilliseconds) ||
+                !IsValid(guidesMilliseconds) || !IsValid(simLinesMilliseconds) || !IsValid(hitBurstMilliseconds) ||
                 !float.IsFinite(elapsedSeconds) || elapsedSeconds <= 0) return;
 
             var otherMilliseconds = Math.Max(0,
-                totalMilliseconds - notesMilliseconds - holdsMilliseconds - guidesMilliseconds - simLinesMilliseconds);
+                totalMilliseconds - notesMilliseconds - holdsMilliseconds - guidesMilliseconds -
+                simLinesMilliseconds - hitBurstMilliseconds);
             total.AddSample(totalMilliseconds, elapsedSeconds);
             notes.AddSample(notesMilliseconds, elapsedSeconds);
             holds.AddSample(holdsMilliseconds, elapsedSeconds);
             guides.AddSample(guidesMilliseconds, elapsedSeconds);
             simLines.AddSample(simLinesMilliseconds, elapsedSeconds);
+            hitBurst.AddSample(hitBurstMilliseconds, elapsedSeconds);
             other.AddSample(otherMilliseconds, elapsedSeconds);
         }
 
         static bool IsValid(float value) => float.IsFinite(value) && value >= 0;
 
         public GameplayTimingSnapshot Snapshot() => new(
-            total.Snapshot(), notes.Snapshot(), holds.Snapshot(), guides.Snapshot(), simLines.Snapshot(), other.Snapshot());
+            total.Snapshot(), notes.Snapshot(), holds.Snapshot(), guides.Snapshot(), simLines.Snapshot(),
+            hitBurst.Snapshot(), other.Snapshot());
 
         public void Reset()
         {
@@ -276,6 +283,7 @@ namespace Gugarhythm
             holds.Reset();
             guides.Reset();
             simLines.Reset();
+            hitBurst.Reset();
             other.Reset();
         }
     }
