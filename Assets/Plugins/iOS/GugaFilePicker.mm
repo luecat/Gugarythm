@@ -5,6 +5,17 @@
 #include <stdlib.h>
 #include <string.h>
 
+extern "C" void GugaPlayShortHaptic(void)
+{
+    if (@available(iOS 10.0, *))
+    {
+        UIImpactFeedbackGenerator *generator =
+            [[UIImpactFeedbackGenerator alloc] initWithStyle:UIImpactFeedbackStyleRigid];
+        [generator prepare];
+        [generator impactOccurred];
+    }
+}
+
 static NSString *GugaPendingResult = nil;
 static NSString * const GugaSecureService = @"com.luecat.gugarhythm.chart-vault";
 static BOOL GugaPickerPresented = NO;

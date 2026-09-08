@@ -61,6 +61,12 @@ namespace Gugarhythm
         }
     }
 
+    public enum HapticFeedbackMode
+    {
+        Off,
+        Enabled,
+    }
+
     public static class LandscapeOrientation
     {
         public static void Lock()
@@ -388,6 +394,7 @@ namespace Gugarhythm
         const string FastLateDisplayPreferenceKey = "gugarhythm-fast-late-display";
         const string AutoPlayPreferenceKey = "gugarhythm-auto-play";
         const string HitParticleEffectPreferenceKey = "gugarhythm-hit-particle-effect";
+        const string HapticFeedbackPreferenceKey = "gugarhythm-haptic-feedback";
         const float HoldLoopVolume = .55f;
         const float HoldLoopFadeDuration = .04f;
 
@@ -574,6 +581,9 @@ namespace Gugarhythm
         RectTransform performanceHudPanel;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
+        Text settingsTitle;
+        RectTransform settingsBackButton;
+        RectTransform settingsNavigation;
         RectTransform settingsAudioPanel;
         RectTransform settingsGamePanel;
         RectTransform settingsTagsPanel;
@@ -700,6 +710,7 @@ namespace Gugarhythm
         Toggle fastLateDisplayToggle;
         Toggle performanceHudToggle;
         readonly Button[] hitParticleEffectButtons = new Button[4];
+        readonly Button[] hapticFeedbackButtons = new Button[3];
         Slider speedSlider;
         Slider upperHiddenBarSlider;
         Slider settingsMusicVolumeSlider;
@@ -743,6 +754,7 @@ namespace Gugarhythm
         bool autoPlayEnabled;
         bool autoPlayUsedThisRun;
         HitParticleEffectMode hitParticleEffectMode;
+        HapticFeedbackMode hapticFeedbackMode;
         bool touchCallbacksSubscribed;
         float judgmentHideAt = -1f;
         float nextPerformanceHudRefresh;
@@ -928,6 +940,8 @@ namespace Gugarhythm
             autoPlayEnabled = PlayerPrefs.GetInt(AutoPlayPreferenceKey, 0) != 0;
             hitParticleEffectMode = NormalizeHitParticleEffectMode(
                 PlayerPrefs.GetInt(HitParticleEffectPreferenceKey, (int)HitParticleEffectMode.ParticleScatter));
+            hapticFeedbackMode = NormalizeHapticFeedbackMode(
+                PlayerPrefs.GetInt(HapticFeedbackPreferenceKey, (int)HapticFeedbackMode.Off));
             LibrarySortPreferences.Load(out librarySort, out librarySortAscending);
             var chartVaultStorageRoot = LocalChartLibrary.StorageDirectoryPath;
             chartVaultClient = new ChartVaultClient();
@@ -1486,6 +1500,27 @@ namespace Gugarhythm
                 if (label != null) label.color = selected ? Color.white : new Color(.78f, .78f, .78f);
             }
             PlayerPrefs.SetInt(HitParticleEffectPreferenceKey, (int)hitParticleEffectMode);
+            PlayerPrefs.Save();
+        }
+
+        public static HapticFeedbackMode NormalizeHapticFeedbackMode(int value) =>
+            value is (int)HapticFeedbackMode.Enabled or 2
+                ? HapticFeedbackMode.Enabled
+                : HapticFeedbackMode.Off;
+
+        void SetHapticFeedbackMode(HapticFeedbackMode mode)
+        {
+            hapticFeedbackMode = NormalizeHapticFeedbackMode((int)mode);
+            for (var index = 0; index < hapticFeedbackButtons.Length; index++)
+            {
+                var button = hapticFeedbackButtons[index];
+                if (button == null) continue;
+                var selected = index == (int)hapticFeedbackMode;
+                button.targetGraphic.color = selected ? new Color(.06f, .58f, .96f) : new Color(.18f, .18f, .18f);
+                var label = button.GetComponentInChildren<Text>();
+                if (label != null) label.color = selected ? Color.white : new Color(.78f, .78f, .78f);
+            }
+            PlayerPrefs.SetInt(HapticFeedbackPreferenceKey, (int)hapticFeedbackMode);
             PlayerPrefs.Save();
         }
 
@@ -2523,6 +2558,7 @@ namespace Gugarhythm
             ShowJudgment(judgment.Grade);
             ShowJudgmentTiming(timing);
             PlayJudgmentSound(judgment);
+            TriggerHapticFeedback(judgment);
             if (judgment.Note != null && judgment.Note.HoldRootIndex >= 0)
             {
                 var rootIndex = judgment.Note.HoldRootIndex;
@@ -2535,6 +2571,17 @@ namespace Gugarhythm
                 SpawnHitParticle(judgment);
             }
             InputDiagnosticsSession.RecordHitFeedback(judgment, judgment.Grade != JudgmentGrade.Miss);
+        }
+
+        void TriggerHapticFeedback(JudgmentEvent judgment)
+        {
+            if (hapticFeedbackMode == HapticFeedbackMode.Off ||
+                judgment.Note == null ||
+                judgment.Grade is JudgmentGrade.Pending or JudgmentGrade.Miss ||
+                judgment.Note.HoldCheckpointSource == HoldCheckpointSource.Auto)
+                return;
+
+            if (Application.isMobilePlatform) ShortHapticFeedback.Play();
         }
 
         void PlayJudgmentSound(JudgmentEvent judgment)
@@ -4114,6 +4161,41 @@ namespace Gugarhythm
                 Fill(settingsPanel);
                 settingsPanel.localScale = Vector3.one;
             }
+            if (settingsTitle != null)
+            {
+                settingsTitle.transform.SetAsLastSibling();
+                var compactMobile = Application.isMobilePlatform &&
+                    Screen.width > Screen.height &&
+                    Screen.height / (float)Screen.width < .65f;
+                if (compactMobile)
+                {
+                    var navigationWidth = settingsNavigation?.sizeDelta.x ?? 270f;
+                    var navigationX = settingsNavigation?.anchoredPosition.x ?? -600f;
+                    settingsTitle.rectTransform.sizeDelta = new Vector2(navigationWidth, 58f);
+                    settingsTitle.rectTransform.anchoredPosition = new Vector2(navigationX, -12f);
+                    settingsTitle.fontSize = 36;
+                    settingsTitle.alignment = TextAnchor.MiddleCenter;
+                    if (settingsNavigation != null)
+                    {
+                        settingsNavigation.sizeDelta = new Vector2(navigationWidth, 760f);
+                        settingsNavigation.anchoredPosition = new Vector2(navigationX, -86f);
+                    }
+                    if (settingsBackButton != null)
+                    {
+                        settingsBackButton.anchorMin = settingsBackButton.anchorMax = new Vector2(1, 1);
+                        settingsBackButton.pivot = new Vector2(1, 1);
+                        settingsBackButton.anchoredPosition = new Vector2(-28f, -28f);
+                    }
+                }
+                else
+                {
+                    settingsTitle.rectTransform.sizeDelta = new Vector2(560f, 72f);
+                    settingsTitle.rectTransform.anchoredPosition = new Vector2(64f, -78f);
+                    settingsTitle.fontSize = Mathf.RoundToInt(42f *
+                        (Application.isMobilePlatform || Screen.width <= 1440 ? 1.18f : 1f));
+                    settingsTitle.alignment = TextAnchor.MiddleLeft;
+                }
+            }
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
             FitChartPreviewPanel(chartPreviewPanel, 32f);
@@ -4298,14 +4380,16 @@ namespace Gugarhythm
         void BuildSettings(RectTransform root)
         {
             settingsPanel = Panel("Settings", root, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
-            var title = Label("設定", settingsPanel, 42);
-            title.alignment = TextAnchor.MiddleLeft;
-            title.rectTransform.sizeDelta = new Vector2(560, 72);
-            PinToAnchor(title.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(64, -42));
+            settingsTitle = Label("設定", settingsPanel, 42);
+            settingsTitle.alignment = TextAnchor.MiddleLeft;
+            settingsTitle.rectTransform.sizeDelta = new Vector2(560, 72);
+            PinToAnchor(settingsTitle.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(64, -78));
             var back = MakeFlatButton("返回曲庫", settingsPanel, Vector2.zero, ReturnFromSettings, new Vector2(180, 58), new Color(.18f, .18f, .18f));
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-52, -48));
+            settingsBackButton = back.GetComponent<RectTransform>();
 
             var navigation = Panel("Settings Navigation", settingsPanel, new Color(.13f, .13f, .13f, 1f), new Vector2(270, 760), new Vector2(-600, -20));
+            settingsNavigation = navigation;
             settingsAudioNavigationButton = MakeFlatButton("音訊", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
             settingsGameNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
@@ -4388,76 +4472,126 @@ namespace Gugarhythm
             SetSettingsKeyVolume(settingsKeyVolumeSlider.value);
 
             settingsGamePanel = Panel("Settings Game Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            const float GameSliderWidth = 650f;
             var speedTitle = Label("速度", settingsGamePanel, 24);
             speedTitle.alignment = TextAnchor.MiddleLeft;
-            speedTitle.rectTransform.sizeDelta = new Vector2(760, 42);
-            speedTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
-            speedSlider = MakeSlider(settingsGamePanel, new Vector2(0, 225), 1f, 20f, scrollSpeed, SetScrollSpeed,
+            speedTitle.rectTransform.sizeDelta = new Vector2(760f, 42);
+            speedTitle.rectTransform.anchoredPosition = new Vector2(0, 430);
+            speedSlider = MakeSlider(settingsGamePanel, new Vector2(-25f, 365), 1f, 20f, scrollSpeed, SetScrollSpeed,
                 new Vector2(18, 28));
-            speedSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(700, 18);
+            speedSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(GameSliderWidth, 18);
             speedLabel = Label("", settingsGamePanel, 20);
-            speedLabel.alignment = TextAnchor.MiddleLeft;
-            speedLabel.rectTransform.sizeDelta = new Vector2(700, 36);
-            speedLabel.rectTransform.anchoredPosition = new Vector2(0, 175);
+            speedLabel.rectTransform.sizeDelta = new Vector2(700f, 36);
+            speedLabel.rectTransform.anchoredPosition = new Vector2(0, 300);
             SetScrollSpeed(scrollSpeed);
 
             var upperHiddenBarTitle = Label("上隱條", settingsGamePanel, 24);
             upperHiddenBarTitle.alignment = TextAnchor.MiddleLeft;
-            upperHiddenBarTitle.rectTransform.sizeDelta = new Vector2(760, 42);
-            upperHiddenBarTitle.rectTransform.anchoredPosition = new Vector2(0, 45);
-            upperHiddenBarSlider = MakeSlider(settingsGamePanel, new Vector2(0, -10), 0f, 100f,
+            upperHiddenBarTitle.rectTransform.sizeDelta = new Vector2(760f, 42);
+            upperHiddenBarTitle.rectTransform.anchoredPosition = new Vector2(0, 250);
+            upperHiddenBarSlider = MakeSlider(settingsGamePanel, new Vector2(-25f, 185), 0f, 100f,
                 upperHiddenBarPercent, SetUpperHiddenBarPercent, new Vector2(18, 28));
-            upperHiddenBarSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(SettingsSliderWidth, 18);
+            upperHiddenBarSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(GameSliderWidth, 18);
             upperHiddenBarLabel = Label("", settingsGamePanel, 20);
-            upperHiddenBarLabel.alignment = TextAnchor.MiddleLeft;
-            upperHiddenBarLabel.rectTransform.sizeDelta = new Vector2(700, 36);
-            upperHiddenBarLabel.rectTransform.anchoredPosition = new Vector2(0, -55);
+            upperHiddenBarLabel.rectTransform.sizeDelta = new Vector2(700f, 36);
+            upperHiddenBarLabel.rectTransform.anchoredPosition = new Vector2(0, 125);
             SetUpperHiddenBarPercent(upperHiddenBarPercent);
 
             var fastLateTitle = Label("FAST／LATE 顯示", settingsGamePanel, 24);
             fastLateTitle.alignment = TextAnchor.MiddleLeft;
-            fastLateTitle.rectTransform.sizeDelta = new Vector2(FastLateDisplayWidth, 42);
-            fastLateTitle.rectTransform.anchoredPosition = new Vector2(-SettingsSliderWidth * .5f + FastLateDisplayWidth * .5f, -160);
+            const float GameToggleWidth = 280f;
+            const float GameToggleGap = 28f;
+            var gameToggleCenter = (GameToggleWidth + GameToggleGap) * .5f;
+            fastLateTitle.rectTransform.sizeDelta = new Vector2(GameToggleWidth, 42);
+            fastLateTitle.rectTransform.anchoredPosition = new Vector2(-gameToggleCenter, 45);
             fastLateDisplayToggle = MakeFigmaSlidingToggle("顯示", settingsGamePanel,
-                new Vector2(-SettingsSliderWidth * .5f + FastLateDisplayWidth * .5f, -215),
-                FastLateDisplayWidth, fastLateDisplayEnabled);
+                new Vector2(-gameToggleCenter, -10), GameToggleWidth, fastLateDisplayEnabled);
             fastLateDisplayToggle.onValueChanged.AddListener(SetFastLateDisplay);
             SetFastLateDisplay(fastLateDisplayEnabled);
 
             var autoPlayTitle = Label("AUTO PLAY", settingsGamePanel, 24);
             autoPlayTitle.alignment = TextAnchor.MiddleLeft;
-            autoPlayTitle.rectTransform.sizeDelta = new Vector2(FastLateDisplayWidth, 42);
-            autoPlayTitle.rectTransform.anchoredPosition = new Vector2(FastLateDisplayWidth * .5f, -160);
+            autoPlayTitle.rectTransform.sizeDelta = new Vector2(GameToggleWidth, 42);
+            autoPlayTitle.rectTransform.anchoredPosition = new Vector2(gameToggleCenter, 45);
             autoPlayToggle = MakeFigmaSlidingToggle("啟用", settingsGamePanel,
-                new Vector2(FastLateDisplayWidth * .5f, -215),
-                FastLateDisplayWidth, autoPlayEnabled);
+                new Vector2(gameToggleCenter, -10), GameToggleWidth, autoPlayEnabled);
             autoPlayToggle.onValueChanged.AddListener(SetAutoPlayEnabled);
             SetAutoPlayEnabled(autoPlayEnabled);
 
             var hitParticleEffectTitle = Label("粒子效果", settingsGamePanel, 24);
             hitParticleEffectTitle.alignment = TextAnchor.MiddleLeft;
             hitParticleEffectTitle.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 42);
-            hitParticleEffectTitle.rectTransform.anchoredPosition = new Vector2(0, -285);
-            const float HitParticleButtonWidth = 160f;
-            const float HitParticleButtonSpacing = 20f;
+            hitParticleEffectTitle.rectTransform.anchoredPosition = new Vector2(0, -80);
+            const float HitParticleButtonWidth = 140f;
+            const float HitParticleButtonSpacing = 16f;
             var hitParticleButtonStep = HitParticleButtonWidth + HitParticleButtonSpacing;
             hitParticleEffectButtons[(int)HitParticleEffectMode.ParticleScatter] = MakeFlatButton(
-                "粒子飛散", settingsGamePanel, new Vector2(-1.5f * hitParticleButtonStep, -335),
+                "粒子飛散", settingsGamePanel, new Vector2(-1.5f * hitParticleButtonStep, -135),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.ParticleScatter),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             hitParticleEffectButtons[(int)HitParticleEffectMode.ShardBreak] = MakeFlatButton(
-                "碎片裂解", settingsGamePanel, new Vector2(-.5f * hitParticleButtonStep, -335),
+                "碎片裂解", settingsGamePanel, new Vector2(-.5f * hitParticleButtonStep, -135),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.ShardBreak),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             hitParticleEffectButtons[(int)HitParticleEffectMode.BrokenRing] = MakeFlatButton(
-                "斷環粒子", settingsGamePanel, new Vector2(.5f * hitParticleButtonStep, -335),
+                "斷環粒子", settingsGamePanel, new Vector2(.5f * hitParticleButtonStep, -135),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.BrokenRing),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             hitParticleEffectButtons[(int)HitParticleEffectMode.None] = MakeFlatButton(
-                "關閉", settingsGamePanel, new Vector2(1.5f * hitParticleButtonStep, -335),
+                "關閉", settingsGamePanel, new Vector2(1.5f * hitParticleButtonStep, -135),
                 () => SetHitParticleEffectMode(HitParticleEffectMode.None),
                 new Vector2(HitParticleButtonWidth, 50), new Color(.18f, .18f, .18f));
             SetHitParticleEffectMode(hitParticleEffectMode);
+
+            var hapticFeedbackTitle = Label("震動", settingsGamePanel, 24);
+            hapticFeedbackTitle.alignment = TextAnchor.MiddleLeft;
+            hapticFeedbackTitle.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 42);
+            hapticFeedbackTitle.rectTransform.anchoredPosition = new Vector2(0, -205);
+            const float HapticButtonWidth = 180f;
+            const float HapticButtonSpacing = 18f;
+            var hapticButtonOffset = (HapticButtonWidth + HapticButtonSpacing) * .5f;
+            hapticFeedbackButtons[(int)HapticFeedbackMode.Off] = MakeFlatButton(
+                "關閉", settingsGamePanel, new Vector2(hapticButtonOffset, -260),
+                () => SetHapticFeedbackMode(HapticFeedbackMode.Off),
+                new Vector2(HapticButtonWidth, 50), new Color(.18f, .18f, .18f));
+            hapticFeedbackButtons[(int)HapticFeedbackMode.Enabled] = MakeFlatButton(
+                "開啟", settingsGamePanel, new Vector2(-hapticButtonOffset, -260),
+                () => SetHapticFeedbackMode(HapticFeedbackMode.Enabled),
+                new Vector2(HapticButtonWidth, 50), new Color(.18f, .18f, .18f));
+            SetHapticFeedbackMode(hapticFeedbackMode);
+
+            var gameControls = new List<Transform>(settingsGamePanel.childCount);
+            for (var index = 0; index < settingsGamePanel.childCount; index++)
+                gameControls.Add(settingsGamePanel.GetChild(index));
+
+            var gameScroll = settingsGamePanel.gameObject.AddComponent<ScrollRect>();
+            gameScroll.horizontal = false;
+            gameScroll.vertical = true;
+            gameScroll.movementType = ScrollRect.MovementType.Clamped;
+            gameScroll.scrollSensitivity = 42f;
+
+            var gameContentObject = new GameObject("Settings Game Content", typeof(RectTransform));
+            var gameContent = gameContentObject.GetComponent<RectTransform>();
+            gameContent.SetParent(settingsGamePanel, false);
+            gameContent.anchorMin = new Vector2(.5f, .5f);
+            gameContent.anchorMax = new Vector2(.5f, .5f);
+            gameContent.pivot = new Vector2(.5f, .5f);
+            gameContent.sizeDelta = new Vector2(1030f, 980f);
+            gameContent.anchoredPosition = Vector2.zero;
+            const float GameLayoutOffsetY = -70f;
+            foreach (var control in gameControls)
+            {
+                control.SetParent(gameContent, false);
+                var controlRect = control as RectTransform;
+                if (controlRect != null)
+                    controlRect.anchoredPosition += new Vector2(0f, GameLayoutOffsetY);
+            }
+
+            if (settingsGamePanel.GetComponent<RectMask2D>() == null)
+                settingsGamePanel.gameObject.AddComponent<RectMask2D>();
+            gameScroll.viewport = settingsGamePanel;
+            gameScroll.content = gameContent;
+            gameScroll.verticalNormalizedPosition = 1f;
             settingsGamePanel.gameObject.SetActive(false);
 
             settingsTagsPanel = Panel("Settings Tags Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
