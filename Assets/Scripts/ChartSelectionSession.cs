@@ -5,8 +5,9 @@ namespace Gugarhythm
 {
     /// <summary>
     /// Keeps the chart selected in the library alive while Unity changes scenes.
-    /// The session owns copies of both values so callers cannot mutate its state
-    /// after selection or through a value returned by <see cref="TryGetSelection"/>.
+    /// Prefers transferring an already-parsed <see cref="RuntimeChart"/> and decoded
+    /// <see cref="AudioClip"/> so gameplay does not re-read / re-import / re-decode.
+    /// Falls back to owning a copy of the raw GGR bytes when prepared assets are unavailable.
     /// </summary>
     public sealed class ChartSelectionSession : MonoBehaviour
     {
@@ -14,13 +15,22 @@ namespace Gugarhythm
 
         LocalChartEntry selectedEntry;
         byte[] selectedGgrBytes;
+        RuntimeChart preparedChart;
+        string preparedAudioCachePath;
+        string preparedAudioExtension;
+        double preparedLeadingSilenceSeconds;
+        AudioClip preparedMusic;
+        bool ownsPreparedMusic;
+
         public string DraftTitle { get; private set; }
         public string DraftArtist { get; private set; }
         public string DraftTag { get; private set; }
         public string DraftLevel { get; private set; }
         public bool ReturnToEditor { get; private set; }
 
-        public bool HasSelection => selectedEntry != null && selectedGgrBytes is { Length: > 0 };
+        public bool HasPreparedChart => preparedChart != null;
+        public bool HasSelection =>
+            selectedEntry != null && (preparedChart != null || selectedGgrBytes is { Length: > 0 });
 
         public static ChartSelectionSession Ensure()
         {
@@ -42,8 +52,45 @@ namespace Gugarhythm
                 return false;
             }
 
+            ClearPreparedAssets();
             selectedEntry = CopyEntry(entry);
             selectedGgrBytes = CopyBytes(ggrBytes);
+            return true;
+        }
+
+        /// <summary>
+        /// Stores an already-loaded chart for the next gameplay scene. Optionally transfers
+        /// ownership of a decoded <paramref name="music"/> clip (caller must null its own
+        /// reference after a successful call). Raw GGR bytes are not required.
+        /// </summary>
+        public bool SetPreparedSelection(
+            LocalChartEntry entry,
+            RuntimeChart chart,
+            string audioCachePath,
+            string audioExtension,
+            double leadingSilenceSeconds,
+            AudioClip music)
+        {
+            if (entry == null || chart == null)
+            {
+                Clear();
+                return false;
+            }
+
+            ClearPreparedAssets();
+            if (selectedGgrBytes != null)
+            {
+                Array.Clear(selectedGgrBytes, 0, selectedGgrBytes.Length);
+                selectedGgrBytes = null;
+            }
+
+            selectedEntry = CopyEntry(entry);
+            preparedChart = chart;
+            preparedAudioCachePath = audioCachePath ?? string.Empty;
+            preparedAudioExtension = audioExtension ?? string.Empty;
+            preparedLeadingSilenceSeconds = double.IsFinite(leadingSilenceSeconds) ? leadingSilenceSeconds : 0;
+            preparedMusic = music;
+            ownsPreparedMusic = music != null;
             return true;
         }
 
@@ -57,7 +104,42 @@ namespace Gugarhythm
             }
 
             entry = CopyEntry(selectedEntry);
-            ggrBytes = CopyBytes(selectedGgrBytes);
+            ggrBytes = selectedGgrBytes != null ? CopyBytes(selectedGgrBytes) : null;
+            return true;
+        }
+
+        /// <summary>
+        /// Takes prepared chart/audio for gameplay. Music ownership transfers to the caller
+        /// when a clip is returned; the session will not destroy it afterwards.
+        /// </summary>
+        public bool TryTakePreparedAssets(
+            out RuntimeChart chart,
+            out AudioClip music,
+            out string audioCachePath,
+            out string audioExtension,
+            out double leadingSilenceSeconds)
+        {
+            if (preparedChart == null)
+            {
+                chart = null;
+                music = null;
+                audioCachePath = null;
+                audioExtension = null;
+                leadingSilenceSeconds = 0;
+                return false;
+            }
+
+            chart = preparedChart;
+            music = preparedMusic;
+            audioCachePath = preparedAudioCachePath;
+            audioExtension = preparedAudioExtension;
+            leadingSilenceSeconds = preparedLeadingSilenceSeconds;
+            preparedChart = null;
+            preparedMusic = null;
+            ownsPreparedMusic = false;
+            preparedAudioCachePath = null;
+            preparedAudioExtension = null;
+            preparedLeadingSilenceSeconds = 0;
             return true;
         }
 
@@ -66,6 +148,7 @@ namespace Gugarhythm
             selectedEntry = null;
             if (selectedGgrBytes != null) Array.Clear(selectedGgrBytes, 0, selectedGgrBytes.Length);
             selectedGgrBytes = null;
+            ClearPreparedAssets();
         }
 
         public void SetEditorDraft(string title, string artist, string tag, string level)
@@ -96,6 +179,18 @@ namespace Gugarhythm
         {
             if (instance == this) instance = null;
             Clear();
+        }
+
+        void ClearPreparedAssets()
+        {
+            preparedChart = null;
+            preparedAudioCachePath = null;
+            preparedAudioExtension = null;
+            preparedLeadingSilenceSeconds = 0;
+            if (ownsPreparedMusic && preparedMusic != null)
+                Destroy(preparedMusic);
+            preparedMusic = null;
+            ownsPreparedMusic = false;
         }
 
         static byte[] CopyBytes(byte[] source)

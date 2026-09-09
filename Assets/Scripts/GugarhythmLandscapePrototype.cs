@@ -342,6 +342,8 @@ namespace Gugarhythm
         // than 1080 logical units. Derive Y from the live viewport instead of
         // assuming 16:9; this keeps note edges on the gray texture guides.
         const float ReferenceWidth = 1920f;
+        // ≈44pt on iPhone 12 landscape when CanvasScaler matches width to 1920.
+        const float MinTouch = 100f;
         const float LibraryDividerHorizontalInset = 16f;
         const float PersistentGrayDividerThickness = 2f;
         const float LaneTextureWidth = 1280f;
@@ -398,7 +400,7 @@ namespace Gugarhythm
         // Button sprites begin their visible antialiased edge at pixel 44.
         // Using the old 40px glow bound made every normal Tap visibly narrow.
         const float NormalButtonVisibleEdgePaddingPixels = 44f;
-        const float DifficultyButtonSpacing = 180f;
+        const float DifficultyButtonSpacing = 200f;
         const int MouseContactId = int.MinValue;
         // Missed notes keep travelling beyond the judgment line until their
         // sprite leaves the viewport. Successful hits return to the pool at once.
@@ -755,6 +757,9 @@ namespace Gugarhythm
         Button downloadRemoteChartButton;
         LocalChartEntry selectedLibraryEntry;
         readonly Dictionary<string, PreloadedLocalChart> preloadedLocalCharts = new();
+        string lastAudioCachePath;
+        string lastAudioExtension;
+        Coroutine gpuRibbonWarmCoroutine;
         bool localChartPreloadStarted;
         // 預載入階段要不要連 AudioClip 一起解碼。目前維持 false（保守預設）：
         // 背景只做純 .NET 的解包與 BGM 落盤，解碼留到選曲時在主執行緒發生。
@@ -880,6 +885,8 @@ namespace Gugarhythm
         double presentationClockHardResetThreshold = PresentationClockFallbackHardResetThreshold;
 
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
+        static bool UseCompactMobileChrome =>
+            Application.isMobilePlatform || CanvasHeight < 960f;
         static float TopY => CanvasHeight * .5f;
         static float HitY => TopY - HitSourceY / LaneTextureHeight * CanvasHeight;
         public static int JudgmentDebugCellCount => VirtualSliderInput.CellCount;
@@ -1126,7 +1133,8 @@ namespace Gugarhythm
             menuPanel.gameObject.SetActive(false);
             settingsPanel.gameObject.SetActive(false);
             chartEditorPanel.gameObject.SetActive(false);
-            if (!ChartSelectionSession.Ensure().TryGetSelection(out var entry, out var bytes))
+            var selection = ChartSelectionSession.Ensure();
+            if (!selection.TryGetSelection(out var entry, out var bytes))
             {
                 GugarhythmSceneRouter.OpenLibrary();
                 yield break;
@@ -1134,7 +1142,7 @@ namespace Gugarhythm
 
             SetGameplayStageVisible(true);
             SetGameplayLoadingVisible(true, "正在準備譜面…");
-            yield return LoadGameplaySelection(entry, bytes);
+            yield return LoadGameplaySelection(entry, bytes, selection);
         }
 
         void SetMenuHudVisible(bool visible)
@@ -1179,7 +1187,7 @@ namespace Gugarhythm
         internal static bool ShouldEnableLibraryStartButton(ChartLibrarySource source,
             bool hasLocalSelection) => source == ChartLibrarySource.Local && hasLocalSelection;
 
-        IEnumerator LoadGameplaySelection(LocalChartEntry entry, byte[] bytes)
+        IEnumerator LoadGameplaySelection(LocalChartEntry entry, byte[] bytes, ChartSelectionSession selection = null)
         {
             loading = true;
             startButton.interactable = false;
@@ -1187,26 +1195,63 @@ namespace Gugarhythm
             SetStatus("正在載入 " + entry.Title + "…");
             yield return null;
 
-            SetGameplayLoadingVisible(true, "正在解析譜面…");
-            yield return null;
-            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
-            if (!result.Success)
+            presentationClock.Invalidate();
+            musicLoadSucceeded = false;
+            selection ??= ChartSelectionSession.Ensure();
+            if (selection.TryTakePreparedAssets(out var preparedChart, out var preparedMusic,
+                    out var preparedCachePath, out var preparedExtension, out var preparedSilence))
             {
-                Debug.LogError("無法載入跨場景選取的譜面：" + result.Error);
-                if (InputDiagnosticsSession.IsDebugEntry(entry))
-                    EndInputDiagnosticsRun("chart-import-failed", true);
-                GugarhythmSceneRouter.OpenLibrary();
-                yield break;
+                chart = preparedChart;
+                if (preparedMusic != null)
+                {
+                    music.clip = preparedMusic;
+                    musicLoadSucceeded = true;
+                    lastAudioCachePath = preparedCachePath;
+                    lastAudioExtension = preparedExtension;
+                }
+                else if (!string.IsNullOrEmpty(preparedCachePath))
+                {
+                    SetGameplayLoadingVisible(true, "正在準備音訊…");
+                    yield return LoadMusicFromCachePath(preparedCachePath, preparedExtension, preparedSilence);
+                }
+                else if (chart.BgmBytes != null)
+                {
+                    SetGameplayLoadingVisible(true, "正在準備音訊…");
+                    yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                }
+            }
+            else
+            {
+                if (bytes == null || bytes.Length == 0)
+                {
+                    Debug.LogError("跨場景選取的譜面缺少 GGR 資料。");
+                    if (InputDiagnosticsSession.IsDebugEntry(entry))
+                        EndInputDiagnosticsRun("chart-import-failed", true);
+                    GugarhythmSceneRouter.OpenLibrary();
+                    yield break;
+                }
+
+                SetGameplayLoadingVisible(true, "正在解析譜面…");
+                yield return null;
+                // Gameplay never needs the cover texture; keep Import off the GPU path.
+                var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null, decodeCover: false);
+                if (!result.Success)
+                {
+                    Debug.LogError("無法載入跨場景選取的譜面：" + result.Error);
+                    if (InputDiagnosticsSession.IsDebugEntry(entry))
+                        EndInputDiagnosticsRun("chart-import-failed", true);
+                    GugarhythmSceneRouter.OpenLibrary();
+                    yield break;
+                }
+
+                chart = result.Chart;
+                if (chart.BgmBytes != null)
+                {
+                    SetGameplayLoadingVisible(true, "正在準備音訊…");
+                    yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                }
             }
 
-            presentationClock.Invalidate();
-            chart = result.Chart;
-            musicLoadSucceeded = false;
-            if (chart.BgmBytes != null)
-            {
-                SetGameplayLoadingVisible(true, "正在準備音訊…");
-                yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
-            }
             if (!musicLoadSucceeded)
             {
                 Debug.LogError("跨場景選取的 GGR 音樂無法解碼。");
@@ -1380,6 +1425,7 @@ namespace Gugarhythm
                     latestJudgmentMilliseconds, Time.unscaledDeltaTime);
             }
             for (var index = 0; index < judgmentEvents.Count; index++) OnJudgment(judgmentEvents[index]);
+            ShortHapticFeedback.FlushPending();
             gpuRibbonRenderer?.FlushHoldStateTexture();
             UpdateVisuals(presentationSongTime + visualOffsetSeconds);
             RefreshHud();
@@ -2017,6 +2063,66 @@ namespace Gugarhythm
             }
         }
 
+        // Silence-baked WAV beside the raw cache. Keyed by source hash + silence ms so
+        // a later LoadMusicFromCachePath can skip GetData/SetData PrependLeadingSilence.
+        static string SilenceBakedCachePath(string rawCachePath, double leadingSilenceSeconds)
+        {
+            if (string.IsNullOrEmpty(rawCachePath) || !double.IsFinite(leadingSilenceSeconds) ||
+                leadingSilenceSeconds <= 1e-9)
+                return null;
+            var silenceMs = (int)Math.Round(leadingSilenceSeconds * 1000.0);
+            if (silenceMs <= 0) return null;
+            return rawCachePath + ".lead" + silenceMs + ".wav";
+        }
+
+        static bool TryWriteSilenceBakedWav(AudioClip padded, string path)
+        {
+            if (padded == null || string.IsNullOrEmpty(path) || padded.samples <= 0 ||
+                padded.channels <= 0 || padded.frequency <= 0)
+                return false;
+            try
+            {
+                var samples = new float[padded.samples * padded.channels];
+                if (!padded.GetData(samples, 0)) return false;
+                var directory = Path.GetDirectoryName(path);
+                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
+                var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
+                WritePcm16Wav(temporary, samples, padded.channels, padded.frequency);
+                if (File.Exists(path)) File.Delete(path);
+                File.Move(temporary, path);
+                return true;
+            }
+            catch (Exception)
+            {
+                return false;
+            }
+        }
+
+        static void WritePcm16Wav(string path, float[] samples, int channels, int frequency)
+        {
+            var dataLength = samples.Length * sizeof(short);
+            using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
+            using var writer = new BinaryWriter(stream);
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
+            writer.Write(36 + dataLength);
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
+            writer.Write(16);
+            writer.Write((short)1);
+            writer.Write((short)channels);
+            writer.Write(frequency);
+            writer.Write(frequency * channels * sizeof(short));
+            writer.Write((short)(channels * sizeof(short)));
+            writer.Write((short)16);
+            writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));
+            writer.Write(dataLength);
+            for (var index = 0; index < samples.Length; index++)
+            {
+                var clamped = Mathf.Clamp(samples[index], -1f, 1f);
+                writer.Write((short)Mathf.RoundToInt(clamped * short.MaxValue));
+            }
+        }
+
         // 副檔名對映從原本 LoadMusic 內的 switch 逐字搬過來；
         // AudioType.ACC 是專案既有寫法，不要順手「修正」成别的常數名。
         static AudioType AudioTypeForExtension(string extension) => extension?.ToLowerInvariant() switch
@@ -2030,11 +2136,40 @@ namespace Gugarhythm
 
         // 解碼段：必須主執行緒。streamAudio = false 與 PrependLeadingSilence 是音訊時間軸行為，
         // 動了就會改變首播偏移與譜面判定基準，所以這裡完全沿用原有邏輯，只是來源改成已備好的快取路徑。
+        // 若已有 silence-baked WAV，直接解那份並跳過整段 PCM copy。
         IEnumerator LoadMusicFromCachePath(string path, string extension, double leadingSilenceSeconds = 0)
         {
             musicLoadSucceeded = false;
             music.clip = null;
+            lastAudioCachePath = null;
+            lastAudioExtension = extension;
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) yield break;
+
+            var bakedPath = SilenceBakedCachePath(path, leadingSilenceSeconds);
+            if (!string.IsNullOrEmpty(bakedPath) && File.Exists(bakedPath))
+            {
+                using (var bakedRequest = UnityWebRequestMultimedia.GetAudioClip(new Uri(bakedPath).AbsoluteUri, AudioType.WAV))
+                {
+                    if (bakedRequest.downloadHandler is DownloadHandlerAudioClip bakedHandler) bakedHandler.streamAudio = false;
+                    yield return bakedRequest.SendWebRequest();
+                    if (bakedRequest.result == UnityWebRequest.Result.Success)
+                    {
+                        try
+                        {
+                            music.clip = DownloadHandlerAudioClip.GetContent(bakedRequest);
+                            musicLoadSucceeded = music.clip != null;
+                            lastAudioCachePath = path;
+                            lastAudioExtension = extension;
+                            yield break;
+                        }
+                        catch (Exception)
+                        {
+                            music.clip = null;
+                        }
+                    }
+                }
+            }
+
             using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, AudioTypeForExtension(extension));
             if (request.downloadHandler is DownloadHandlerAudioClip audioHandler) audioHandler.streamAudio = false;
             yield return request.SendWebRequest();
@@ -2043,8 +2178,13 @@ namespace Gugarhythm
             {
                 var decodedClip = DownloadHandlerAudioClip.GetContent(request);
                 music.clip = PrependLeadingSilence(decodedClip, leadingSilenceSeconds);
-                if (music.clip != decodedClip && decodedClip != null) Destroy(decodedClip);
+                var prepended = !ReferenceEquals(music.clip, decodedClip);
+                if (prepended && decodedClip != null) Destroy(decodedClip);
                 musicLoadSucceeded = music.clip != null;
+                lastAudioCachePath = path;
+                lastAudioExtension = extension;
+                if (musicLoadSucceeded && prepended && !string.IsNullOrEmpty(bakedPath))
+                    TryWriteSilenceBakedWav(music.clip, bakedPath);
             }
             catch (Exception)
             {
@@ -2058,6 +2198,29 @@ namespace Gugarhythm
             {
                 if (librarySource != ChartLibrarySource.Local) return;
                 if (loading || selectedLibraryEntry == null) return;
+
+                // Prefer transferring the chart/audio already loaded for the detail pane so
+                // the gameplay scene skips ZIP re-import and a second full BGM decode.
+                if (chart != null && music.clip != null && musicLoadSucceeded &&
+                    currentLibraryEntry != null && currentLibraryEntry.Id == selectedLibraryEntry.Id)
+                {
+                    var transferredClip = music.clip;
+                    music.clip = null;
+                    if (ChartSelectionSession.Ensure().SetPreparedSelection(
+                            selectedLibraryEntry,
+                            chart,
+                            lastAudioCachePath,
+                            lastAudioExtension ?? chart.BgmExtension,
+                            chart.BgmStartDelaySeconds,
+                            transferredClip))
+                    {
+                        GugarhythmSceneRouter.OpenGameplay();
+                        return;
+                    }
+
+                    music.clip = transferredClip;
+                }
+
                 if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
                 {
                     SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。");
@@ -4051,7 +4214,11 @@ namespace Gugarhythm
             inputModule.AssignDefaultActions();
             inputModule.pointerBehavior = UIPointerBehavior.SingleMouseOrPenButMultiTouchAndTrack;
             var canvas = canvasObject.GetComponent<Canvas>(); canvas.renderMode = RenderMode.ScreenSpaceOverlay;
-            var scaler = canvasObject.GetComponent<CanvasScaler>(); scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize; scaler.referenceResolution = new Vector2(1920, 1080);
+            var scaler = canvasObject.GetComponent<CanvasScaler>();
+            scaler.uiScaleMode = CanvasScaler.ScaleMode.ScaleWithScreenSize;
+            scaler.referenceResolution = new Vector2(1920, 1080);
+            // Keep match-width so lane math (CanvasHeight from screen aspect) stays stable.
+            scaler.matchWidthOrHeight = 0f;
             canvasRoot = canvasObject.GetComponent<RectTransform>();
             var root = canvasRoot;
             Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
@@ -4467,12 +4634,12 @@ namespace Gugarhythm
             foreach (var timing in new[] { JudgmentTiming.Fast, JudgmentTiming.Late })
                 judgmentTimingSprites[timing] = Resources.Load<Texture2D>(JudgmentTimingSpriteResourcePath(timing));
 
-            pauseButton = MakeFlatButton("暫停", root, Vector2.zero, PauseGame, new Vector2(112, 48), ResultSurface);
+            pauseButton = MakeFlatButton("暫停", root, Vector2.zero, PauseGame, new Vector2(120, MinTouch), ResultSurface);
             PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-20, -20));
             Outline(pauseButton.gameObject, ResultBorder, 1);
             var pauseLabel = pauseButton.GetComponentInChildren<Text>();
             pauseLabel.alignment = TextAnchor.MiddleCenter;
-            pauseLabel.fontSize = 20;
+            pauseLabel.fontSize = 22;
             pauseLabel.color = new Color(.92f, .92f, .92f);
             pauseButton.gameObject.SetActive(false);
         }
@@ -4620,18 +4787,20 @@ namespace Gugarhythm
             var width = band.rect.width;
             if (width <= 1f) return;
             var gap = tight ? 12f : 16f;
-            var height = tight ? 48f : 52f;
+            // Never shrink below MinTouch on short result layouts — tight used to make taps worse.
+            var height = MinTouch;
             var y = band.rect.height * .5f;
             if (secondary == null)
             {
                 if (primary == null) return;
-                var singleWidth = Mathf.Clamp(width - pagePad * 2f, 140f, tight ? 180f : 220f);
+                var singleWidth = Mathf.Clamp(width - pagePad * 2f, MinTouch + 40f, tight ? 220f : 260f);
                 PlaceResultActionButton(primary, Vector2.zero, new Vector2(singleWidth, height), y);
                 return;
             }
 
-            var usable = Mathf.Max(200f, width - pagePad * 2f - gap);
-            var buttonWidth = Mathf.Min(tight ? 168f : 200f, usable * .5f);
+            var usable = Mathf.Max(MinTouch * 2f + gap, width - pagePad * 2f - gap);
+            var buttonWidth = Mathf.Min(tight ? 200f : 240f, usable * .5f);
+            buttonWidth = Mathf.Max(buttonWidth, MinTouch);
             var halfSpan = buttonWidth * .5f + gap * .5f;
             PlaceResultActionButton(primary, new Vector2(-halfSpan, 0f), new Vector2(buttonWidth, height), y);
             PlaceResultActionButton(secondary, new Vector2(halfSpan, 0f), new Vector2(buttonWidth, height), y);
@@ -6912,6 +7081,8 @@ namespace Gugarhythm
                 startButton.interactable = false;
                 presentationClock.Invalidate();
                 chart = cached.Chart;
+                lastAudioCachePath = cached.AudioCachePath;
+                lastAudioExtension = chart.BgmExtension;
                 if (cached.Music != null)
                 {
                     music.clip = cached.Music;
@@ -6941,6 +7112,7 @@ namespace Gugarhythm
                 SetStatus($"{chart.PlayableCount:N0} notes");
                 loading = false;
                 RefreshLibraryUI();
+                ScheduleGpuRibbonWarm(chart);
                 yield break;
             }
             // 未命中快取：維持原本「主執行緒同步讀檔 + Import + LoadMusic」的 fallback 不變。
@@ -6948,7 +7120,7 @@ namespace Gugarhythm
             loading = true;
             startButton.interactable = false;
             yield return null;
-            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
+            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null, decodeCover: false);
             if (!result.Success) { SetStatus("譜面載入失敗：" + result.Error); loading = false; yield break; }
             presentationClock.Invalidate();
             chart = result.Chart;
@@ -6961,6 +7133,44 @@ namespace Gugarhythm
             SetStatus($"{chart.PlayableCount:N0} notes");
             loading = false;
             RefreshLibraryUI();
+            ScheduleGpuRibbonWarm(chart);
+        }
+
+        void ScheduleGpuRibbonWarm(RuntimeChart warmChart)
+        {
+            if (warmChart == null) return;
+            if (gpuRibbonWarmCoroutine != null) StopCoroutine(gpuRibbonWarmCoroutine);
+            gpuRibbonWarmCoroutine = StartCoroutine(WarmGpuRibbonCache(warmChart));
+        }
+
+        // Build guide caches and materialize the on-disk GPU ribbon mesh while the player
+        // is still on the library detail pane, so StartGameplay is more likely to hit cache.
+        IEnumerator WarmGpuRibbonCache(RuntimeChart warmChart)
+        {
+            yield return null;
+            if (warmChart == null || !ReferenceEquals(chart, warmChart)) yield break;
+            var guides = new Dictionary<RuntimeGuide, GuideRenderCache>();
+            foreach (var guide in warmChart.Guides)
+            {
+                var cache = new GuideRenderCache(guide);
+                cache.BuildVisualSpans(warmChart);
+                guides.Add(guide, cache);
+                yield return null;
+                if (!ReferenceEquals(chart, warmChart)) yield break;
+            }
+
+            try
+            {
+                GpuRibbonCache.LoadOrBuild(warmChart, guides, out _);
+            }
+            catch (Exception exception)
+            {
+                Debug.LogWarning("GPU ribbon warm skipped: " + exception.Message);
+            }
+            finally
+            {
+                gpuRibbonWarmCoroutine = null;
+            }
         }
 
         // ── 預載入背景化的設計原則（因為無法實機驗證，一律採保守做法）─────────────
@@ -8176,8 +8386,17 @@ namespace Gugarhythm
             var label = Label(text, panel, 27); Fill(label.rectTransform); var button = panel.gameObject.AddComponent<Button>(); button.onClick.AddListener(() => action()); return button;
         }
 
+        static Vector2 EnforceMinTouch(Vector2 size)
+        {
+            // size.x == 0 means the RectTransform stretches via anchors.
+            if (size.x > 0f) size.x = Mathf.Max(size.x, MinTouch);
+            if (size.y > 0f) size.y = Mathf.Max(size.y, MinTouch);
+            return size;
+        }
+
         static Button MakeFlatButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size, Color color)
         {
+            size = EnforceMinTouch(size);
             var panel = Panel(text, parent, color, size, position);
             var image = panel.GetComponent<Image>(); image.raycastTarget = true;
             var label = Label(text, panel, 24); Fill(label.rectTransform);
