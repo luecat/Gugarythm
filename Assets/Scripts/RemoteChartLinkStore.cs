@@ -147,8 +147,27 @@ namespace Gugarhythm
             try
             {
                 File.WriteAllText(temporaryPath, json, new UTF8Encoding(false));
-                if (File.Exists(fullPath)) File.Replace(temporaryPath, fullPath, null);
-                else File.Move(temporaryPath, fullPath);
+                if (!File.Exists(fullPath))
+                {
+                    File.Move(temporaryPath, fullPath);
+                }
+                else
+                {
+                    try
+                    {
+                        File.Replace(temporaryPath, fullPath, null);
+                    }
+                    catch (PlatformNotSupportedException)
+                    {
+                        File.Delete(fullPath);
+                        File.Move(temporaryPath, fullPath);
+                    }
+                    catch (IOException)
+                    {
+                        File.Delete(fullPath);
+                        File.Move(temporaryPath, fullPath);
+                    }
+                }
             }
             finally
             {
