@@ -609,9 +609,31 @@ namespace Gugarhythm
         RectTransform settingsShell;
         const float SettingsShellMaxWidth = 1500f;
         const float SettingsShellMaxHeight = 1080f;
+        const float SettingsBodyPanelHeight = 760f;
+        // 分頁面板的設計寬度，同時是 content-inner 的最小寬度基準（等同 CSS 的 min-width）。
+        const float SettingsContentPanelWidth = 1030f;
+        // Sidebar 固定寬度，等同 flex-shrink: 0：右側內容再寬也不會把它壓窄。
+        const float SettingsSidebarWidth = 270f;
+        // Sidebar 與 Settings Content 之間的固定欄距。
+        const float SettingsColumnGap = 24f;
+        // Header 底邊到 Main Layout 頂邊的間距。
+        const float SettingsBodyBelowHeaderGap = 20f;
         Text settingsTitle;
         RectTransform settingsBackButton;
         RectTransform settingsNavigation;
+        // Main Layout：Header 底下唯一的雙欄容器。它自己不捲動、不可拖動，
+        // 只負責用錨點決定 Sidebar 與 Settings Content 共用的可用寬高。
+        RectTransform settingsBody;
+        Vector2 settingsBodySize;
+        // Sidebar 外框：寬度固定、高度撐滿 Main Layout，只在自己內部垂直捲動。
+        RectTransform settingsSidebarArea;
+        // Settings Content 外框：吃掉 Main Layout 剩餘寬度、高度撐滿，雙軸捲動。
+        RectTransform settingsContentArea;
+        // content-inner：真正掛分頁面板的容器，尺寸 = max(分頁設計尺寸, 外框可用尺寸)，
+        // 所以外框可以縮小、內容保持合理寬度，超出只由外框自己捲動。
+        RectTransform settingsContentInner;
+        ScrollRect settingsSidebarScroll;
+        ScrollRect settingsContentScroll;
         RectTransform settingsAudioPanel;
         RectTransform settingsGamePanel;
         RectTransform settingsTagsPanel;
@@ -658,6 +680,8 @@ namespace Gugarhythm
         RectTransform difficultyButtonContent;
         RectTransform chartEditorTagContent;
         RectTransform settingsTagContent;
+        RectTransform settingsTagListContent;
+        ScrollRect settingsTagScroll;
         InputField settingsTagInput;
         Text importDecisionText;
         Text resultText;
@@ -1628,6 +1652,36 @@ namespace Gugarhythm
                 settingsInputDelayLabel.text = $"{inputOffsetSeconds * 1000d:+0;-0;0} ms";
         }
 
+
+        void RefreshSettingsOverflowFromCurrentShell()
+        {
+            if (settingsShell == null) return;
+            var shellSize = settingsShell.sizeDelta;
+            if (shellSize.x <= 1f || shellSize.y <= 1f)
+                shellSize = new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight);
+            LayoutSettingsMainLayout(shellSize);
+        }
+
+        // 切換設定分頁時捲動進度歸零，不繼承上一個分頁的位置。
+        void ResetSettingsTabScrollPositions()
+        {
+            ResetScrollToStart(settingsContentScroll);
+            ResetScrollToStart(settingsSidebarScroll);
+            if (settingsGamePanel != null)
+                ResetScrollToStart(settingsGamePanel.GetComponent<ScrollRect>());
+            ResetScrollToStart(settingsTagScroll);
+        }
+
+        static void ResetScrollToStart(ScrollRect scroll)
+        {
+            if (scroll == null) return;
+            scroll.StopMovement();
+            scroll.velocity = Vector2.zero;
+            // 用 normalized 歸位，避免中心 pivot（遊戲分頁）被 anchoredPosition=0 拉到中段。
+            scroll.horizontalNormalizedPosition = 0f;
+            scroll.verticalNormalizedPosition = 1f;
+        }
+
         void ShowSettingsAudio()
         {
             if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
@@ -1640,7 +1694,10 @@ namespace Gugarhythm
             settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-        }
+        
+            ResetSettingsTabScrollPositions();
+            RefreshSettingsOverflowFromCurrentShell();
+}
 
         void ShowSettingsGame()
         {
@@ -1654,7 +1711,10 @@ namespace Gugarhythm
             settingsGameNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-        }
+        
+            ResetSettingsTabScrollPositions();
+            RefreshSettingsOverflowFromCurrentShell();
+}
 
         void ShowSettingsTags()
         {
@@ -1668,7 +1728,10 @@ namespace Gugarhythm
             settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
             settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-        }
+        
+            ResetSettingsTabScrollPositions();
+            RefreshSettingsOverflowFromCurrentShell();
+}
 
         void ShowSettingsAccount()
         {
@@ -1683,7 +1746,10 @@ namespace Gugarhythm
             settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
             settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
             RefreshAccountSettings();
-        }
+        
+            ResetSettingsTabScrollPositions();
+            RefreshSettingsOverflowFromCurrentShell();
+}
 
         void OpenAutoAdjustPanel()
         {
@@ -4239,18 +4305,12 @@ namespace Gugarhythm
             // 對齊基準一律掛在中央殼上，螢幕拉寬時只有兩側留白改變、相對位置固定。
             var safeAspect = logicalSafeSize.x / Mathf.Max(1f, logicalSafeSize.y);
             var compactMobile = Application.isMobilePlatform && safeAspect > 1.5f;
-            if (settingsTitle != null) settingsTitle.transform.SetAsLastSibling();
             LayoutSettingsHeaderRow(compactMobile, settingsShellSize);
-            if (compactMobile && settingsNavigation != null)
-            {
-                // 手機窄屏：導覽欄讓出頂部列的空間，寬度與水平位置沿用既有數值。
-                var navigationWidth = settingsNavigation.sizeDelta.x;
-                var navigationX = settingsNavigation.anchoredPosition.x;
-                settingsNavigation.sizeDelta = new Vector2(
-                    navigationWidth, Mathf.Clamp(settingsShellSize.y * .88f, 650f, 760f));
-                settingsNavigation.anchoredPosition = new Vector2(
-                    navigationX, -Mathf.Clamp(settingsShellSize.y * .105f, 76f, 96f));
-            }
+            LayoutSettingsMainLayout(settingsShellSize);
+            // 頂部列永遠畫在導覽欄與卡片之上：就算比例極端到来不及讓位，
+            // 「設定」跟「返回曲庫」也不會被實色背景吃掉，點擊同樣留在按鈕上。
+            if (settingsTitle != null) settingsTitle.transform.SetAsLastSibling();
+            if (settingsBackButton != null) settingsBackButton.transform.SetAsLastSibling();
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
             FitChartPreviewPanel(chartPreviewPanel, 32f);
@@ -4294,10 +4354,7 @@ namespace Gugarhythm
 
         // 設定頁頂部列的唯一排版入口：「設定」標題與「返回曲庫」按鈕。
         // 兩者共用同一個列高 rowHeight 與同一個列中心 rowCenterY，pivot.y 一律 .5，
-        // 錨點分別貼齊中央殼的左上角與右上角，所以上下邊緣完全重疊、不會再錯位。
-        // 舊寫法是兩個元件各自用頂邊當 pivot、又各給不同的頂邊內縮量，
-        // 以 1500x1080 為例標題中心在 -130、返回鈕中心在 -86，直接差 44px。
-        // 標題同時把水平與垂直溢出設成 Overflow，避免任何解析度下被裁切而不見。
+        // 錨點分別貼齊中央殼的左上角與右上角；不參與 Main Layout 的任何 scrolling。
         void LayoutSettingsHeaderRow(bool compactMobile, Vector2 shellSize)
         {
             if (shellSize.x <= 0f || shellSize.y <= 0f)
@@ -4307,24 +4364,15 @@ namespace Gugarhythm
             var rowCenterY = -(rowTopInset + rowHeight * .5f);
             if (settingsTitle != null)
             {
-                // 手機窄屏把標題擺在導覽欄正上方，x 因此沿用導覽欄的中心基準座標。
-                var navigationWidth = settingsNavigation != null ? settingsNavigation.sizeDelta.x : 270f;
-                var navigationX = settingsNavigation != null ? settingsNavigation.anchoredPosition.x : -600f;
-                var titleWidth = compactMobile
-                    ? navigationWidth
-                    : Mathf.Clamp(shellSize.x * .38f, 480f, 680f);
-                var titleX = compactMobile
-                    ? navigationX
-                    : Mathf.Clamp(shellSize.x * .043f, 48f, 72f);
+                var titleWidth = Mathf.Clamp(shellSize.x * .38f, 320f, 680f);
+                var titleX = Mathf.Clamp(shellSize.x * .043f, 36f, 72f);
                 settingsTitle.rectTransform.sizeDelta = new Vector2(titleWidth, rowHeight);
-                PinToAnchor(settingsTitle.rectTransform,
-                    new Vector2(compactMobile ? .5f : 0f, 1f),
-                    new Vector2(compactMobile ? .5f : 0f, .5f),
+                PinToAnchor(settingsTitle.rectTransform, new Vector2(0f, 1f), new Vector2(0f, .5f),
                     new Vector2(titleX, rowCenterY));
                 settingsTitle.fontSize = Mathf.RoundToInt(Mathf.Clamp(
                     shellSize.y * (compactMobile ? .047f : .052f),
                     compactMobile ? 32f : 40f, compactMobile ? 42f : 52f));
-                settingsTitle.alignment = compactMobile ? TextAnchor.MiddleCenter : TextAnchor.MiddleLeft;
+                settingsTitle.alignment = TextAnchor.MiddleLeft;
                 settingsTitle.horizontalOverflow = HorizontalWrapMode.Overflow;
                 settingsTitle.verticalOverflow = VerticalWrapMode.Overflow;
             }
@@ -4339,6 +4387,226 @@ namespace Gugarhythm
             }
         }
 
+        // Main Layout：Header 以下的雙欄容器。自己不捲動；Sidebar 與 Content
+        // 外框高度由這裡統一決定（stretch），超出內容只在各自 ScrollRect 內移動。
+        void LayoutSettingsMainLayout(Vector2 shellSize)
+        {
+            if (settingsBody == null || settingsSidebarArea == null || settingsContentArea == null)
+                return;
+            if (shellSize.x <= 0f || shellSize.y <= 0f)
+                shellSize = new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight);
+
+            var compactMobile = Application.isMobilePlatform &&
+                shellSize.x / Mathf.Max(1f, shellSize.y) > 1.5f;
+            var rowHeight = Mathf.Clamp(shellSize.y * (compactMobile ? .062f : .075f), 52f, 68f);
+            var rowTopInset = Mathf.Clamp(shellSize.y * (compactMobile ? .045f : .06f), 34f, 64f);
+            var bodyTopInset = rowTopInset + rowHeight + SettingsBodyBelowHeaderGap;
+            var padX = Mathf.Clamp(shellSize.x * .032f, 36f, 64f);
+            var padBottom = Mathf.Clamp(shellSize.y * .03f, 24f, 48f);
+            var bodyWidth = Mathf.Max(0f, shellSize.x - padX * 2f);
+            var bodyHeight = Mathf.Max(0f, shellSize.y - bodyTopInset - padBottom);
+            settingsBodySize = new Vector2(bodyWidth, bodyHeight);
+
+            settingsBody.anchorMin = new Vector2(0f, 1f);
+            settingsBody.anchorMax = new Vector2(1f, 1f);
+            settingsBody.pivot = new Vector2(.5f, 1f);
+            settingsBody.sizeDelta = new Vector2(-padX * 2f, bodyHeight);
+            settingsBody.anchoredPosition = new Vector2(0f, -bodyTopInset);
+
+            settingsSidebarArea.anchorMin = new Vector2(0f, 0f);
+            settingsSidebarArea.anchorMax = new Vector2(0f, 1f);
+            settingsSidebarArea.pivot = new Vector2(0f, .5f);
+            settingsSidebarArea.anchoredPosition = Vector2.zero;
+            settingsSidebarArea.sizeDelta = new Vector2(SettingsSidebarWidth, 0f);
+
+            var contentLeft = SettingsSidebarWidth + SettingsColumnGap;
+            settingsContentArea.anchorMin = Vector2.zero;
+            settingsContentArea.anchorMax = Vector2.one;
+            settingsContentArea.pivot = new Vector2(.5f, .5f);
+            settingsContentArea.offsetMin = new Vector2(contentLeft, 0f);
+            settingsContentArea.offsetMax = Vector2.zero;
+
+            // 依「目前作用中分頁」的實際佔用寬高決定要不要捲。
+            // 不要死用 1030×760 設計框，也不要把 padding 算進「是否溢出」。
+            const float ScrollOverflowEpsilon = 1f;
+            var sidebarNeededHeight = MeasureCenteredChildrenSize(settingsNavigation).y;
+            if (sidebarNeededHeight < 1f)
+                sidebarNeededHeight = SettingsBodyPanelHeight;
+            var sidebarNeedsVerticalScroll = sidebarNeededHeight > bodyHeight + ScrollOverflowEpsilon;
+            var sidebarInnerHeight = sidebarNeedsVerticalScroll ? sidebarNeededHeight : bodyHeight;
+            if (settingsNavigation != null)
+            {
+                var sidebarContent = settingsNavigation.parent as RectTransform;
+                if (sidebarContent != null)
+                {
+                    sidebarContent.anchorMin = new Vector2(0f, 1f);
+                    sidebarContent.anchorMax = new Vector2(0f, 1f);
+                    sidebarContent.pivot = new Vector2(0f, 1f);
+                    sidebarContent.sizeDelta = new Vector2(SettingsSidebarWidth, sidebarInnerHeight);
+                    sidebarContent.anchoredPosition = Vector2.zero;
+                }
+                Fill(settingsNavigation);
+            }
+            ApplyScrollAxes(settingsSidebarScroll, horizontal: false, vertical: sidebarNeedsVerticalScroll);
+
+            var contentAreaWidth = Mathf.Max(0f, bodyWidth - contentLeft);
+            var activePanel = GetActiveSettingsContentPanel();
+            var activeSize = MeasureCenteredChildrenSize(activePanel);
+            // 遊戲分頁由內層 ScrollRect 處理；標籤分頁外層一律不捲（列表自己捲）。
+            var gamePanelActive = settingsGamePanel != null && settingsGamePanel.gameObject.activeSelf;
+            var tagsPanelActive = settingsTagsPanel != null && settingsTagsPanel.gameObject.activeSelf;
+            var contentNeededWidth = activeSize.x > 1f ? activeSize.x : SettingsContentPanelWidth;
+            var contentNeededHeight = (gamePanelActive || tagsPanelActive)
+                ? bodyHeight
+                : (activeSize.y > 1f ? activeSize.y : bodyHeight);
+            var contentNeedsHorizontalScroll = !tagsPanelActive &&
+                contentNeededWidth > contentAreaWidth + ScrollOverflowEpsilon;
+            var contentNeedsVerticalScroll = !gamePanelActive && !tagsPanelActive &&
+                contentNeededHeight > bodyHeight + ScrollOverflowEpsilon;
+            var innerWidth = contentNeedsHorizontalScroll ? contentNeededWidth : contentAreaWidth;
+            var innerHeight = contentNeedsVerticalScroll ? contentNeededHeight : bodyHeight;
+            if (settingsContentInner != null)
+            {
+                settingsContentInner.anchorMin = new Vector2(0f, 1f);
+                settingsContentInner.anchorMax = new Vector2(0f, 1f);
+                settingsContentInner.pivot = new Vector2(0f, 1f);
+                settingsContentInner.sizeDelta = new Vector2(innerWidth, innerHeight);
+                settingsContentInner.anchoredPosition = Vector2.zero;
+            }
+            ApplyScrollAxes(settingsContentScroll, contentNeedsHorizontalScroll, contentNeedsVerticalScroll);
+
+            FillSettingsContentPanel(settingsAudioPanel);
+            FillSettingsContentPanel(settingsGamePanel);
+            FillSettingsContentPanel(settingsTagsPanel);
+            FillSettingsContentPanel(settingsAccountPanel);
+            FillSettingsContentPanel(settingsDebugPanel);
+            RefreshSettingsGamePanelScroll();
+            RefreshSettingsTagsListScroll();
+        }
+
+        RectTransform GetActiveSettingsContentPanel()
+        {
+            if (settingsAudioPanel != null && settingsAudioPanel.gameObject.activeSelf) return settingsAudioPanel;
+            if (settingsGamePanel != null && settingsGamePanel.gameObject.activeSelf) return settingsGamePanel;
+            if (settingsTagsPanel != null && settingsTagsPanel.gameObject.activeSelf) return settingsTagsPanel;
+            if (settingsAccountPanel != null && settingsAccountPanel.gameObject.activeSelf) return settingsAccountPanel;
+            if (settingsDebugPanel != null && settingsDebugPanel.gameObject.activeSelf) return settingsDebugPanel;
+            return null;
+        }
+
+        void RefreshSettingsGamePanelScroll()
+        {
+            if (settingsGamePanel == null) return;
+            var gameScroll = settingsGamePanel.GetComponent<ScrollRect>();
+            if (gameScroll == null || gameScroll.content == null) return;
+
+            var viewportHeight = settingsGamePanel.rect.height;
+            if (viewportHeight <= 1f) viewportHeight = settingsBodySize.y;
+            var viewportWidth = settingsGamePanel.rect.width;
+            if (viewportWidth <= 1f)
+                viewportWidth = Mathf.Max(settingsBodySize.x - SettingsSidebarWidth - SettingsColumnGap, 1f);
+
+            var needed = MeasureCenteredChildrenSize(gameScroll.content);
+            var neededHeight = needed.y > 1f ? needed.y : Mathf.Max(gameScroll.content.sizeDelta.y, viewportHeight);
+            var neededWidth = needed.x > 1f ? needed.x : Mathf.Max(viewportWidth, SettingsContentPanelWidth);
+            var needsVertical = neededHeight > viewportHeight + 1f;
+            var contentWidth = Mathf.Max(viewportWidth, Mathf.Min(neededWidth, Mathf.Max(viewportWidth, neededWidth)));
+            // 寬度以 viewport 為準（外層已處理水平溢出）；高度夠就貼齊、不夠才長於 viewport。
+            gameScroll.content.sizeDelta = new Vector2(
+                Mathf.Max(viewportWidth, 1f),
+                needsVertical ? neededHeight : viewportHeight);
+            ApplyScrollAxes(gameScroll, horizontal: false, vertical: needsVertical);
+            // 無論是否可捲，預設都停在頂部（速度列），不要停在中段。
+            gameScroll.verticalNormalizedPosition = 1f;
+        }
+
+        static void ApplyScrollAxes(ScrollRect scroll, bool horizontal, bool vertical)
+        {
+            if (scroll == null) return;
+            scroll.horizontal = horizontal;
+            scroll.vertical = vertical;
+            if (!horizontal) scroll.horizontalNormalizedPosition = 0f;
+            if (!vertical) scroll.verticalNormalizedPosition = 1f;
+            scroll.velocity = Vector2.zero;
+            scroll.enabled = horizontal || vertical;
+        }
+
+        // 量測中心錨點排版下，子物件需要的最小父層寬高（不含額外 padding，避免「都看得到還能拖」）。
+        static Vector2 MeasureCenteredChildrenSize(RectTransform parent)
+        {
+            if (parent == null) return Vector2.zero;
+            var extentX = 0f;
+            var extentY = 0f;
+            var found = false;
+            for (var index = 0; index < parent.childCount; index++)
+            {
+                var child = parent.GetChild(index) as RectTransform;
+                if (child == null || !child.gameObject.activeSelf) continue;
+                // 略過拉伸填滿父層的子物件，否則會量成「永遠等於外框 + 溢位」。
+                if (IsStretchingRect(child)) continue;
+                // 內層 ScrollRect／遮罩容器不計入外層所需尺寸。
+                if (child.GetComponent<ScrollRect>() != null) continue;
+
+                var width = child.rect.width;
+                var height = child.rect.height;
+                if (width <= 0f) width = Mathf.Abs(child.sizeDelta.x);
+                if (height <= 0f) height = Mathf.Abs(child.sizeDelta.y);
+                if (width <= 0f && height <= 0f) continue;
+
+                var left = child.anchoredPosition.x - child.pivot.x * width;
+                var right = child.anchoredPosition.x + (1f - child.pivot.x) * width;
+                var bottom = child.anchoredPosition.y - child.pivot.y * height;
+                var top = child.anchoredPosition.y + (1f - child.pivot.y) * height;
+                extentX = Mathf.Max(extentX, Mathf.Abs(left), Mathf.Abs(right));
+                extentY = Mathf.Max(extentY, Mathf.Abs(bottom), Mathf.Abs(top));
+                found = true;
+            }
+            return found ? new Vector2(extentX * 2f, extentY * 2f) : Vector2.zero;
+        }
+
+        static bool IsStretchingRect(RectTransform rect)
+        {
+            return rect.anchorMin.x < rect.anchorMax.x - .001f ||
+                   rect.anchorMin.y < rect.anchorMax.y - .001f;
+        }
+
+        static void FillSettingsContentPanel(RectTransform panel)
+        {
+            if (panel == null) return;
+            Fill(panel);
+        }
+
+        // 建立設定頁獨立捲動區：外框（viewport）負責 overflow，content 掛實際 UI。
+        static ScrollRect CreateSettingsScrollArea(
+            string name, RectTransform parent, Color viewportColor,
+            bool horizontal, bool vertical, out RectTransform viewport, out RectTransform content)
+        {
+            var viewportObject = new GameObject(name, typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(RectMask2D));
+            viewport = viewportObject.GetComponent<RectTransform>();
+            viewport.SetParent(parent, false);
+            var image = viewportObject.GetComponent<Image>();
+            image.color = viewportColor;
+            image.raycastTarget = true;
+
+            content = new GameObject(name + " Content", typeof(RectTransform)).GetComponent<RectTransform>();
+            content.SetParent(viewport, false);
+            content.anchorMin = new Vector2(0f, 1f);
+            content.anchorMax = new Vector2(0f, 1f);
+            content.pivot = new Vector2(0f, 1f);
+            content.anchoredPosition = Vector2.zero;
+            content.sizeDelta = Vector2.zero;
+
+            var scroll = viewportObject.AddComponent<ScrollRect>();
+            scroll.viewport = viewport;
+            scroll.content = content;
+            scroll.horizontal = horizontal;
+            scroll.vertical = vertical;
+            scroll.movementType = ScrollRect.MovementType.Clamped;
+            scroll.inertia = true;
+            scroll.decelerationRate = .135f;
+            scroll.scrollSensitivity = 42f;
+            return scroll;
+        }
 
         void BuildMenu(RectTransform root)
         {
@@ -4484,6 +4752,7 @@ namespace Gugarhythm
         {
             settingsPanel = Panel("Settings", root, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
             // 透明殼只當定位基準：不畫背景、不吃 raycast，否則會擋掉分頁面板的點擊。
+            // 殼本身不捲動；Header 固定在殼頂，Main Layout 在殼內吃剩餘高度。
             settingsShell = Panel("Settings Shell", settingsPanel, new Color(0, 0, 0, 0),
                 new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight), Vector2.zero);
             settingsShell.anchorMin = settingsShell.anchorMax = new Vector2(.5f, .5f);
@@ -4498,14 +4767,33 @@ namespace Gugarhythm
             PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, .5f), new Vector2(-52, -98));
             settingsBackButton = back.GetComponent<RectTransform>();
 
-            var navigation = Panel("Settings Navigation", settingsShell, new Color(.13f, .13f, .13f, 1f), new Vector2(270, 760), new Vector2(-600, -20));
-            settingsNavigation = navigation;
-            settingsAudioNavigationButton = MakeFlatButton("音訊", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
-            settingsGameNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsAccountNavigationButton = MakeFlatButton("帳號", navigation, new Vector2(0, 45), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            var card = Panel("Settings Audio Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            // Main Layout：禁止整頁捲動；Sidebar / Content 各自處理 overflow。
+            settingsBody = new GameObject("Settings Body", typeof(RectTransform)).GetComponent<RectTransform>();
+            settingsBody.SetParent(settingsShell, false);
+
+            RectTransform sidebarContent;
+            settingsSidebarScroll = CreateSettingsScrollArea(
+                "Settings Sidebar", settingsBody, new Color(.13f, .13f, .13f, 1f),
+                false, true, out settingsSidebarArea, out sidebarContent);
+            settingsNavigation = Panel("Settings Navigation", sidebarContent,
+                new Color(.13f, .13f, .13f, 1f),
+                new Vector2(SettingsSidebarWidth, SettingsBodyPanelHeight), Vector2.zero);
+            Fill(settingsNavigation);
+            sidebarContent.sizeDelta = new Vector2(SettingsSidebarWidth, SettingsBodyPanelHeight);
+
+            settingsContentScroll = CreateSettingsScrollArea(
+                "Settings Content Area", settingsBody, new Color(0f, 0f, 0f, 0f),
+                true, true, out settingsContentArea, out settingsContentInner);
+            settingsContentInner.sizeDelta = new Vector2(SettingsContentPanelWidth, SettingsBodyPanelHeight);
+
+            settingsAudioNavigationButton = MakeFlatButton("音訊", settingsNavigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
+            settingsGameNavigationButton = MakeFlatButton("遊戲", settingsNavigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsTagsNavigationButton = MakeFlatButton("標籤", settingsNavigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsAccountNavigationButton = MakeFlatButton("帳號", settingsNavigation, new Vector2(0, 45), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            var card = Panel("Settings Audio Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
+
             settingsAudioPanel = card;
+            Fill(card);
 
             var delayTitle = Label("音訊延遲", card, 24);
             delayTitle.alignment = TextAnchor.MiddleLeft;
@@ -4581,7 +4869,8 @@ namespace Gugarhythm
             SetSettingsMusicVolume(settingsMusicVolumeSlider.value);
             SetSettingsKeyVolume(settingsKeyVolumeSlider.value);
 
-            settingsGamePanel = Panel("Settings Game Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            settingsGamePanel = Panel("Settings Game Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
+            Fill(settingsGamePanel);
             const float GameSliderWidth = 650f;
             var speedTitle = Label("速度", settingsGamePanel, 24);
             speedTitle.alignment = TextAnchor.MiddleLeft;
@@ -4688,7 +4977,8 @@ namespace Gugarhythm
             gameContent.pivot = new Vector2(.5f, .5f);
             gameContent.sizeDelta = new Vector2(1030f, 980f);
             gameContent.anchoredPosition = Vector2.zero;
-            const float GameLayoutOffsetY = -70f;
+            // 往下挪一點，避免「速度」標題貼齊內容區上緣。
+            const float GameLayoutOffsetY = -120f;
             foreach (var control in gameControls)
             {
                 control.SetParent(gameContent, false);
@@ -4704,12 +4994,80 @@ namespace Gugarhythm
             gameScroll.verticalNormalizedPosition = 1f;
             settingsGamePanel.gameObject.SetActive(false);
 
-            settingsTagsPanel = Panel("Settings Tags Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
-            var tagTitle = Label("難度標籤", settingsTagsPanel, 32); tagTitle.alignment = TextAnchor.MiddleLeft; tagTitle.rectTransform.sizeDelta = new Vector2(940, 62); tagTitle.rectTransform.anchoredPosition = new Vector2(0, 330);
-            var tagDescription = Label("拖移可調整順序（上到下對應左到右）", settingsTagsPanel, 22); tagDescription.color = new Color(.72f, .82f, 1f, 1); tagDescription.rectTransform.sizeDelta = new Vector2(940, 44); tagDescription.rectTransform.anchoredPosition = new Vector2(0, 275);
-            settingsTagInput = MakeInputField("新增難度標籤", settingsTagsPanel, new Vector2(-100, 190), new Vector2(650, 56));
-            MakeFlatButton("＋ 新增", settingsTagsPanel, new Vector2(350, 190), CreateDifficultyTag, new Vector2(150, 56), new Color(.06f, .58f, .96f));
-            settingsTagContent = new GameObject("Settings Difficulty Tags", typeof(RectTransform)).GetComponent<RectTransform>(); settingsTagContent.SetParent(settingsTagsPanel, false); settingsTagContent.anchorMin = settingsTagContent.anchorMax = new Vector2(.5f, .5f); settingsTagContent.pivot = new Vector2(.5f, .5f); settingsTagContent.sizeDelta = new Vector2(850, 430); settingsTagContent.anchoredPosition = new Vector2(0, -100);
+            settingsTagsPanel = Panel("Settings Tags Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
+            Fill(settingsTagsPanel);
+            // 全部改頂部錨點，避免 Fill 後中心座標輸入列跟說明文字疊在一起。
+            const float TagsPadX = 40f;
+            const float TagsTitleTop = 30f;
+            const float TagsTitleHeight = 62f;
+            const float TagsDescTop = 98f;
+            const float TagsDescHeight = 44f;
+            const float TagsInputTop = 156f;
+            const float TagsInputHeight = 56f;
+            const float TagsAddWidth = 150f;
+            const float TagsInputAddGap = 16f;
+            const float TagsListTop = 232f;
+            const float TagsListBottom = 28f;
+
+            var tagTitle = Label("難度標籤", settingsTagsPanel, 32);
+            tagTitle.alignment = TextAnchor.MiddleLeft;
+            tagTitle.rectTransform.anchorMin = new Vector2(0f, 1f);
+            tagTitle.rectTransform.anchorMax = new Vector2(1f, 1f);
+            tagTitle.rectTransform.pivot = new Vector2(.5f, 1f);
+            tagTitle.rectTransform.offsetMin = new Vector2(TagsPadX, -(TagsTitleTop + TagsTitleHeight));
+            tagTitle.rectTransform.offsetMax = new Vector2(-TagsPadX, -TagsTitleTop);
+
+            var tagDescription = Label("拖移可調整順序（上到下對應左到右）", settingsTagsPanel, 22);
+            tagDescription.color = new Color(.72f, .82f, 1f, 1);
+            tagDescription.alignment = TextAnchor.MiddleLeft;
+            tagDescription.rectTransform.anchorMin = new Vector2(0f, 1f);
+            tagDescription.rectTransform.anchorMax = new Vector2(1f, 1f);
+            tagDescription.rectTransform.pivot = new Vector2(.5f, 1f);
+            tagDescription.rectTransform.offsetMin = new Vector2(TagsPadX, -(TagsDescTop + TagsDescHeight));
+            tagDescription.rectTransform.offsetMax = new Vector2(-TagsPadX, -TagsDescTop);
+
+            settingsTagInput = MakeInputField("新增難度標籤", settingsTagsPanel, Vector2.zero, new Vector2(650, TagsInputHeight));
+            var tagInputRect = settingsTagInput.GetComponent<RectTransform>();
+            tagInputRect.anchorMin = new Vector2(0f, 1f);
+            tagInputRect.anchorMax = new Vector2(1f, 1f);
+            tagInputRect.pivot = new Vector2(.5f, 1f);
+            tagInputRect.offsetMin = new Vector2(TagsPadX, -(TagsInputTop + TagsInputHeight));
+            tagInputRect.offsetMax = new Vector2(-(TagsPadX + TagsAddWidth + TagsInputAddGap), -TagsInputTop);
+
+            var tagAddButton = MakeFlatButton("＋ 新增", settingsTagsPanel, Vector2.zero, CreateDifficultyTag,
+                new Vector2(TagsAddWidth, TagsInputHeight), new Color(.06f, .58f, .96f));
+            var tagAddRect = tagAddButton.GetComponent<RectTransform>();
+            tagAddRect.anchorMin = new Vector2(1f, 1f);
+            tagAddRect.anchorMax = new Vector2(1f, 1f);
+            tagAddRect.pivot = new Vector2(1f, 1f);
+            tagAddRect.sizeDelta = new Vector2(TagsAddWidth, TagsInputHeight);
+            tagAddRect.anchoredPosition = new Vector2(-TagsPadX, -TagsInputTop);
+
+            // 標籤列表自己垂直捲動；外層 Settings Content 在此分頁不捲。
+            settingsTagContent = new GameObject("Settings Difficulty Tags", typeof(RectTransform), typeof(CanvasRenderer), typeof(Image), typeof(RectMask2D)).GetComponent<RectTransform>();
+            settingsTagContent.SetParent(settingsTagsPanel, false);
+            settingsTagContent.GetComponent<Image>().color = new Color(0f, 0f, 0f, 0f);
+            settingsTagContent.GetComponent<Image>().raycastTarget = true;
+            settingsTagContent.anchorMin = new Vector2(0f, 0f);
+            settingsTagContent.anchorMax = new Vector2(1f, 1f);
+            settingsTagContent.pivot = new Vector2(.5f, .5f);
+            settingsTagContent.offsetMin = new Vector2(TagsPadX, TagsListBottom);
+            settingsTagContent.offsetMax = new Vector2(-TagsPadX, -TagsListTop);
+            settingsTagListContent = new GameObject("Settings Difficulty Tags Content", typeof(RectTransform)).GetComponent<RectTransform>();
+            settingsTagListContent.SetParent(settingsTagContent, false);
+            settingsTagListContent.anchorMin = new Vector2(0f, 1f);
+            settingsTagListContent.anchorMax = new Vector2(1f, 1f);
+            settingsTagListContent.pivot = new Vector2(.5f, 1f);
+            settingsTagListContent.anchoredPosition = Vector2.zero;
+            settingsTagListContent.sizeDelta = new Vector2(0f, 430f);
+            settingsTagScroll = settingsTagContent.gameObject.AddComponent<ScrollRect>();
+            settingsTagScroll.viewport = settingsTagContent;
+            settingsTagScroll.content = settingsTagListContent;
+            settingsTagScroll.horizontal = false;
+            settingsTagScroll.vertical = true;
+            settingsTagScroll.movementType = ScrollRect.MovementType.Clamped;
+            settingsTagScroll.inertia = true;
+            settingsTagScroll.scrollSensitivity = 42f;
             RefreshSettingsTags();
             difficultyTagConfirmationPanel = Panel("Difficulty Tag Confirmation", settingsTagsPanel, new Color(.07f, .07f, .07f, .99f), new Vector2(560, 300), Vector2.zero);
             Outline(difficultyTagConfirmationPanel.gameObject, new Color(.78f, .28f, .28f), 2);
@@ -4724,28 +5082,65 @@ namespace Gugarhythm
             MakeOutlinedButton("取消", difficultyTagConfirmationPanel, new Vector2(-120, -82), CancelDifficultyTagDelete, new Vector2(160, 54));
             difficultyTagConfirmationPanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
-            settingsAccountPanel = Panel("Settings Account Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            settingsAccountPanel = Panel("Settings Account Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
+            Fill(settingsAccountPanel);
+            // 頂部錨點 + 按鈕水平置中，避免 Fill 後標題貼邊、登入鈕偏左。
+            const float AccountPadX = 48f;
+            const float AccountTitleTop = 36f;
+            const float AccountTitleHeight = 62f;
+            const float AccountDescTop = 108f;
+            const float AccountDescHeight = 46f;
+            const float AccountStatusTop = 172f;
+            const float AccountStatusHeight = 56f;
+            const float AccountPrimaryButtonTop = 260f;
+            const float AccountPrimaryButtonHeight = 62f;
+            const float AccountManageButtonTop = 340f;
+            const float AccountManageButtonHeight = 56f;
+
             var accountTitle = Label("帳號", settingsAccountPanel, 32);
             accountTitle.alignment = TextAnchor.MiddleLeft;
-            accountTitle.rectTransform.sizeDelta = new Vector2(860, 62);
-            accountTitle.rectTransform.anchoredPosition = new Vector2(0, 290);
+            accountTitle.rectTransform.anchorMin = new Vector2(0f, 1f);
+            accountTitle.rectTransform.anchorMax = new Vector2(1f, 1f);
+            accountTitle.rectTransform.pivot = new Vector2(.5f, 1f);
+            accountTitle.rectTransform.offsetMin = new Vector2(AccountPadX, -(AccountTitleTop + AccountTitleHeight));
+            accountTitle.rectTransform.offsetMax = new Vector2(-AccountPadX, -AccountTitleTop);
+
             var accountDescription = Label("登入後可查看及下載只屬於你的私人譜面。", settingsAccountPanel, 22);
             accountDescription.color = new Color(.72f, .82f, 1f, 1f);
-            accountDescription.rectTransform.sizeDelta = new Vector2(860, 46);
-            accountDescription.rectTransform.anchoredPosition = new Vector2(0, 220);
+            accountDescription.alignment = TextAnchor.MiddleLeft;
+            accountDescription.rectTransform.anchorMin = new Vector2(0f, 1f);
+            accountDescription.rectTransform.anchorMax = new Vector2(1f, 1f);
+            accountDescription.rectTransform.pivot = new Vector2(.5f, 1f);
+            accountDescription.rectTransform.offsetMin = new Vector2(AccountPadX, -(AccountDescTop + AccountDescHeight));
+            accountDescription.rectTransform.offsetMax = new Vector2(-AccountPadX, -AccountDescTop);
+
             settingsAccountStatusLabel = Label("", settingsAccountPanel, 24);
             settingsAccountStatusLabel.alignment = TextAnchor.MiddleLeft;
-            settingsAccountStatusLabel.rectTransform.sizeDelta = new Vector2(860, 56);
-            settingsAccountStatusLabel.rectTransform.anchoredPosition = new Vector2(0, 110);
-            settingsAccountLoginButton = MakeFlatButton("登入", settingsAccountPanel, new Vector2(-130, -5),
-                StartChartVaultLogin, new Vector2(230, 62), new Color(.06f, .58f, .96f));
-            settingsAccountLogoutButton = MakeOutlinedButton("登出", settingsAccountPanel, new Vector2(130, -5),
-                LogoutChartVault, new Vector2(230, 62));
+            settingsAccountStatusLabel.rectTransform.anchorMin = new Vector2(0f, 1f);
+            settingsAccountStatusLabel.rectTransform.anchorMax = new Vector2(1f, 1f);
+            settingsAccountStatusLabel.rectTransform.pivot = new Vector2(.5f, 1f);
+            settingsAccountStatusLabel.rectTransform.offsetMin = new Vector2(AccountPadX, -(AccountStatusTop + AccountStatusHeight));
+            settingsAccountStatusLabel.rectTransform.offsetMax = new Vector2(-AccountPadX, -AccountStatusTop);
+
+            settingsAccountLoginButton = MakeFlatButton("登入", settingsAccountPanel, Vector2.zero,
+                StartChartVaultLogin, new Vector2(230, AccountPrimaryButtonHeight), new Color(.06f, .58f, .96f));
+            PinToAnchor(settingsAccountLoginButton.GetComponent<RectTransform>(), new Vector2(.5f, 1f), new Vector2(.5f, 1f),
+                new Vector2(0f, -AccountPrimaryButtonTop));
+
+            settingsAccountLogoutButton = MakeOutlinedButton("登出", settingsAccountPanel, Vector2.zero,
+                LogoutChartVault, new Vector2(230, AccountPrimaryButtonHeight));
+            PinToAnchor(settingsAccountLogoutButton.GetComponent<RectTransform>(), new Vector2(.5f, 1f), new Vector2(.5f, 1f),
+                new Vector2(0f, -AccountPrimaryButtonTop));
+
             settingsAccountManageButton = MakeOutlinedButton("在網站管理帳號", settingsAccountPanel,
-                new Vector2(0, -85), OpenChartVaultAccountPage, new Vector2(470, 56));
+                Vector2.zero, OpenChartVaultAccountPage, new Vector2(470, AccountManageButtonHeight));
+            PinToAnchor(settingsAccountManageButton.GetComponent<RectTransform>(), new Vector2(.5f, 1f), new Vector2(.5f, 1f),
+                new Vector2(0f, -AccountManageButtonTop));
             settingsAccountPanel.gameObject.SetActive(false);
             RefreshAccountSettings();
-            BuildInputDiagnosticsSettingsSection(navigation);
+            BuildInputDiagnosticsSettingsSection(settingsNavigation);
+            LayoutSettingsHeaderRow(false, new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight));
+            LayoutSettingsMainLayout(new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight));
             settingsPanel.gameObject.SetActive(false);
         }
 
@@ -5325,21 +5720,73 @@ namespace Gugarhythm
 
         void RefreshSettingsTags()
         {
-            if (settingsTagContent == null) return; ClearChildren(settingsTagContent);
+            if (settingsTagListContent == null && settingsTagContent != null)
+                settingsTagListContent = settingsTagContent;
+            if (settingsTagListContent == null) return;
+            ClearChildren(settingsTagListContent);
             var tags = LocalChartLibrary.LoadDifficultyTags();
             for (var index = 0; index < tags.Count; index++)
             {
                 var tag = tags[index];
-                var row = Panel("Difficulty Tag Row", settingsTagContent, new Color(.18f, .18f, .18f), new Vector2(850, 56), Vector2.zero);
-                row.anchorMin = row.anchorMax = new Vector2(.5f, 1); row.anchoredPosition = new Vector2(0, -index * 64 - 28);
-                var handle = Label("☰", row, 20); handle.alignment = TextAnchor.MiddleCenter; handle.rectTransform.sizeDelta = new Vector2(48, 56); handle.rectTransform.anchoredPosition = new Vector2(-380, 0);
-                var label = Label(tag, row, 18); label.color = Color.white; label.raycastTarget = false; label.horizontalOverflow = HorizontalWrapMode.Overflow; label.verticalOverflow = VerticalWrapMode.Truncate; label.alignment = TextAnchor.MiddleLeft; label.rectTransform.anchorMin = Vector2.zero; label.rectTransform.anchorMax = Vector2.one; label.rectTransform.offsetMin = new Vector2(80, 0); label.rectTransform.offsetMax = new Vector2(-130, 0);
-                var drag = row.gameObject.AddComponent<DifficultyTagDragHandle>(); drag.Index = index; drag.Moved = (from, to) => { LocalChartLibrary.MoveDifficultyTag(from, to); RefreshSettingsTags(); };
-                var delete = MakeOutlinedButton("刪除", row, new Vector2(360, 0), () => PromptDeleteDifficultyTag(tag), new Vector2(96, 42));
+                // 維持與 DifficultyTagDragHandle 相同的頂部錨點 Y 座標語意。
+                var row = Panel("Difficulty Tag Row", settingsTagListContent, new Color(.18f, .18f, .18f), new Vector2(0, 56), Vector2.zero);
+                row.anchorMin = new Vector2(0f, 1f);
+                row.anchorMax = new Vector2(1f, 1f);
+                row.pivot = new Vector2(.5f, .5f);
+                row.sizeDelta = new Vector2(0f, 56f);
+                row.anchoredPosition = new Vector2(0f, -index * 64f - 28f);
+                var handle = Label("☰", row, 20);
+                handle.alignment = TextAnchor.MiddleCenter;
+                handle.rectTransform.anchorMin = handle.rectTransform.anchorMax = new Vector2(0f, .5f);
+                handle.rectTransform.pivot = new Vector2(0f, .5f);
+                handle.rectTransform.sizeDelta = new Vector2(48, 56);
+                handle.rectTransform.anchoredPosition = new Vector2(12f, 0f);
+                var label = Label(tag, row, 18);
+                label.color = Color.white;
+                label.raycastTarget = false;
+                label.horizontalOverflow = HorizontalWrapMode.Overflow;
+                label.verticalOverflow = VerticalWrapMode.Truncate;
+                label.alignment = TextAnchor.MiddleLeft;
+                label.rectTransform.anchorMin = Vector2.zero;
+                label.rectTransform.anchorMax = Vector2.one;
+                label.rectTransform.offsetMin = new Vector2(68f, 0f);
+                label.rectTransform.offsetMax = new Vector2(-118f, 0f);
+                var drag = row.gameObject.AddComponent<DifficultyTagDragHandle>();
+                drag.Index = index;
+                drag.Moved = (from, to) =>
+                {
+                    LocalChartLibrary.MoveDifficultyTag(from, to);
+                    RefreshSettingsTags();
+                };
+                var delete = MakeOutlinedButton("刪除", row, Vector2.zero, () => PromptDeleteDifficultyTag(tag), new Vector2(96, 42));
+                var deleteRect = delete.GetComponent<RectTransform>();
+                deleteRect.anchorMin = deleteRect.anchorMax = new Vector2(1f, .5f);
+                deleteRect.pivot = new Vector2(1f, .5f);
+                deleteRect.anchoredPosition = new Vector2(-12f, 0f);
                 var deleteText = delete.GetComponentInChildren<Text>();
                 deleteText.color = new Color(1f, .35f, .35f);
                 Outline(delete.gameObject, new Color(.78f, .28f, .28f), 1);
             }
+            var listHeight = Mathf.Max(tags.Count * 64f, 0f);
+            settingsTagListContent.anchorMin = new Vector2(0f, 1f);
+            settingsTagListContent.anchorMax = new Vector2(1f, 1f);
+            settingsTagListContent.pivot = new Vector2(.5f, 1f);
+            settingsTagListContent.sizeDelta = new Vector2(0f, listHeight);
+            settingsTagListContent.anchoredPosition = Vector2.zero;
+            RefreshSettingsTagsListScroll();
+        }
+
+        void RefreshSettingsTagsListScroll()
+        {
+            if (settingsTagScroll == null || settingsTagListContent == null || settingsTagContent == null)
+                return;
+            var viewportHeight = settingsTagContent.rect.height;
+            if (viewportHeight <= 1f) return;
+            var neededHeight = settingsTagListContent.sizeDelta.y;
+            var needsVertical = neededHeight > viewportHeight + 1f;
+            if (!needsVertical)
+                settingsTagListContent.sizeDelta = new Vector2(0f, viewportHeight);
+            ApplyScrollAxes(settingsTagScroll, horizontal: false, vertical: needsVertical);
         }
 
         void PromptDeleteChart()

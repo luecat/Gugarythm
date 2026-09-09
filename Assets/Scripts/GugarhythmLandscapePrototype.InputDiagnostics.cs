@@ -22,8 +22,9 @@ namespace Gugarhythm
             // shared position constructed DEBUG last and made 帳號 impossible to see or press.
             settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, -35),
                 ShowSettingsDebug, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsDebugPanel = Panel("Settings Debug Panel", settingsPanel,
-                new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 830), new Vector2(90, -20));
+            settingsDebugPanel = Panel("Settings Debug Panel", settingsContentInner,
+                new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
+            Fill(settingsDebugPanel);
 
             var title = Label("Tap 輸入診斷", settingsDebugPanel, 32);
             title.alignment = TextAnchor.MiddleLeft;
@@ -94,7 +95,10 @@ namespace Gugarhythm
             SetSettingsNavigationColor(settingsAccountNavigationButton, false);
             SetSettingsNavigationColor(settingsDebugNavigationButton, true);
             RefreshInputDiagnosticsSettingsStatus();
-        }
+        
+            ResetSettingsTabScrollPositions();
+            RefreshSettingsOverflowFromCurrentShell();
+}
 
         void HideInputDiagnosticsSettings()
         {
