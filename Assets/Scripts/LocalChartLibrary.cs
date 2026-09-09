@@ -175,13 +175,15 @@ namespace Gugarhythm
                 Normalize(entry.Title) == titleKey && Normalize(entry.Artist) == artistKey)?.GroupId;
         }
 
-        public static bool TryReadSource(LocalChartEntry entry, out byte[] bytes)
+        // root 只在背景預載入時由主執行緒先取好 persistentDataPath 再傳入，
+        // 因為 Root 本身走 Application.persistentDataPath，屬 Unity API，背景執行緒不可碰。
+        public static bool TryReadSource(LocalChartEntry entry, out byte[] bytes, string root = null)
         {
             bytes = null;
             if (entry == null || string.IsNullOrWhiteSpace(entry.SourceFile) || Path.IsPathRooted(entry.SourceFile)) return false;
             try
             {
-                var path = Path.Combine(Root, entry.SourceFile);
+                var path = Path.Combine(root ?? Root, entry.SourceFile);
                 if (!File.Exists(path)) return false;
                 bytes = File.ReadAllBytes(path);
                 return bytes.Length > 0;

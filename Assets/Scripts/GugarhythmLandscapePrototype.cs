@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Security.Cryptography;
 using System.Threading;
+using System.Threading.Tasks;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.Networking;
@@ -194,6 +195,26 @@ namespace Gugarhythm
 
     public sealed partial class GugarhythmLandscapePrototype : MonoBehaviour
     {
+        sealed class PreloadedLocalChart
+        {
+            public LocalChartEntry Entry;
+            public RuntimeChart Chart;
+            // Music 只有在 PreloadAudioUpFront = true 時才會在預載入階段就解碼好；
+            // 預設關掉時這裡是 null，進歌那一刻才用 AudioCachePath 在主執行緒解碼一次。
+            public AudioClip Music;
+            // 已經落到 persistentDataPath/AudioCache 的 BGM 檔案路徑；
+            // 由背景執行緒備妥，只有主執行緒可以拿它去建立 AudioClip。
+            public string AudioCachePath;
+        }
+
+        // 背景執行緒可以安全產出的東西：純 .NET 解包後的 RuntimeChart 與 BGM 快取檔路徑。
+        // 刻意不含 AudioClip / Texture2D，這些仍然只能由主執行緒建立與銷毀。
+        sealed class PreloadWork
+        {
+            public RuntimeChart Chart;
+            public string AudioCachePath;
+        }
+
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
         static readonly ProfilerMarker GameplayFrameProfiler = new("Gugarhythm.GameplayFrame");
         static readonly ProfilerMarker UpdateVisualsProfiler = new("Gugarhythm.UpdateVisuals");
@@ -581,6 +602,13 @@ namespace Gugarhythm
         RectTransform performanceHudPanel;
         RectTransform libraryBackdrop;
         RectTransform settingsPanel;
+        // 統一父層容器（Wrapper Container）：「設定」標題、「返回曲庫」按鈕與
+        // 中央設定面板全部改掛在這個殼之下，錨點基準從「全螢幕邊緣」變成
+        // 「中央殼」。殼置中於安全區且有尺寸上限，螢幕拉寬時只有兩側留白增加，
+        // 邊緣元件與中央面板的相對距離不再失跑。
+        RectTransform settingsShell;
+        const float SettingsShellMaxWidth = 1500f;
+        const float SettingsShellMaxHeight = 1080f;
         Text settingsTitle;
         RectTransform settingsBackButton;
         RectTransform settingsNavigation;
@@ -669,6 +697,16 @@ namespace Gugarhythm
         Button refreshRemoteLibraryButton;
         Button downloadRemoteChartButton;
         LocalChartEntry selectedLibraryEntry;
+        readonly Dictionary<string, PreloadedLocalChart> preloadedLocalCharts = new();
+        bool localChartPreloadStarted;
+        // 預載入階段要不要連 AudioClip 一起解碼。目前維持 false（保守預設）：
+        // 背景只做純 .NET 的解包與 BGM 落盤，解碼留到選曲時在主執行緒發生。
+        // 尚未實機驗證記憶體與幀率影響，所以上機量測前不要貿然翻成 true。
+        const bool PreloadAudioUpFront = false;
+        const int MaxResidentPreloadedClips = 8;
+        const int PreloadStartDelayFrames = 2;
+        readonly Dictionary<string, int> preloadedClipLru = new();
+        int preloadedClipLruTick;
         ChartLibrarySource librarySource = ChartLibrarySource.Local;
         IChartVaultClient chartVaultClient;
         RemoteChartCatalogCache remoteCatalogCache;
@@ -676,6 +714,7 @@ namespace Gugarhythm
         RemoteChartCatalog remoteCatalog;
         RemoteChartSummary selectedRemoteChart;
         Texture2D remoteCoverTexture;
+        readonly Dictionary<string, Texture2D> remoteCoverTextures = new();
         ChartLibrarySort remoteLibrarySort = ChartLibrarySort.Title;
         RemoteChartCatalogScope remoteCatalogScope = RemoteChartCatalogScope.Public;
         bool remoteLibrarySortAscending = true;
@@ -983,7 +1022,8 @@ namespace Gugarhythm
             if (!string.IsNullOrWhiteSpace(Application.absoluteURL))
                 HandleChartVaultDeepLink(Application.absoluteURL);
             SetPerformanceDiagnosticsEnabled(InputDiagnosticsSession.PerformanceHudEnabled);
-            SetStatus("請匯入 GGR 封包。");
+            if (!GugarhythmSceneRouter.IsLibrary)
+                SetStatus("請匯入 GGR 封包。");
         }
 
         IEnumerator Start()
@@ -998,6 +1038,10 @@ namespace Gugarhythm
                 settingsPanel.gameObject.SetActive(false);
                 RestoreLibrarySelection();
                 RefreshLibraryUI();
+                if (!localChartPreloadStarted)
+                    StartCoroutine(PreloadLocalCharts());
+                if (!remoteCatalogRequested)
+                    StartCoroutine(RefreshRemoteCatalog(false));
                 startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
                 yield break;
             }
@@ -1335,8 +1379,7 @@ namespace Gugarhythm
             else SetStatus("GGR 缺少 USC 譜面或音樂。");
 
             PresentImportStorageDecision(fileName, bytes, chart);
-            var warning = chart.Warnings.Count > 0 ? $" · {chart.Warnings.Count} 個解析警告" : "";
-            SetStatus($"{chart.Title} · {chart.PlayableCount:N0} notes · {chart.SourceFormat}{warning}");
+            SetStatus($"{chart.PlayableCount:N0} notes");
             loading = false;
         }
 
@@ -1846,33 +1889,51 @@ namespace Gugarhythm
 
         IEnumerator LoadMusic(byte[] bytes, string extension, double leadingSilenceSeconds = 0)
         {
-            musicLoadSucceeded = false;
-            music.clip = null;
-            string path;
-            var audioCacheReady = true;
+            // Application.persistentDataPath 屬 Unity API，只能在主執行緒讀；
+            // 讀完立刻交給純 .NET 的備檔 helper，之後的解碼流程完全不變。
+            var cachePath = PrepareAudioCacheFile(bytes, extension, Application.persistentDataPath);
+            yield return LoadMusicFromCachePath(cachePath, extension, leadingSilenceSeconds);
+        }
+
+        // 純 .NET：把 BGM 位元組寫進 persistentDataPath/AudioCache 並回傳完整路徑，失敗回 null。
+        // 因為不碰 Unity API（路徑由呼叫端先取好傳進來），這條可以在背景執行緒跑。
+        static string PrepareAudioCacheFile(byte[] bytes, string extension, string persistentDataPath)
+        {
+            if (bytes == null || string.IsNullOrEmpty(persistentDataPath)) return null;
             try
             {
-                var cache = Path.Combine(Application.persistentDataPath, "AudioCache");
+                var cache = Path.Combine(persistentDataPath, "AudioCache");
                 Directory.CreateDirectory(cache);
                 var hash = LocalChartLibrary.Sha256(bytes);
-                path = Path.Combine(cache, hash + (string.IsNullOrEmpty(extension) ? ".mp3" : extension));
+                var path = Path.Combine(cache, hash + (string.IsNullOrEmpty(extension) ? ".mp3" : extension));
                 if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
+                return path;
             }
             catch (Exception)
             {
-                path = null;
-                audioCacheReady = false;
+                return null;
             }
-            if (!audioCacheReady) yield break;
-            var type = extension?.ToLowerInvariant() switch
-            {
-                ".ogg" => AudioType.OGGVORBIS,
-                ".wav" => AudioType.WAV,
-                ".m4a" or ".aac" => AudioType.ACC,
-                ".flac" => AudioType.UNKNOWN,
-                _ => AudioType.MPEG,
-            };
-            using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, type);
+        }
+
+        // 副檔名對映從原本 LoadMusic 內的 switch 逐字搬過來；
+        // AudioType.ACC 是專案既有寫法，不要順手「修正」成别的常數名。
+        static AudioType AudioTypeForExtension(string extension) => extension?.ToLowerInvariant() switch
+        {
+            ".ogg" => AudioType.OGGVORBIS,
+            ".wav" => AudioType.WAV,
+            ".m4a" or ".aac" => AudioType.ACC,
+            ".flac" => AudioType.UNKNOWN,
+            _ => AudioType.MPEG,
+        };
+
+        // 解碼段：必須主執行緒。streamAudio = false 與 PrependLeadingSilence 是音訊時間軸行為，
+        // 動了就會改變首播偏移與譜面判定基準，所以這裡完全沿用原有邏輯，只是來源改成已備好的快取路徑。
+        IEnumerator LoadMusicFromCachePath(string path, string extension, double leadingSilenceSeconds = 0)
+        {
+            musicLoadSucceeded = false;
+            music.clip = null;
+            if (string.IsNullOrEmpty(path) || !File.Exists(path)) yield break;
+            using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, AudioTypeForExtension(extension));
             if (request.downloadHandler is DownloadHandlerAudioClip audioHandler) audioHandler.streamAudio = false;
             yield return request.SendWebRequest();
             if (request.result != UnityWebRequest.Result.Success) yield break;
@@ -4161,40 +4222,34 @@ namespace Gugarhythm
                 Fill(settingsPanel);
                 settingsPanel.localScale = Vector3.one;
             }
-            if (settingsTitle != null)
+            // Re-anchoring：殼是設定頁頂部元件唯一的對齊基準，尺寸 cap 在設計尺寸內
+            // 且永遠置中，不同螢幕比例之間相對位置固定。
+            var settingsShellSize = new Vector2(
+                Mathf.Min(logicalSafeSize.x, SettingsShellMaxWidth),
+                Mathf.Min(logicalSafeSize.y, SettingsShellMaxHeight));
+            if (settingsShell != null)
             {
-                settingsTitle.transform.SetAsLastSibling();
-                var compactMobile = Application.isMobilePlatform &&
-                    Screen.width > Screen.height &&
-                    Screen.height / (float)Screen.width < .65f;
-                if (compactMobile)
-                {
-                    var navigationWidth = settingsNavigation?.sizeDelta.x ?? 270f;
-                    var navigationX = settingsNavigation?.anchoredPosition.x ?? -600f;
-                    settingsTitle.rectTransform.sizeDelta = new Vector2(navigationWidth, 58f);
-                    settingsTitle.rectTransform.anchoredPosition = new Vector2(navigationX, -12f);
-                    settingsTitle.fontSize = 36;
-                    settingsTitle.alignment = TextAnchor.MiddleCenter;
-                    if (settingsNavigation != null)
-                    {
-                        settingsNavigation.sizeDelta = new Vector2(navigationWidth, 760f);
-                        settingsNavigation.anchoredPosition = new Vector2(navigationX, -86f);
-                    }
-                    if (settingsBackButton != null)
-                    {
-                        settingsBackButton.anchorMin = settingsBackButton.anchorMax = new Vector2(1, 1);
-                        settingsBackButton.pivot = new Vector2(1, 1);
-                        settingsBackButton.anchoredPosition = new Vector2(-28f, -28f);
-                    }
-                }
-                else
-                {
-                    settingsTitle.rectTransform.sizeDelta = new Vector2(560f, 72f);
-                    settingsTitle.rectTransform.anchoredPosition = new Vector2(64f, -78f);
-                    settingsTitle.fontSize = Mathf.RoundToInt(42f *
-                        (Application.isMobilePlatform || Screen.width <= 1440 ? 1.18f : 1f));
-                    settingsTitle.alignment = TextAnchor.MiddleLeft;
-                }
+                settingsShell.anchorMin = settingsShell.anchorMax = new Vector2(.5f, .5f);
+                settingsShell.pivot = new Vector2(.5f, .5f);
+                settingsShell.sizeDelta = settingsShellSize;
+                settingsShell.anchoredPosition = Vector2.zero;
+                settingsShell.localScale = Vector3.one;
+            }
+            // 頂部列排版統一交給 LayoutSettingsHeaderRow：標題與返回鈕共用同一條列中線，
+            // 對齊基準一律掛在中央殼上，螢幕拉寬時只有兩側留白改變、相對位置固定。
+            var safeAspect = logicalSafeSize.x / Mathf.Max(1f, logicalSafeSize.y);
+            var compactMobile = Application.isMobilePlatform && safeAspect > 1.5f;
+            if (settingsTitle != null) settingsTitle.transform.SetAsLastSibling();
+            LayoutSettingsHeaderRow(compactMobile, settingsShellSize);
+            if (compactMobile && settingsNavigation != null)
+            {
+                // 手機窄屏：導覽欄讓出頂部列的空間，寬度與水平位置沿用既有數值。
+                var navigationWidth = settingsNavigation.sizeDelta.x;
+                var navigationX = settingsNavigation.anchoredPosition.x;
+                settingsNavigation.sizeDelta = new Vector2(
+                    navigationWidth, Mathf.Clamp(settingsShellSize.y * .88f, 650f, 760f));
+                settingsNavigation.anchoredPosition = new Vector2(
+                    navigationX, -Mathf.Clamp(settingsShellSize.y * .105f, 76f, 96f));
             }
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
@@ -4236,6 +4291,54 @@ namespace Gugarhythm
             rect.pivot = pivot;
             rect.anchoredPosition = position;
         }
+
+        // 設定頁頂部列的唯一排版入口：「設定」標題與「返回曲庫」按鈕。
+        // 兩者共用同一個列高 rowHeight 與同一個列中心 rowCenterY，pivot.y 一律 .5，
+        // 錨點分別貼齊中央殼的左上角與右上角，所以上下邊緣完全重疊、不會再錯位。
+        // 舊寫法是兩個元件各自用頂邊當 pivot、又各給不同的頂邊內縮量，
+        // 以 1500x1080 為例標題中心在 -130、返回鈕中心在 -86，直接差 44px。
+        // 標題同時把水平與垂直溢出設成 Overflow，避免任何解析度下被裁切而不見。
+        void LayoutSettingsHeaderRow(bool compactMobile, Vector2 shellSize)
+        {
+            if (shellSize.x <= 0f || shellSize.y <= 0f)
+                shellSize = new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight);
+            var rowHeight = Mathf.Clamp(shellSize.y * (compactMobile ? .062f : .075f), 52f, 68f);
+            var rowTopInset = Mathf.Clamp(shellSize.y * (compactMobile ? .045f : .06f), 34f, 64f);
+            var rowCenterY = -(rowTopInset + rowHeight * .5f);
+            if (settingsTitle != null)
+            {
+                // 手機窄屏把標題擺在導覽欄正上方，x 因此沿用導覽欄的中心基準座標。
+                var navigationWidth = settingsNavigation != null ? settingsNavigation.sizeDelta.x : 270f;
+                var navigationX = settingsNavigation != null ? settingsNavigation.anchoredPosition.x : -600f;
+                var titleWidth = compactMobile
+                    ? navigationWidth
+                    : Mathf.Clamp(shellSize.x * .38f, 480f, 680f);
+                var titleX = compactMobile
+                    ? navigationX
+                    : Mathf.Clamp(shellSize.x * .043f, 48f, 72f);
+                settingsTitle.rectTransform.sizeDelta = new Vector2(titleWidth, rowHeight);
+                PinToAnchor(settingsTitle.rectTransform,
+                    new Vector2(compactMobile ? .5f : 0f, 1f),
+                    new Vector2(compactMobile ? .5f : 0f, .5f),
+                    new Vector2(titleX, rowCenterY));
+                settingsTitle.fontSize = Mathf.RoundToInt(Mathf.Clamp(
+                    shellSize.y * (compactMobile ? .047f : .052f),
+                    compactMobile ? 32f : 40f, compactMobile ? 42f : 52f));
+                settingsTitle.alignment = compactMobile ? TextAnchor.MiddleCenter : TextAnchor.MiddleLeft;
+                settingsTitle.horizontalOverflow = HorizontalWrapMode.Overflow;
+                settingsTitle.verticalOverflow = VerticalWrapMode.Overflow;
+            }
+            if (settingsBackButton != null)
+            {
+                var backWidth = Mathf.Clamp(shellSize.x * (compactMobile ? .13f : .12f), 160f, 220f);
+                var backInsetX = Mathf.Clamp(shellSize.x * (compactMobile ? .02f : .035f),
+                    compactMobile ? 24f : 38f, compactMobile ? 40f : 58f);
+                settingsBackButton.sizeDelta = new Vector2(backWidth, rowHeight);
+                PinToAnchor(settingsBackButton, new Vector2(1f, 1f), new Vector2(1f, .5f),
+                    new Vector2(-backInsetX, rowCenterY));
+            }
+        }
+
 
         void BuildMenu(RectTransform root)
         {
@@ -4380,21 +4483,28 @@ namespace Gugarhythm
         void BuildSettings(RectTransform root)
         {
             settingsPanel = Panel("Settings", root, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
-            settingsTitle = Label("設定", settingsPanel, 42);
+            // 透明殼只當定位基準：不畫背景、不吃 raycast，否則會擋掉分頁面板的點擊。
+            settingsShell = Panel("Settings Shell", settingsPanel, new Color(0, 0, 0, 0),
+                new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight), Vector2.zero);
+            settingsShell.anchorMin = settingsShell.anchorMax = new Vector2(.5f, .5f);
+            settingsShell.pivot = new Vector2(.5f, .5f);
+            settingsShell.localScale = Vector3.one;
+            settingsShell.GetComponent<Image>().raycastTarget = false;
+            settingsTitle = Label("設定", settingsShell, 42);
             settingsTitle.alignment = TextAnchor.MiddleLeft;
-            settingsTitle.rectTransform.sizeDelta = new Vector2(560, 72);
-            PinToAnchor(settingsTitle.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(64, -78));
-            var back = MakeFlatButton("返回曲庫", settingsPanel, Vector2.zero, ReturnFromSettings, new Vector2(180, 58), new Color(.18f, .18f, .18f));
-            PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-52, -48));
+            settingsTitle.rectTransform.sizeDelta = new Vector2(560, 68);
+            PinToAnchor(settingsTitle.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(64, -98));
+            var back = MakeFlatButton("返回曲庫", settingsShell, Vector2.zero, ReturnFromSettings, new Vector2(180, 68), new Color(.18f, .18f, .18f));
+            PinToAnchor(back.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, .5f), new Vector2(-52, -98));
             settingsBackButton = back.GetComponent<RectTransform>();
 
-            var navigation = Panel("Settings Navigation", settingsPanel, new Color(.13f, .13f, .13f, 1f), new Vector2(270, 760), new Vector2(-600, -20));
+            var navigation = Panel("Settings Navigation", settingsShell, new Color(.13f, .13f, .13f, 1f), new Vector2(270, 760), new Vector2(-600, -20));
             settingsNavigation = navigation;
             settingsAudioNavigationButton = MakeFlatButton("音訊", navigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
             settingsGameNavigationButton = MakeFlatButton("遊戲", navigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsTagsNavigationButton = MakeFlatButton("標籤", navigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsAccountNavigationButton = MakeFlatButton("帳號", navigation, new Vector2(0, 45), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            var card = Panel("Settings Audio Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            var card = Panel("Settings Audio Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             settingsAudioPanel = card;
 
             var delayTitle = Label("音訊延遲", card, 24);
@@ -4471,7 +4581,7 @@ namespace Gugarhythm
             SetSettingsMusicVolume(settingsMusicVolumeSlider.value);
             SetSettingsKeyVolume(settingsKeyVolumeSlider.value);
 
-            settingsGamePanel = Panel("Settings Game Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            settingsGamePanel = Panel("Settings Game Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             const float GameSliderWidth = 650f;
             var speedTitle = Label("速度", settingsGamePanel, 24);
             speedTitle.alignment = TextAnchor.MiddleLeft;
@@ -4594,7 +4704,7 @@ namespace Gugarhythm
             gameScroll.verticalNormalizedPosition = 1f;
             settingsGamePanel.gameObject.SetActive(false);
 
-            settingsTagsPanel = Panel("Settings Tags Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            settingsTagsPanel = Panel("Settings Tags Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             var tagTitle = Label("難度標籤", settingsTagsPanel, 32); tagTitle.alignment = TextAnchor.MiddleLeft; tagTitle.rectTransform.sizeDelta = new Vector2(940, 62); tagTitle.rectTransform.anchoredPosition = new Vector2(0, 330);
             var tagDescription = Label("拖移可調整順序（上到下對應左到右）", settingsTagsPanel, 22); tagDescription.color = new Color(.72f, .82f, 1f, 1); tagDescription.rectTransform.sizeDelta = new Vector2(940, 44); tagDescription.rectTransform.anchoredPosition = new Vector2(0, 275);
             settingsTagInput = MakeInputField("新增難度標籤", settingsTagsPanel, new Vector2(-100, 190), new Vector2(650, 56));
@@ -4614,7 +4724,7 @@ namespace Gugarhythm
             MakeOutlinedButton("取消", difficultyTagConfirmationPanel, new Vector2(-120, -82), CancelDifficultyTagDelete, new Vector2(160, 54));
             difficultyTagConfirmationPanel.gameObject.SetActive(false);
             settingsTagsPanel.gameObject.SetActive(false);
-            settingsAccountPanel = Panel("Settings Account Panel", settingsPanel, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
+            settingsAccountPanel = Panel("Settings Account Panel", settingsShell, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), new Vector2(90, -20));
             var accountTitle = Label("帳號", settingsAccountPanel, 32);
             accountTitle.alignment = TextAnchor.MiddleLeft;
             accountTitle.rectTransform.sizeDelta = new Vector2(860, 62);
@@ -5256,6 +5366,8 @@ namespace Gugarhythm
         void SelectLibrarySource(ChartLibrarySource source)
         {
             if (source != ChartLibrarySource.Local && source != ChartLibrarySource.Online) return;
+            if (loadStatus != null)
+                loadStatus.text = string.Empty;
             if (librarySource == source)
             {
                 RefreshLibraryUI();
@@ -5278,7 +5390,6 @@ namespace Gugarhythm
                 if (remoteCatalogCache != null && remoteCatalogCache.TryLoad(out var cachedCatalog))
                 {
                     remoteCatalog = cachedCatalog;
-                    SetStatus("已載入線上快取（" + FormatRemoteCatalogTimestamp(cachedCatalog.CachedAtUnixMilliseconds) + "）。");
                 }
                 else
                 {
@@ -5360,17 +5471,19 @@ namespace Gugarhythm
 
         IEnumerator RefreshRemoteCatalog(bool userInitiated)
         {
-            if (librarySource != ChartLibrarySource.Online || remoteCatalogLoading) yield break;
+            if (remoteCatalogLoading) yield break;
             if (remoteCatalogScope == RemoteChartCatalogScope.Private && string.IsNullOrEmpty(chartVaultSessionToken))
             {
-                SetStatus("請先到設定＞帳號登入，才能查看私人譜面。");
+                if (librarySource == ChartLibrarySource.Online)
+                    SetStatus("請先到設定＞帳號登入，才能查看私人譜面。");
                 yield break;
             }
             remoteCatalogLoading = true;
             remoteCatalogRequested = true;
             var generation = remoteOperationGeneration;
             RefreshLibrarySourceControls();
-            SetStatus(userInitiated ? "正在重新整理線上譜面…" : "正在取得線上譜面…");
+            if (librarySource == ChartLibrarySource.Online)
+                SetStatus(userInitiated ? "正在重新整理線上譜面…" : "正在取得線上譜面…");
 
             var resultReceived = false;
             var result = default(ChartVaultCatalogResult);
@@ -5445,6 +5558,7 @@ namespace Gugarhythm
                     cacheSaved = false;
                 }
             }
+            StartCoroutine(PreloadRemoteCovers(remoteCatalog));
             if (librarySource == ChartLibrarySource.Online)
             {
                 RefreshRemoteLibraryUI();
@@ -5626,6 +5740,15 @@ namespace Gugarhythm
                     .ToList();
             }
 
+            if (selectedRemoteChart == null && charts.Count > 0)
+            {
+                selectedRemoteChart = charts[0];
+                remoteCoverGeneration++;
+                ClearRemoteCoverTexture();
+                if (selectedRemoteChart.CoverUrl != null)
+                    StartCoroutine(DownloadRemoteCover(selectedRemoteChart, remoteCoverGeneration));
+            }
+
             libraryCountLabel.text = charts.Count.ToString();
             librarySortModeLabel.text = remoteLibrarySort == ChartLibrarySort.Difficulty ? "難度" : "曲名";
             libraryDirectionIcon.localRotation = Quaternion.Euler(0, 0, remoteLibrarySortAscending ? 180 : 0);
@@ -5695,6 +5818,8 @@ namespace Gugarhythm
 
         void RefreshRemoteDetailUI()
         {
+            if (loadStatus != null)
+                loadStatus.text = string.Empty;
             if (selectedRemoteChart == null)
             {
                 SetDetailTitle("選擇一份線上譜面");
@@ -5732,6 +5857,18 @@ namespace Gugarhythm
 
         IEnumerator DownloadRemoteCover(RemoteChartSummary chart, int coverGeneration)
         {
+            var cacheKey = RemoteCoverCacheKey(chart);
+            if (remoteCoverTextures.TryGetValue(cacheKey, out var cachedTexture) && cachedTexture != null)
+            {
+                if (SameRemoteChart(selectedRemoteChart, chart))
+                {
+                    ClearRemoteCoverTexture();
+                    remoteCoverTexture = cachedTexture;
+                    ShowRemoteCover(remoteCoverTexture);
+                }
+                yield break;
+            }
+
             Texture2D downloadedTexture = null;
             var resultReceived = false;
             var operationGeneration = remoteOperationGeneration;
@@ -5740,8 +5877,7 @@ namespace Gugarhythm
             {
                 operation = chartVaultClient?.DownloadCover(chart, (texture, _) =>
                 {
-                    if (destroying || operationGeneration != remoteOperationGeneration ||
-                        coverGeneration != remoteCoverGeneration || !SameRemoteChart(selectedRemoteChart, chart))
+                    if (destroying || operationGeneration != remoteOperationGeneration)
                     {
                         if (texture != null) Destroy(texture);
                         return;
@@ -5753,6 +5889,8 @@ namespace Gugarhythm
                     }
                     downloadedTexture = texture;
                     resultReceived = true;
+                    if (downloadedTexture != null)
+                        remoteCoverTextures[cacheKey] = downloadedTexture;
                 }, chartVaultSessionToken);
             }
             catch (Exception)
@@ -5785,15 +5923,27 @@ namespace Gugarhythm
             }
 
             if (destroying || operationGeneration != remoteOperationGeneration ||
-                coverGeneration != remoteCoverGeneration || !SameRemoteChart(selectedRemoteChart, chart))
+                !SameRemoteChart(selectedRemoteChart, chart))
             {
-                if (downloadedTexture != null) Destroy(downloadedTexture);
                 yield break;
             }
             if (operationFailed || !resultReceived || downloadedTexture == null) yield break;
             ClearRemoteCoverTexture();
             remoteCoverTexture = downloadedTexture;
             if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(remoteCoverTexture);
+        }
+
+        IEnumerator PreloadRemoteCovers(RemoteChartCatalog catalog)
+        {
+            if (catalog?.Charts == null) yield break;
+            foreach (var chart in catalog.Charts)
+            {
+                if (destroying) yield break;
+                if (chart == null || string.IsNullOrEmpty(chart.CoverUrl) ||
+                    remoteCoverTextures.ContainsKey(RemoteCoverCacheKey(chart)))
+                    continue;
+                yield return DownloadRemoteCover(chart, ++remoteCoverGeneration);
+            }
         }
 
         IEnumerator DownloadSelectedRemoteChart()
@@ -5890,7 +6040,9 @@ namespace Gugarhythm
 
         void ClearRemoteCoverTexture()
         {
-            if (remoteCoverTexture != null) Destroy(remoteCoverTexture);
+            if (remoteCoverTexture != null &&
+                !remoteCoverTextures.Values.Any(texture => ReferenceEquals(texture, remoteCoverTexture)))
+                Destroy(remoteCoverTexture);
             remoteCoverTexture = null;
             if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(null);
         }
@@ -5910,6 +6062,9 @@ namespace Gugarhythm
         static bool SameRemoteChart(RemoteChartSummary left, RemoteChartSummary right) =>
             left != null && right != null && left.Version == right.Version &&
             string.Equals(left.ChartId, right.ChartId, StringComparison.Ordinal);
+
+        static string RemoteCoverCacheKey(RemoteChartSummary chart) =>
+            chart == null ? string.Empty : chart.ChartId + ":" + chart.Version;
 
         static string RemoteText(string value) => string.IsNullOrWhiteSpace(value) ? "—" : value.Trim();
 
@@ -5953,23 +6108,56 @@ namespace Gugarhythm
             selectedLibraryEntry = entry;
             currentLibraryEntry = entry;
             selectedDifficultyName = entry.DifficultyName ?? string.Empty;
-            if (GugarhythmSceneRouter.IsLibrary)
-            {
-                if (startButton != null) startButton.interactable = true;
-                RefreshLibraryUI();
-                return;
-            }
-
             if (loadSource) StartCoroutine(LoadLibraryEntry(entry));
             else RefreshLibraryUI();
         }
 
         IEnumerator LoadLibraryEntry(LocalChartEntry entry)
         {
+            // 預載入命中的話，連 GGR 原始檔都不必在主執行緒讀，直接走這一路。
+            // 命中條件從 Chart != null && Music != null 放寬成只看 Chart，
+            // 因為預設預載入只解包不解碼，Music 會是 null。
+            if (preloadedLocalCharts.TryGetValue(entry.Id, out var cached) && cached.Chart != null)
+            {
+                loading = true;
+                startButton.interactable = false;
+                presentationClock.Invalidate();
+                chart = cached.Chart;
+                if (cached.Music != null)
+                {
+                    music.clip = cached.Music;
+                    musicLoadSucceeded = true;
+                }
+                else
+                {
+                    // 預載入只幫我把 BGM 落盤、沒解碼：這一刻才在主執行緒解碼一次。
+                    musicLoadSucceeded = false;
+                    if (!string.IsNullOrEmpty(cached.AudioCachePath))
+                        yield return LoadMusicFromCachePath(cached.AudioCachePath, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                    else if (chart.BgmBytes != null)
+                        yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                }
+                if (!musicLoadSucceeded || music.clip == null)
+                {
+                    SetStatus("GGR 音樂格式不支援或無法解碼。");
+                    loading = false;
+                    startButton.interactable = false;
+                    yield break;
+                }
+                TouchPreloadedClipLru(entry.Id);
+                EvictPreloadedClipsIfOverLimit();
+                currentLibraryEntry = entry;
+                selectedLibraryEntry = entry;
+                startButton.interactable = true;
+                SetStatus($"{chart.PlayableCount:N0} notes");
+                loading = false;
+                RefreshLibraryUI();
+                yield break;
+            }
+            // 未命中快取：維持原本「主執行緒同步讀檔 + Import + LoadMusic」的 fallback 不變。
             if (!LocalChartLibrary.TryReadSource(entry, out var bytes)) { SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。"); yield break; }
             loading = true;
             startButton.interactable = false;
-            SetStatus("正在載入 " + entry.Title + "…");
             yield return null;
             var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null);
             if (!result.Success) { SetStatus("譜面載入失敗：" + result.Error); loading = false; yield break; }
@@ -5981,9 +6169,148 @@ namespace Gugarhythm
             currentLibraryEntry = entry;
             selectedLibraryEntry = entry;
             startButton.interactable = true;
-            SetStatus($"{chart.Title} · {chart.PlayableCount:N0} notes · {DisplayDifficulty(chart)}");
+            SetStatus($"{chart.PlayableCount:N0} notes");
             loading = false;
             RefreshLibraryUI();
+        }
+
+        // ── 預載入背景化的設計原則（因為無法實機驗證，一律採保守做法）─────────────
+        // 1. 音訊時間軸行為完全不變：保留 streamAudio = false 與 PrependLeadingSilence，
+        //    避免譜面/音樂同步偏移這種離線無法確認的風險。
+        // 2. 只把純 .NET、執行緒安全的工作移到背景：讀檔、ZIP 解壓、譜面解析、SHA256、快取寫檔。
+        // 3. Unity API（Texture2D / ImageConversion / UnityWebRequest / AudioClip / Application.*）
+        //    一律留主執行緒，所以 persistentDataPath 要先在主執行緒取好再傳進背景。
+        // 4. 用旗標控制，預設走「最省記憶體、最不卡」的路徑，而且要能一鍵回退。
+        //
+        // Phase 2（本次刻意不做）：BGM 改 streamAudio = true 串流解碼。
+        //    前置靜音得改成播放排程偏移併入既有 GameplayTiming（BgmOffset / audioOffsetSeconds），
+        //    而且串流下 PrependLeadingSilence 依賴的 GetData/SetData 不可用，
+        //    seek/pause 也多處依賴 music.clip.length，必須實機驗證後才能動。
+        //
+        // 上機後必做檢查清單：
+        //    (1) Profiler 錄啟動，確認主執行緒不再有 File.ReadAllBytes / ZipArchive /
+        //        ImageConversion.LoadImage / SHA256 長條。
+        //    (2) 再確認 TextChartImporters.cs 與 GgrPackageReader 全程無 Unity API（含 Debug.Log）。
+        //    (3) decodeCover = false 後，選曲封面仍要由 LoadDetailCover 正常顯示，含損壞/缺封面 fallback。
+        //    (4) 預設下啟動後常駐 AudioClip 應為 0，切歌多次不應累積。
+        //    (5) 回歸測試「有 leading silence」的譜面，確認同步與現況一致。
+        //    (6) 回退：PreloadAudioUpFront = true 即近似舊行為，
+        //        但仍享有背景解壓/解析與跳過封面解碼的收益。
+        IEnumerator PreloadLocalCharts()
+        {
+            localChartPreloadStarted = true;
+            // 先讓首幀把曲庫 UI 建完、遠端目錄刷新先跑，別跟預載入搶主執行緒。
+            for (var i = 0; i < PreloadStartDelayFrames; i++) yield return null;
+            // Unity API 只能主執行緒讀：先把 persistentDataPath 取好，整包傳給背景。
+            var persistentDataPath = Application.persistentDataPath;
+            // ThreadPriority 在 System.Threading 與 UnityEngine 都有同名型別，
+            // 這裡刻意寫全限定名稱，避免 CS0104 曖昧引用。
+            // 協程被中止時 try/finally 仍會還原優先序；但若之前某次沒還原成功，
+            // 讀到的前值就會是 Low，所以前值已是 Low 時固定還原成 Unity 預設的 High。
+            var previousPriority = Application.backgroundLoadingPriority == UnityEngine.ThreadPriority.Low
+                ? UnityEngine.ThreadPriority.High
+                : Application.backgroundLoadingPriority;
+            // 把背景解壓/解析的優先序壓到最低，讓位給渲染。
+            Application.backgroundLoadingPriority = UnityEngine.ThreadPriority.Low;
+            try
+            {
+                var entries = LocalChartLibrary.Load();
+                foreach (var entry in entries)
+                {
+                    if (entry == null || preloadedLocalCharts.ContainsKey(entry.Id)) continue;
+                    var worker = Task.Run(() => PrepareEntryBackground(entry, persistentDataPath));
+                    // 主執行緒只輪詢完成旗標，成本極輕。協程若中途被中止，
+                    // 背景工作仍會自己跑完然後被丟棄；產出的都是純 .NET 物件，
+                    // 不會留下在背景執行緒上建立的 Unity 物件。
+                    while (!worker.IsCompleted) yield return null;
+                    PreloadWork prepared = null;
+                    // IsFaulted 時不要去碰 worker.Result（會抛例外），改走安全取值。
+                    if (!worker.IsFaulted)
+                    {
+                        try { prepared = worker.Result; }
+                        catch (Exception) { prepared = null; }
+                    }
+                    if (prepared?.Chart == null) continue;
+                    var cached = new PreloadedLocalChart
+                    {
+                        Entry = entry,
+                        Chart = prepared.Chart,
+                        AudioCachePath = prepared.AudioCachePath,
+                        Music = null,
+                    };
+                    if (PreloadAudioUpFront) // 預設 false，正常不會進這裡。
+                    {
+                        yield return LoadMusicFromCachePath(prepared.AudioCachePath, prepared.Chart.BgmExtension, prepared.Chart.BgmStartDelaySeconds);
+                        if (musicLoadSucceeded && music.clip != null)
+                        {
+                            cached.Music = music.clip;
+                            music.clip = null;
+                            TouchPreloadedClipLru(entry.Id);
+                            EvictPreloadedClipsIfOverLimit();
+                        }
+                    }
+                    preloadedLocalCharts[entry.Id] = cached;
+                    yield return null; // 每首之間再讓一幀。
+                }
+            }
+            finally
+            {
+                Application.backgroundLoadingPriority = previousPriority;
+            }
+        }
+
+        // 背景執行緒专用：讀檔 + 解壓 + 解析 + 準備音訊快取檔，全程只碰純 .NET。
+        // root 必須明確傳入，因為 LocalChartLibrary 內部預設的 Root 走 Application.persistentDataPath，
+        // 那是 Unity API，背景執行緒不能碰。ChartLibrary 這個目錄名稱要與 LocalChartLibrary.Root 一致。
+        static PreloadWork PrepareEntryBackground(LocalChartEntry entry, string persistentDataPath)
+        {
+            if (entry == null || string.IsNullOrEmpty(persistentDataPath)) return null;
+            if (!LocalChartLibrary.TryReadSource(entry, out var bytes, Path.Combine(persistentDataPath, "ChartLibrary"))) return null;
+            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null, decodeCover: false);
+            if (!result.Success || result.Chart?.BgmBytes == null) return null;
+            var audioPath = PrepareAudioCacheFile(result.Chart.BgmBytes, result.Chart.BgmExtension, persistentDataPath);
+            return new PreloadWork { Chart = result.Chart, AudioCachePath = audioPath };
+        }
+
+        // 記一筆「最近用過」，只在真的會常駐 AudioClip 時才有意義。
+        void TouchPreloadedClipLru(string id)
+        {
+            if (string.IsNullOrEmpty(id)) return;
+            preloadedClipLru[id] = ++preloadedClipLruTick;
+        }
+
+        // 只有 PreloadAudioUpFront = true 才會讓 AudioClip 常駐，這時才需要設上限。
+        // 淘汰時一律跳過正在使用的 clip（草稿那版會先music.clip=null再Destroy，
+        // 選曲當下就可能把自己正在播的音效銷掉，所以改成保留使用中曲目）。
+        // Chart 與 AudioCachePath 永遠保留，之後選到同一首還能再解碼。
+        void EvictPreloadedClipsIfOverLimit()
+        {
+            if (!PreloadAudioUpFront) return;
+            while (true)
+            {
+                var resident = 0;
+                string oldestId = null;
+                var oldestTick = int.MaxValue;
+                foreach (var pair in preloadedLocalCharts)
+                {
+                    if (pair.Value?.Music == null) continue;
+                    resident++;
+                    if (ReferenceEquals(music.clip, pair.Value.Music)) continue;
+                    var tick = preloadedClipLru.TryGetValue(pair.Key, out var known) ? known : 0;
+                    if (tick < oldestTick)
+                    {
+                        oldestTick = tick;
+                        oldestId = pair.Key;
+                    }
+                }
+                if (resident <= MaxResidentPreloadedClips || oldestId == null) break;
+                if (preloadedLocalCharts.TryGetValue(oldestId, out var item) && item?.Music != null)
+                {
+                    Destroy(item.Music);
+                    item.Music = null;
+                }
+                preloadedClipLru.Remove(oldestId);
+            }
         }
 
         void RefreshDetailUI(IReadOnlyList<LocalChartGroup> groups)

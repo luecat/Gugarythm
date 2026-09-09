@@ -19,7 +19,14 @@ namespace Gugarhythm
 
         public bool CanImport(string fileName, byte[] header) => fileName.EndsWith(".ggr", StringComparison.OrdinalIgnoreCase);
 
+        // 介面 IChartImporter 只宣告三參數簽名，因此這裡維持原樣並委派給下方多載；
+        // 若直接把參數加在介面實作的預設值簽名上，介面成員等於沒實作，會報 CS0535。
         public ImportResult Import(string fileName, byte[] data, System.Collections.Generic.IReadOnlyDictionary<string, byte[]> companionFiles = null)
+            => Import(fileName, data, companionFiles, true);
+
+        // decodeCover=false 時整個 Import 只剩純 .NET 工作（讀 ZIP、解析 USC、SHA 無關），
+        // 可安全丟進 Task.Run；封面改由選曲時的 LoadDetailCover 在主執行緒解碼。
+        public ImportResult Import(string fileName, byte[] data, System.Collections.Generic.IReadOnlyDictionary<string, byte[]> companionFiles, bool decodeCover)
         {
             try
             {
@@ -63,10 +70,18 @@ namespace Gugarhythm
                     chart.Warnings.Add(MissingCoverWarning);
                 else if (package.CoverBytes != null)
                 {
-                    var texture = DecodeCoverTexture(package.CoverBytes, true);
-                    if (texture != null) chart.CoverBytes = package.CoverBytes;
-                    else chart.Warnings.Add(InvalidCoverWarning);
-                    UnityEngine.Object.Destroy(texture);
+                    if (decodeCover)
+                    {
+                        var texture = DecodeCoverTexture(package.CoverBytes, true);
+                        if (texture != null) chart.CoverBytes = package.CoverBytes;
+                        else chart.Warnings.Add(InvalidCoverWarning);
+                        UnityEngine.Object.Destroy(texture);
+                    }
+                    else
+                    {
+                        // 預載入路徑：主執行緒之外不建立 Texture2D，只保留原始 bytes 供後續解碼。
+                        chart.CoverBytes = package.CoverBytes;
+                    }
                 }
                 return ImportResult.Ok(chart);
             }
