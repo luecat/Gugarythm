@@ -12,10 +12,9 @@ import android.os.VibratorManager;
 /**
  * Short haptic ticks for rhythm hits.
  *
- * Rapid judgment streams used to drop or smear because each vibrate() replaced the
- * previous ~30 ms solid pulse, and both C# and Java discarded near-gap requests.
- * Instead we coalesce hits inside a short window into one on/off waveform so chords
- * and streams stay articulated without cancel()+oneshot thrash.
+ * Android vibrator services typically replace the active effect on each vibrate()
+ * call, and older app-side throttles discarded near-gap requests. We compose
+ * same-window hits into one on/off waveform instead of stacking / dropping.
  */
 public final class GugaHapticFeedback {
     private static final long COMPOSE_WINDOW_MS = 12L;
@@ -35,34 +34,51 @@ public final class GugaHapticFeedback {
 
     private GugaHapticFeedback() {}
 
+    /** Fallback path: enqueue one tick and flush after a short coalesce window. */
     public static void play(Context context, long durationMilliseconds) {
         if (context == null) return;
-        long onMs = Math.max(8L, Math.min(16L, durationMilliseconds > 0 ? durationMilliseconds : DEFAULT_ON_MS));
-        // When callers pass the legacy "pulse length" (~30), treat it as a short tick on-time.
-        if (onMs > 16L) onMs = DEFAULT_ON_MS;
-
+        long onMs = clampOnMs(durationMilliseconds);
         Context app = context.getApplicationContext();
         synchronized (Lock) {
             ensureHandler();
             queuedTicks = Math.min(MAX_TICKS_PER_WAVE, queuedTicks + 1);
             queuedOnMs = onMs;
+            getVibrator(app);
             if (!flushPosted) {
                 flushPosted = true;
                 mainHandler.postDelayed(FlushRunnable, COMPOSE_WINDOW_MS);
             }
-            // Keep a strong Context via vibrator cache while a flush is pending.
-            getVibrator(app);
         }
     }
 
-    /** Plays an already-composed multi-tick burst immediately (optional C# batching). */
+    /**
+     * Immediate multi-tick burst (used by Unity after a judgment drain).
+     * Any pending coalesce window is folded in so we do not double-fire.
+     */
     public static void playBurst(Context context, int tickCount, long onMilliseconds) {
         if (context == null || tickCount <= 0) return;
-        Vibrator vibrator = getVibrator(context.getApplicationContext());
+        long onMs = clampOnMs(onMilliseconds);
+        int ticks;
+        Vibrator vibrator;
+        synchronized (Lock) {
+            ensureHandler();
+            if (flushPosted) {
+                mainHandler.removeCallbacks(FlushRunnable);
+                flushPosted = false;
+                tickCount += queuedTicks;
+                queuedTicks = 0;
+            }
+            ticks = Math.min(MAX_TICKS_PER_WAVE, tickCount);
+            queuedOnMs = onMs;
+            vibrator = getVibrator(context.getApplicationContext());
+        }
         if (vibrator == null || !vibrator.hasVibrator()) return;
-        long onMs = Math.max(8L, Math.min(16L, onMilliseconds > 0 ? onMilliseconds : DEFAULT_ON_MS));
-        int ticks = Math.min(MAX_TICKS_PER_WAVE, tickCount);
-        vibrateWave(vibrator, buildBurst(ticks, onMs, DEFAULT_OFF_MS));
+        vibrateWave(vibrator, buildBurst(vibrator, ticks, onMs, DEFAULT_OFF_MS));
+    }
+
+    private static long clampOnMs(long durationMilliseconds) {
+        long onMs = durationMilliseconds > 0 ? durationMilliseconds : DEFAULT_ON_MS;
+        return Math.max(8L, Math.min(16L, onMs));
     }
 
     private static void flushQueue() {
@@ -77,7 +93,7 @@ public final class GugaHapticFeedback {
             vibrator = cachedVibrator;
         }
         if (ticks <= 0 || vibrator == null || !vibrator.hasVibrator()) return;
-        vibrateWave(vibrator, buildBurst(ticks, onMs, DEFAULT_OFF_MS));
+        vibrateWave(vibrator, buildBurst(vibrator, ticks, onMs, DEFAULT_OFF_MS));
     }
 
     private static void vibrateWave(Vibrator vibrator, VibrationEffect effect) {
@@ -93,14 +109,16 @@ public final class GugaHapticFeedback {
         }
     }
 
-    private static VibrationEffect buildBurst(int tickCount, long onMs, long offMs) {
+    private static VibrationEffect buildBurst(Vibrator vibrator, int tickCount, long onMs, long offMs) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return null;
         int ticks = Math.max(1, Math.min(MAX_TICKS_PER_WAVE, tickCount));
-        // timings: leading 0, then (on, off) * (ticks-1), final on
-        int segmentCount = ticks * 2; // pairs of on/off, last off unused → trim
-        long[] timings = new long[ticks * 2];
-        int[] amplitudes = new int[ticks * 2];
-        int write = 0;
+        // Pattern: on, off, on, off, ... ending on an on segment.
+        int segmentCount = ticks * 2 - 1;
+        long[] timings = new long[segmentCount + 1];
+        int[] amplitudes = new int[segmentCount + 1];
+        timings[0] = 0L;
+        amplitudes[0] = 0;
+        int write = 1;
         for (int i = 0; i < ticks; i++) {
             timings[write] = onMs;
             amplitudes[write] = (i & 1) == 0 ? AMP_PEAK : AMP_BODY;
@@ -111,27 +129,11 @@ public final class GugaHapticFeedback {
                 write++;
             }
         }
-        if (write != timings.length) {
-            long[] trimmedTimings = new long[write];
-            int[] trimmedAmps = new int[write];
-            System.arraycopy(timings, 0, trimmedTimings, 0, write);
-            System.arraycopy(amplitudes, 0, trimmedAmps, 0, write);
-            timings = trimmedTimings;
-            amplitudes = trimmedAmps;
-        }
 
-        // createWaveform(timings, amplitudes) expects timings[0] as delay before first pulse.
-        long[] withLead = new long[timings.length + 1];
-        int[] withLeadAmp = new int[amplitudes.length + 1];
-        withLead[0] = 0L;
-        withLeadAmp[0] = 0;
-        System.arraycopy(timings, 0, withLead, 1, timings.length);
-        System.arraycopy(amplitudes, 0, withLeadAmp, 1, amplitudes.length);
-
-        if (hasAmplitudeControl(cachedVibrator)) {
-            return VibrationEffect.createWaveform(withLead, withLeadAmp, -1);
+        if (hasAmplitudeControl(vibrator)) {
+            return VibrationEffect.createWaveform(timings, amplitudes, -1);
         }
-        return VibrationEffect.createWaveform(withLead, -1);
+        return VibrationEffect.createWaveform(timings, -1);
     }
 
     private static boolean hasAmplitudeControl(Vibrator vibrator) {

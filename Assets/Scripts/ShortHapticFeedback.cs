@@ -23,8 +23,8 @@ namespace Gugarhythm
         public static void Play()
         {
 #if UNITY_ANDROID && !UNITY_EDITOR
-            // Queue every hit; Java coalesces a short window into one on/off waveform.
-            // Same-frame chords are also flushed explicitly after judgment drain.
+            // Count every hit. Same-frame chords are flushed as one composed burst
+            // after judgment drain — do not drop extras here (iOS has no such gate).
             pendingAndroidTicks++;
 #elif UNITY_IOS && !UNITY_EDITOR
             GugaPlayShortHaptic();
@@ -32,8 +32,8 @@ namespace Gugarhythm
         }
 
         /// <summary>
-        /// Sends any queued Android ticks as one composed burst. Call once after a
-        /// judgment drain so same-frame chords become multiple on/off segments.
+        /// Sends any queued Android ticks as one composed on/off burst.
+        /// Call once after draining judgment events for the frame.
         /// </summary>
         public static void FlushPending()
         {
@@ -42,16 +42,7 @@ namespace Gugarhythm
             var ticks = pendingAndroidTicks;
             pendingAndroidTicks = 0;
             if (!EnsureAndroidCache()) return;
-            try
-            {
-                hapticClass.CallStatic("playBurst", currentActivity, ticks, DurationMilliseconds);
-            }
-            catch (System.Exception)
-            {
-                // Fall back to one coalesced play() per tick if playBurst is missing.
-                for (var index = 0; index < ticks; index++)
-                    hapticClass.CallStatic("play", currentActivity, DurationMilliseconds);
-            }
+            hapticClass.CallStatic("playBurst", currentActivity, ticks, DurationMilliseconds);
 #endif
         }
 

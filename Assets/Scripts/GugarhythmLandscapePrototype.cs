@@ -342,8 +342,10 @@ namespace Gugarhythm
         // than 1080 logical units. Derive Y from the live viewport instead of
         // assuming 16:9; this keeps note edges on the gray texture guides.
         const float ReferenceWidth = 1920f;
-        // ≈44pt on iPhone 12 landscape when CanvasScaler matches width to 1920.
+        // Primary-control floor on short phones (~44pt @ iPhone 12 / match-width 1920).
+        // Never apply globally — only with a matching layout reflow.
         const float MinTouch = 100f;
+        const float CompactTouch = 88f;
         const float LibraryDividerHorizontalInset = 16f;
         const float PersistentGrayDividerThickness = 2f;
         const float LaneTextureWidth = 1280f;
@@ -400,7 +402,7 @@ namespace Gugarhythm
         // Button sprites begin their visible antialiased edge at pixel 44.
         // Using the old 40px glow bound made every normal Tap visibly narrow.
         const float NormalButtonVisibleEdgePaddingPixels = 44f;
-        const float DifficultyButtonSpacing = 200f;
+        const float DifficultyButtonSpacing = 180f;
         const int MouseContactId = int.MinValue;
         // Missed notes keep travelling beyond the judgment line until their
         // sprite leaves the viewport. Successful hits return to the pool at once.
@@ -885,8 +887,8 @@ namespace Gugarhythm
         double presentationClockHardResetThreshold = PresentationClockFallbackHardResetThreshold;
 
         static float CanvasHeight => ReferenceWidth * Screen.height / Math.Max(1, Screen.width);
-        static bool UseCompactMobileChrome =>
-            Application.isMobilePlatform || CanvasHeight < 960f;
+        // Only real mobile devices — short Editor Free Aspect windows must keep the desktop composition.
+        static bool UseCompactMobileChrome => Application.isMobilePlatform;
         static float TopY => CanvasHeight * .5f;
         static float HitY => TopY - HitSourceY / LaneTextureHeight * CanvasHeight;
         public static int JudgmentDebugCellCount => VirtualSliderInput.CellCount;
@@ -4634,12 +4636,15 @@ namespace Gugarhythm
             foreach (var timing in new[] { JudgmentTiming.Fast, JudgmentTiming.Late })
                 judgmentTimingSprites[timing] = Resources.Load<Texture2D>(JudgmentTimingSpriteResourcePath(timing));
 
-            pauseButton = MakeFlatButton("暫停", root, Vector2.zero, PauseGame, new Vector2(120, MinTouch), ResultSurface);
-            PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-20, -20));
+            pauseButton = MakeFlatButton("暫停", root, Vector2.zero, PauseGame,
+                new Vector2(UseCompactMobileChrome ? 132f : 112f, UseCompactMobileChrome ? CompactTouch : 48f),
+                ResultSurface);
+            PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1),
+                new Vector2(UseCompactMobileChrome ? -16f : -20f, UseCompactMobileChrome ? -16f : -20f));
             Outline(pauseButton.gameObject, ResultBorder, 1);
             var pauseLabel = pauseButton.GetComponentInChildren<Text>();
             pauseLabel.alignment = TextAnchor.MiddleCenter;
-            pauseLabel.fontSize = 22;
+            pauseLabel.fontSize = UseCompactMobileChrome ? 22 : 20;
             pauseLabel.color = new Color(.92f, .92f, .92f);
             pauseButton.gameObject.SetActive(false);
         }
@@ -4719,7 +4724,9 @@ namespace Gugarhythm
             var compact = page.x < 980f || page.y < 560f;
             var tight = page.x < 820f || page.y < 460f;
             var pagePad = tight ? 16f : compact ? 24f : 36f;
-            var bottomHeight = tight ? 84f : 96f;
+            // Grow the action band with the buttons so short phones do not clip taller CTAs.
+            var actionHeight = UseCompactMobileChrome ? CompactTouch : (tight ? 48f : 52f);
+            var bottomHeight = actionHeight + (tight ? 28f : 36f);
             var topHeight = tight ? 56f : 72f;
             var gutter = tight ? 14f : 22f;
             var metaHeight = tight ? 0f : compact ? 58f : 78f;
@@ -4766,7 +4773,7 @@ namespace Gugarhythm
             if (resultAccuracyLabel != null)
                 resultAccuracyLabel.fontSize = tight ? 36 : compact ? 44 : 56;
 
-            LayoutResultActionButtons(resultActionBand, resultDetailButton, resultLibraryButton, pagePad, tight);
+            LayoutResultActionButtons(resultActionBand, resultDetailButton, resultLibraryButton, pagePad, tight, actionHeight);
             if (resultDetailContentRoot != null)
             {
                 resultDetailContentRoot.offsetMin = new Vector2(pagePad, bottomHeight + 12f);
@@ -4777,30 +4784,28 @@ namespace Gugarhythm
                 resultDetailActionBand.offsetMin = Vector2.zero;
                 resultDetailActionBand.offsetMax = new Vector2(0f, bottomHeight);
             }
-            LayoutResultActionButtons(resultDetailActionBand, resultDetailBackButton, null, pagePad, tight);
+            LayoutResultActionButtons(resultDetailActionBand, resultDetailBackButton, null, pagePad, tight, actionHeight);
         }
 
-        static void LayoutResultActionButtons(RectTransform band, Button primary, Button secondary, float pagePad, bool tight)
+        static void LayoutResultActionButtons(RectTransform band, Button primary, Button secondary, float pagePad, bool tight, float actionHeight)
         {
             if (band == null) return;
             Canvas.ForceUpdateCanvases();
             var width = band.rect.width;
             if (width <= 1f) return;
             var gap = tight ? 12f : 16f;
-            // Never shrink below MinTouch on short result layouts — tight used to make taps worse.
-            var height = MinTouch;
+            var height = Mathf.Min(actionHeight, Mathf.Max(40f, band.rect.height - 16f));
             var y = band.rect.height * .5f;
             if (secondary == null)
             {
                 if (primary == null) return;
-                var singleWidth = Mathf.Clamp(width - pagePad * 2f, MinTouch + 40f, tight ? 220f : 260f);
+                var singleWidth = Mathf.Clamp(width - pagePad * 2f, 140f, tight ? 220f : 260f);
                 PlaceResultActionButton(primary, Vector2.zero, new Vector2(singleWidth, height), y);
                 return;
             }
 
-            var usable = Mathf.Max(MinTouch * 2f + gap, width - pagePad * 2f - gap);
+            var usable = Mathf.Max(200f, width - pagePad * 2f - gap);
             var buttonWidth = Mathf.Min(tight ? 200f : 240f, usable * .5f);
-            buttonWidth = Mathf.Max(buttonWidth, MinTouch);
             var halfSpan = buttonWidth * .5f + gap * .5f;
             PlaceResultActionButton(primary, new Vector2(-halfSpan, 0f), new Vector2(buttonWidth, height), y);
             PlaceResultActionButton(secondary, new Vector2(halfSpan, 0f), new Vector2(buttonWidth, height), y);
@@ -4863,8 +4868,12 @@ namespace Gugarhythm
         {
             if (shellSize.x <= 0f || shellSize.y <= 0f)
                 shellSize = new Vector2(SettingsShellMaxWidth, SettingsShellMaxHeight);
-            var rowHeight = Mathf.Clamp(shellSize.y * (compactMobile ? .062f : .075f), 52f, 68f);
-            var rowTopInset = Mathf.Clamp(shellSize.y * (compactMobile ? .045f : .06f), 34f, 64f);
+            // Compact phones: taller header hit target; desktop keeps the original band.
+            var rowHeight = Mathf.Clamp(shellSize.y * (compactMobile ? .075f : .075f),
+                compactMobile ? CompactTouch : 52f,
+                compactMobile ? MinTouch : 68f);
+            var rowTopInset = Mathf.Clamp(shellSize.y * (compactMobile ? .04f : .06f),
+                compactMobile ? 24f : 34f, compactMobile ? 48f : 64f);
             var rowCenterY = -(rowTopInset + rowHeight * .5f);
             if (settingsTitle != null)
             {
@@ -4902,8 +4911,11 @@ namespace Gugarhythm
 
             var compactMobile = Application.isMobilePlatform &&
                 shellSize.x / Mathf.Max(1f, shellSize.y) > 1.5f;
-            var rowHeight = Mathf.Clamp(shellSize.y * (compactMobile ? .062f : .075f), 52f, 68f);
-            var rowTopInset = Mathf.Clamp(shellSize.y * (compactMobile ? .045f : .06f), 34f, 64f);
+            var rowHeight = Mathf.Clamp(shellSize.y * (compactMobile ? .075f : .075f),
+                compactMobile ? CompactTouch : 52f,
+                compactMobile ? MinTouch : 68f);
+            var rowTopInset = Mathf.Clamp(shellSize.y * (compactMobile ? .04f : .06f),
+                compactMobile ? 24f : 34f, compactMobile ? 48f : 64f);
             var bodyTopInset = rowTopInset + rowHeight + SettingsBodyBelowHeaderGap;
             var padX = Mathf.Clamp(shellSize.x * .032f, 36f, 64f);
             var padBottom = Mathf.Clamp(shellSize.y * .03f, 24f, 48f);
@@ -5131,38 +5143,64 @@ namespace Gugarhythm
             var detail = Panel("Detail Pane", menuPanel, new Color(.10f, .10f, .10f, 1f), Vector2.zero, Vector2.zero, true);
             detail.anchorMin = new Vector2(.244f, 0); detail.anchorMax = new Vector2(1, 1); detail.offsetMin = new Vector2(PersistentGrayDividerThickness, 0); detail.offsetMax = Vector2.zero;
 
-            var brand = Label("GUGARHYTHM", library, 19); brand.color = new Color(.68f, .68f, .68f); brand.alignment = TextAnchor.MiddleLeft; brand.rectTransform.sizeDelta = new Vector2(260, 36); PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -34));
-            var heading = Label("譜面保管庫", library, 30); heading.alignment = TextAnchor.MiddleLeft; heading.rectTransform.sizeDelta = new Vector2(270, 50); PinToAnchor(heading.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, -74));
+            // Left-pane: on phones enlarge chips and reflow the header stack so they do not overlap.
+            // Detail pane always keeps the desktop composition (cover left / copy right / CTAs under copy).
+            var compact = UseCompactMobileChrome;
+            var chipSize = compact ? new Vector2(160f, 72f) : new Vector2(146f, 42f);
+            var chipGapX = 10f;
+            var chipCol0 = 34f;
+            var chipCol1 = chipCol0 + chipSize.x + chipGapX;
+            var brandY = compact ? -28f : -34f;
+            var headingY = compact ? -64f : -74f;
+            var sourceY = compact ? -120f : -132f;
+            var scopeY = compact ? sourceY - (chipSize.y + 10f) : -184f;
+            var searchTop = compact ? scopeY - (chipSize.y * .5f + 14f) : -248f;
+            var searchBottom = searchTop - 56f;
+            var sortY = compact ? searchBottom - 34f : -346f;
+            var listTop = compact ? sortY - 40f : -396f;
+            var importBarHeight = compact ? 72f : 64f;
+            var importBottomPad = compact ? 18f : 22f;
+            var importTop = importBottomPad + importBarHeight;
+
+            var brand = Label("GUGARHYTHM", library, compact ? 17 : 19);
+            brand.color = new Color(.68f, .68f, .68f);
+            brand.alignment = TextAnchor.MiddleLeft;
+            brand.rectTransform.sizeDelta = new Vector2(260, compact ? 30 : 36);
+            PinToAnchor(brand.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, brandY));
+            var heading = Label("譜面保管庫", library, compact ? 26 : 30);
+            heading.alignment = TextAnchor.MiddleLeft;
+            heading.rectTransform.sizeDelta = new Vector2(270, compact ? 44 : 50);
+            PinToAnchor(heading.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(34, headingY));
             localLibrarySourceButton = MakeFlatButton("本機", library, Vector2.zero,
-                () => SelectLibrarySource(ChartLibrarySource.Local), new Vector2(146, 42), new Color(.10f, .34f, .50f));
+                () => SelectLibrarySource(ChartLibrarySource.Local), chipSize, new Color(.10f, .34f, .50f));
             PinToAnchor(localLibrarySourceButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(34, -132));
+                new Vector2(chipCol0, sourceY));
             onlineLibrarySourceButton = MakeFlatButton("線上", library, Vector2.zero,
-                () => SelectLibrarySource(ChartLibrarySource.Online), new Vector2(146, 42), new Color(.20f, .20f, .20f));
+                () => SelectLibrarySource(ChartLibrarySource.Online), chipSize, new Color(.20f, .20f, .20f));
             PinToAnchor(onlineLibrarySourceButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(190, -132));
+                new Vector2(chipCol1, sourceY));
             remotePublicScopeButton = MakeFlatButton("公開", library, Vector2.zero,
-                () => SelectRemoteCatalogScope(RemoteChartCatalogScope.Public), new Vector2(146, 42), new Color(.10f, .34f, .50f));
+                () => SelectRemoteCatalogScope(RemoteChartCatalogScope.Public), chipSize, new Color(.10f, .34f, .50f));
             PinToAnchor(remotePublicScopeButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(34, -184));
+                new Vector2(chipCol0, scopeY));
             remotePrivateScopeButton = MakeFlatButton("私人", library, Vector2.zero,
-                () => SelectRemoteCatalogScope(RemoteChartCatalogScope.Private), new Vector2(146, 42), new Color(.20f, .20f, .20f));
+                () => SelectRemoteCatalogScope(RemoteChartCatalogScope.Private), chipSize, new Color(.20f, .20f, .20f));
             PinToAnchor(remotePrivateScopeButton.GetComponent<RectTransform>(), new Vector2(0, 1), new Vector2(0, 1),
-                new Vector2(190, -184));
+                new Vector2(chipCol1, scopeY));
             var countBadge = Panel("Chart Count Badge", library, new Color(.24f, .24f, .24f), new Vector2(42, 42), Vector2.zero);
             PinToAnchor(countBadge, new Vector2(1, 1), new Vector2(1, 1), new Vector2(-38, -42));
             var countBadgeText = Label("", countBadge, 18); Fill(countBadgeText.rectTransform); libraryCountLabel = countBadgeText;
             librarySearchInput = MakeInputField("搜尋", library, Vector2.zero, new Vector2(0, 56));
-            var searchRect = librarySearchInput.GetComponent<RectTransform>(); searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1); searchRect.offsetMin = new Vector2(34, -304); searchRect.offsetMax = new Vector2(-22, -248);
+            var searchRect = librarySearchInput.GetComponent<RectTransform>();
+            searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1);
+            searchRect.offsetMin = new Vector2(34, searchBottom); searchRect.offsetMax = new Vector2(-22, searchTop);
             librarySearchInput.onValueChanged.AddListener(_ => RefreshLibraryUI());
             const int libraryHeaderFontSize = 22;
-            const float librarySortCenterY = -346;
-            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46); PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, librarySortCenterY));
-            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, librarySortCenterY));
+            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46); PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, sortY));
+            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, sortY));
             MakeInvisibleButton(librarySortModeLabel.rectTransform, CycleLibrarySort);
             libraryDirectionIcon = Panel("Sort Direction", library, Color.clear, new Vector2(58, 52), Vector2.zero);
-            // Rotate around the icon centre so ascending and descending arrows share the same visual X position.
-            PinToAnchor(libraryDirectionIcon, new Vector2(0, 1), new Vector2(.5f, .5f), new Vector2(248, librarySortCenterY));
+            PinToAnchor(libraryDirectionIcon, new Vector2(0, 1), new Vector2(.5f, .5f), new Vector2(248, sortY));
             AddSortArrowIcon(libraryDirectionIcon);
             MakeInvisibleButton(libraryDirectionIcon, () =>
             {
@@ -5176,26 +5214,39 @@ namespace Gugarhythm
                 RefreshLibraryUI();
             });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
-            var listRoot = libraryListContent.parent.GetComponent<RectTransform>(); listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1); listRoot.offsetMin = new Vector2(22, 100); listRoot.offsetMax = new Vector2(-2, -396);
+            var listRoot = libraryListContent.parent.GetComponent<RectTransform>();
+            listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1);
+            listRoot.offsetMin = new Vector2(22, importTop + 14f); listRoot.offsetMax = new Vector2(-2, listTop);
 
-            importLibraryButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, 64));
-            var importRect = importLibraryButton.GetComponent<RectTransform>(); importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0); importRect.offsetMin = new Vector2(22, 22); importRect.offsetMax = new Vector2(-22, 86);
+            importLibraryButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, importBarHeight));
+            var importRect = importLibraryButton.GetComponent<RectTransform>();
+            importRect.anchorMin = new Vector2(0, 0); importRect.anchorMax = new Vector2(1, 0); importRect.pivot = new Vector2(.5f, 0);
+            importRect.offsetMin = new Vector2(22, importBottomPad); importRect.offsetMax = new Vector2(-22, importTop);
             refreshRemoteLibraryButton = MakeOutlinedButton("↻ 重新整理線上譜面", library, Vector2.zero,
-                () => StartCoroutine(RefreshRemoteCatalog(true)), new Vector2(0, 64));
-            var refreshRemoteRect = refreshRemoteLibraryButton.GetComponent<RectTransform>(); refreshRemoteRect.anchorMin = new Vector2(0, 0); refreshRemoteRect.anchorMax = new Vector2(1, 0); refreshRemoteRect.pivot = new Vector2(.5f, 0); refreshRemoteRect.offsetMin = new Vector2(22, 22); refreshRemoteRect.offsetMax = new Vector2(-22, 86);
+                () => StartCoroutine(RefreshRemoteCatalog(true)), new Vector2(0, importBarHeight));
+            var refreshRemoteRect = refreshRemoteLibraryButton.GetComponent<RectTransform>();
+            refreshRemoteRect.anchorMin = new Vector2(0, 0); refreshRemoteRect.anchorMax = new Vector2(1, 0); refreshRemoteRect.pivot = new Vector2(.5f, 0);
+            refreshRemoteRect.offsetMin = new Vector2(22, importBottomPad); refreshRemoteRect.offsetMax = new Vector2(-22, importTop);
             refreshRemoteLibraryButton.gameObject.SetActive(false);
 
-            var breadcrumb = Label("LIBRARY   /   CHART DETAIL", detail, 18); breadcrumb.color = new Color(.64f, .64f, .64f); breadcrumb.alignment = TextAnchor.MiddleLeft; breadcrumb.rectTransform.sizeDelta = new Vector2(480, 38); PinToAnchor(breadcrumb.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(80, -52));
-            var gear = MakeOutlinedButton("", detail, Vector2.zero, OpenSettings, new Vector2(66, 66));
+            var breadcrumb = Label("LIBRARY   /   CHART DETAIL", detail, 18);
+            breadcrumb.color = new Color(.64f, .64f, .64f);
+            breadcrumb.alignment = TextAnchor.MiddleLeft;
+            breadcrumb.rectTransform.sizeDelta = new Vector2(480, 38);
+            PinToAnchor(breadcrumb.rectTransform, new Vector2(0, 1), new Vector2(0, 1), new Vector2(80, -52));
+            var toolSize = compact ? 72f : 66f;
+            var gear = MakeOutlinedButton("", detail, Vector2.zero, OpenSettings, new Vector2(toolSize, toolSize));
             PinToAnchor(gear.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-48, -48));
             AddGearIcon(gear.GetComponent<RectTransform>());
-            var edit = MakeOutlinedButton("", detail, Vector2.zero, OpenChartEditor, new Vector2(66, 66));
-            PinToAnchor(edit.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-126, -48));
+            var edit = MakeOutlinedButton("", detail, Vector2.zero, OpenChartEditor, new Vector2(toolSize, toolSize));
+            PinToAnchor(edit.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1),
+                new Vector2(-(48f + toolSize + 12f), -48f));
             AddPencilIcon(edit.GetComponent<RectTransform>());
-            var cover = Panel("Cover Placeholder", detail, new Color(.19f, .30f, .42f), new Vector2(495, 495), Vector2.zero);
-            PinToAnchor(cover, new Vector2(.24f, .5f), new Vector2(.5f, .5f), new Vector2(0, -45));
-            // Keep the no-cover fallback visually consistent with the Web archive
-            // rather than showing a blank utility tile.
+
+            // Same composition as before: cover mid-left, copy mid-right, CTAs under copy.
+            var coverSide = compact ? 380f : 495f;
+            var cover = Panel("Cover Placeholder", detail, new Color(.19f, .30f, .42f), new Vector2(coverSide, coverSide), Vector2.zero);
+            PinToAnchor(cover, new Vector2(.24f, .5f), new Vector2(.5f, .5f), new Vector2(0, compact ? -20f : -45f));
             cover.gameObject.AddComponent<RectMask2D>();
             detailCoverFallback = new GameObject("Cover Fallback", typeof(RectTransform)).GetComponent<RectTransform>();
             detailCoverFallback.SetParent(cover, false);
@@ -5211,42 +5262,66 @@ namespace Gugarhythm
             detailCoverImage = RawPanel("Cover Artwork", cover, null, Color.white, Vector2.zero, Vector2.zero, true).GetComponent<RawImage>();
             var coverAspect = detailCoverImage.gameObject.AddComponent<AspectRatioFitter>();
             coverAspect.aspectMode = CoverPresentationAspectMode();
-            var detailKicker = Label("CHART DETAIL", detail, 18); detailKicker.color = new Color(.64f, .64f, .64f); detailKicker.alignment = TextAnchor.MiddleLeft; detailKicker.rectTransform.sizeDelta = new Vector2(320, 34); PinToAnchor(detailKicker.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 305));
-            detailTitleLabel = Label("選擇一份譜面", detail, 58); detailTitleLabel.alignment = TextAnchor.MiddleLeft; detailTitleLabel.rectTransform.sizeDelta = new Vector2(620, 92); PinToAnchor(detailTitleLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 183.5f));
+
+            var detailKicker = Label("CHART DETAIL", detail, 18); detailKicker.color = new Color(.64f, .64f, .64f); detailKicker.alignment = TextAnchor.MiddleLeft; detailKicker.rectTransform.sizeDelta = new Vector2(320, 34); PinToAnchor(detailKicker.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, compact ? 260f : 305f));
+            detailTitleLabel = Label("選擇一份譜面", detail, compact ? 46 : 58); detailTitleLabel.alignment = TextAnchor.MiddleLeft; detailTitleLabel.rectTransform.sizeDelta = new Vector2(620, compact ? 72 : 92); PinToAnchor(detailTitleLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, compact ? 155f : 183.5f));
             detailTitleMaxFontSize = detailTitleLabel.fontSize;
             detailTitleLabel.horizontalOverflow = HorizontalWrapMode.Overflow;
             detailTitleLabel.verticalOverflow = VerticalWrapMode.Truncate;
-            detailArtistLabel = Label("", detail, 25); detailArtistLabel.color = new Color(.68f, .68f, .68f); detailArtistLabel.alignment = TextAnchor.MiddleLeft; detailArtistLabel.rectTransform.sizeDelta = new Vector2(620, 48); PinToAnchor(detailArtistLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 113.5f));
-            var infoDivider = Panel("Detail Divider", detail, new Color(.28f, .28f, .28f), new Vector2(0, PersistentGrayDividerThickness), Vector2.zero); infoDivider.anchorMin = new Vector2(.51f, .5f); infoDivider.anchorMax = new Vector2(.94f, .5f); infoDivider.offsetMin = new Vector2(0, 72); infoDivider.offsetMax = new Vector2(0, 72 + PersistentGrayDividerThickness); infoDivider.GetComponent<Image>().raycastTarget = false;
-            detailDifficultyLabel = Label("選擇難度", detail, 17); detailDifficultyLabel.color = new Color(.68f, .68f, .68f); detailDifficultyLabel.alignment = TextAnchor.MiddleLeft; detailDifficultyLabel.rectTransform.sizeDelta = new Vector2(440, 38); PinToAnchor(detailDifficultyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, 36));
+            detailArtistLabel = Label("", detail, compact ? 22 : 25); detailArtistLabel.color = new Color(.68f, .68f, .68f); detailArtistLabel.alignment = TextAnchor.MiddleLeft; detailArtistLabel.rectTransform.sizeDelta = new Vector2(620, 48); PinToAnchor(detailArtistLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, compact ? 95f : 113.5f));
+            var infoDivider = Panel("Detail Divider", detail, new Color(.28f, .28f, .28f), new Vector2(0, PersistentGrayDividerThickness), Vector2.zero); infoDivider.anchorMin = new Vector2(.51f, .5f); infoDivider.anchorMax = new Vector2(.94f, .5f); infoDivider.offsetMin = new Vector2(0, compact ? 52f : 72f); infoDivider.offsetMax = new Vector2(0, (compact ? 52f : 72f) + PersistentGrayDividerThickness); infoDivider.GetComponent<Image>().raycastTarget = false;
+            detailDifficultyLabel = Label("選擇難度", detail, 17); detailDifficultyLabel.color = new Color(.68f, .68f, .68f); detailDifficultyLabel.alignment = TextAnchor.MiddleLeft; detailDifficultyLabel.rectTransform.sizeDelta = new Vector2(440, 38); PinToAnchor(detailDifficultyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, compact ? 20f : 36f));
             difficultyButtonContent = new GameObject("Difficulty Buttons", typeof(RectTransform)).GetComponent<RectTransform>();
             difficultyButtonContent.SetParent(detail, false);
-            difficultyButtonContent.anchorMin = difficultyButtonContent.anchorMax = new Vector2(0, .5f);
-            difficultyButtonContent.pivot = new Vector2(0, .5f);
-            difficultyButtonContent.sizeDelta = new Vector2(450, 76);
-            difficultyButtonContent.anchoredPosition = new Vector2(0, -26);
             difficultyButtonContent.anchorMin = difficultyButtonContent.anchorMax = new Vector2(.51f, .5f);
-            detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(460, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, -134));
+            difficultyButtonContent.pivot = new Vector2(0, .5f);
+            difficultyButtonContent.sizeDelta = new Vector2(450, compact ? 72f : 76f);
+            difficultyButtonContent.anchoredPosition = new Vector2(0, compact ? -36f : -26f);
+            detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(460, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(.51f, .5f), new Vector2(0, .5f), new Vector2(0, compact ? -120f : -134f));
             loadStatus = Label(string.Empty, detail, 15);
             loadStatus.color = new Color(.68f, .68f, .68f);
             loadStatus.alignment = TextAnchor.MiddleLeft;
-            var statusRect = loadStatus.rectTransform; statusRect.anchorMin = new Vector2(.51f, .5f); statusRect.anchorMax = new Vector2(.94f, .5f); statusRect.pivot = new Vector2(.5f, .5f); statusRect.offsetMin = new Vector2(0, -211); statusRect.offsetMax = new Vector2(0, -187);
-            startButton = MakeFlatButton("▶  開始遊戲", detail, Vector2.zero, StartGame, new Vector2(0, 82), new Color(.06f, .58f, .96f));
-            var startRect = startButton.GetComponent<RectTransform>(); startRect.anchorMin = new Vector2(.51f, .5f); startRect.anchorMax = new Vector2(.94f, .5f); startRect.pivot = new Vector2(.5f, .5f); startRect.offsetMin = new Vector2(0, -300.5f); startRect.offsetMax = new Vector2(0, -218.5f);
+            var statusRect = loadStatus.rectTransform; statusRect.anchorMin = new Vector2(.51f, .5f); statusRect.anchorMax = new Vector2(.94f, .5f); statusRect.pivot = new Vector2(.5f, .5f);
+            statusRect.offsetMin = new Vector2(0, compact ? -190f : -211f); statusRect.offsetMax = new Vector2(0, compact ? -166f : -187f);
+
+            var ctaHeight = compact ? 72f : 82f;
+            var previewHeight = compact ? 64f : 52f;
+            startButton = MakeFlatButton("▶  開始遊戲", detail, Vector2.zero, StartGame, new Vector2(0, ctaHeight), new Color(.06f, .58f, .96f));
+            var startRect = startButton.GetComponent<RectTransform>();
+            startRect.anchorMin = new Vector2(.51f, .5f); startRect.anchorMax = new Vector2(.94f, .5f); startRect.pivot = new Vector2(.5f, .5f);
+            if (compact)
+            {
+                startRect.offsetMin = new Vector2(0, -278f); startRect.offsetMax = new Vector2(0, -206f);
+            }
+            else
+            {
+                startRect.offsetMin = new Vector2(0, -300.5f); startRect.offsetMax = new Vector2(0, -218.5f);
+            }
             startButton.interactable = false;
-            chartPreviewButton = MakeOutlinedButton("預覽", detail, Vector2.zero, OpenChartPreview, new Vector2(0, 52));
+            chartPreviewButton = MakeOutlinedButton("預覽", detail, Vector2.zero, OpenChartPreview, new Vector2(0, previewHeight));
             var previewRect = chartPreviewButton.GetComponent<RectTransform>();
             var previewAnchorWidth = ChartPreviewLayout.PrimaryWidth(.94f - .51f);
             var previewAnchorCenter = (.51f + .94f) * .5f;
             previewRect.anchorMin = new Vector2(previewAnchorCenter - previewAnchorWidth * .5f, .5f);
             previewRect.anchorMax = new Vector2(previewAnchorCenter + previewAnchorWidth * .5f, .5f);
             previewRect.pivot = new Vector2(.5f, .5f);
-            previewRect.offsetMin = new Vector2(0, -370.5f);
-            previewRect.offsetMax = new Vector2(0, -318.5f);
+            if (compact)
+            {
+                previewRect.offsetMin = new Vector2(0, -354f); previewRect.offsetMax = new Vector2(0, -290f);
+            }
+            else
+            {
+                previewRect.offsetMin = new Vector2(0, -370.5f); previewRect.offsetMax = new Vector2(0, -318.5f);
+            }
             chartPreviewButton.interactable = false;
             downloadRemoteChartButton = MakeFlatButton("下載到本機", detail, Vector2.zero,
-                () => StartCoroutine(DownloadSelectedRemoteChart()), new Vector2(0, 82), new Color(.06f, .58f, .96f));
-            var downloadRemoteRect = downloadRemoteChartButton.GetComponent<RectTransform>(); downloadRemoteRect.anchorMin = new Vector2(.51f, .5f); downloadRemoteRect.anchorMax = new Vector2(.94f, .5f); downloadRemoteRect.pivot = new Vector2(.5f, .5f); downloadRemoteRect.offsetMin = new Vector2(0, -300.5f); downloadRemoteRect.offsetMax = new Vector2(0, -218.5f);
+                () => StartCoroutine(DownloadSelectedRemoteChart()), new Vector2(0, ctaHeight), new Color(.06f, .58f, .96f));
+            var downloadRemoteRect = downloadRemoteChartButton.GetComponent<RectTransform>();
+            downloadRemoteRect.anchorMin = startRect.anchorMin;
+            downloadRemoteRect.anchorMax = startRect.anchorMax;
+            downloadRemoteRect.pivot = startRect.pivot;
+            downloadRemoteRect.offsetMin = startRect.offsetMin;
+            downloadRemoteRect.offsetMax = startRect.offsetMax;
             downloadRemoteChartButton.gameObject.SetActive(false);
             RefreshLibrarySourceControls();
             RefreshLibraryUI();
@@ -7330,14 +7405,16 @@ namespace Gugarhythm
             detailDifficultyLabel.text = "選擇難度";
             var current = group.Difficulties.FirstOrDefault(entry => entry.Id == selectedLibraryEntry.Id) ?? group.Difficulties[0];
             RefreshDetailCover(current);
-            difficultyButtonContent.sizeDelta = new Vector2(Mathf.Max(450f, group.Difficulties.Count * DifficultyButtonSpacing), 76f);
+            var difficultyHeight = UseCompactMobileChrome ? 64f : 52f;
+            var difficultyRowHeight = UseCompactMobileChrome ? 72f : 76f;
+            difficultyButtonContent.sizeDelta = new Vector2(Mathf.Max(450f, group.Difficulties.Count * DifficultyButtonSpacing), difficultyRowHeight);
             for (var index = 0; index < group.Difficulties.Count; index++)
             {
                 var entry = group.Difficulties[index];
                 var text = DifficultyNameOnly(entry);
                 var active = entry.Id == current.Id;
                 var button = MakeFlatButton(text, difficultyButtonContent, new Vector2(index * DifficultyButtonSpacing, 0),
-                    () => SelectLibraryEntry(entry, true), new Vector2(DifficultyButtonWidthForText(text), 52), active ? new Color(.10f, .20f, .29f) : new Color(.15f, .15f, .15f));
+                    () => SelectLibraryEntry(entry, true), new Vector2(DifficultyButtonWidthForText(text), difficultyHeight), active ? new Color(.10f, .20f, .29f) : new Color(.15f, .15f, .15f));
                 var buttonRect = button.GetComponent<RectTransform>();
                 buttonRect.anchorMin = buttonRect.anchorMax = new Vector2(0, .5f);
                 buttonRect.pivot = new Vector2(0, .5f);
@@ -8386,17 +8463,8 @@ namespace Gugarhythm
             var label = Label(text, panel, 27); Fill(label.rectTransform); var button = panel.gameObject.AddComponent<Button>(); button.onClick.AddListener(() => action()); return button;
         }
 
-        static Vector2 EnforceMinTouch(Vector2 size)
-        {
-            // size.x == 0 means the RectTransform stretches via anchors.
-            if (size.x > 0f) size.x = Mathf.Max(size.x, MinTouch);
-            if (size.y > 0f) size.y = Mathf.Max(size.y, MinTouch);
-            return size;
-        }
-
         static Button MakeFlatButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size, Color color)
         {
-            size = EnforceMinTouch(size);
             var panel = Panel(text, parent, color, size, position);
             var image = panel.GetComponent<Image>(); image.raycastTarget = true;
             var label = Label(text, panel, 24); Fill(label.rectTransform);
