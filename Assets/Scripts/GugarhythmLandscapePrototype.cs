@@ -649,10 +649,23 @@ namespace Gugarhythm
         RectTransform pauseOverlay;
         RectTransform pauseMenuContent;
         RectTransform resultPanel;
+        RectTransform resultDetailPanel;
+        RectTransform resultContentRoot;
+        RectTransform resultCoverFrame;
+        RectTransform resultCoverFallback;
+        RectTransform resultRightColumn;
+        RectTransform resultActionBand;
+        RectTransform resultDetailContentRoot;
+        RectTransform resultDetailActionBand;
+        RectTransform resultHistogramRoot;
+        Button resultDetailButton;
+        Button resultLibraryButton;
+        Button resultDetailBackButton;
         RectTransform calibrationBackdrop;
         ChartDocumentPreviewGraphic chartPreviewGraphic;
         Text chartPreviewTitle;
         Text accuracyLabel;
+        RectTransform accuracyHudPanel;
         Text comboLabel;
         RawImage judgmentImage;
         RawImage judgmentTimingImage;
@@ -671,6 +684,27 @@ namespace Gugarhythm
         RawImage detailCoverImage;
         Texture2D detailCoverTexture;
         string detailCoverEntryId;
+        RawImage resultCoverImage;
+        Texture2D resultCoverTexture;
+        Text resultSongTitleLabel;
+        Text resultSongMetaLabel;
+        Text resultAccuracyLabel;
+        Text resultComboLabel;
+        Text resultHintLabel;
+        Text resultPerfectCountLabel;
+        Text resultGreatCountLabel;
+        Text resultGoodCountLabel;
+        Text resultMissCountLabel;
+        Text resultFastLateLabel;
+        Text resultCategoryStatsLabel;
+        readonly Image[] resultHistogramBars = new Image[ResultTimingHistogram.BinCount];
+        readonly ResultRunStatistics resultRunStatistics = new();
+        static readonly Color ResultBg = new(.12f, .12f, .12f, 1f);
+        static readonly Color ResultSurface = new(.17f, .17f, .17f, .98f);
+        static readonly Color ResultSurfaceAlt = new(.20f, .20f, .20f, .98f);
+        static readonly Color ResultBorder = new(.32f, .32f, .32f, .9f);
+        static readonly Color ResultMuted = new(.62f, .62f, .62f, 1f);
+        static readonly Color ResultAccent = new(.05f, .60f, 1f, 1f);
         InputField librarySearchInput;
         InputField chartEditorTitleInput;
         InputField chartEditorAuthorInput;
@@ -684,7 +718,6 @@ namespace Gugarhythm
         ScrollRect settingsTagScroll;
         InputField settingsTagInput;
         Text importDecisionText;
-        Text resultText;
         Text speedLabel;
         Text upperHiddenBarLabel;
         Text settingsMusicVolumeLabel;
@@ -1106,7 +1139,8 @@ namespace Gugarhythm
 
         void SetMenuHudVisible(bool visible)
         {
-            if (accuracyLabel != null) accuracyLabel.transform.parent.gameObject.SetActive(visible);
+            if (accuracyHudPanel != null) accuracyHudPanel.gameObject.SetActive(visible);
+            else if (accuracyLabel != null) accuracyLabel.transform.parent.gameObject.SetActive(visible);
             if (comboLabel != null) comboLabel.gameObject.SetActive(false);
             if (judgmentImage != null) judgmentImage.gameObject.SetActive(visible);
             if (judgmentTimingImage != null) judgmentTimingImage.gameObject.SetActive(visible);
@@ -1116,7 +1150,8 @@ namespace Gugarhythm
         void SetGameplayStageVisible(bool visible)
         {
             gameplayStageVisible = visible;
-            if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(visible);
+            // Background art disabled experimentally — keep the lane/stage only.
+            if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(false);
             if (stage != null) stage.gameObject.SetActive(visible);
             if (performanceHudPanel != null) performanceHudPanel.gameObject.SetActive(visible && performanceDiagnosticsEnabled);
         }
@@ -1210,6 +1245,7 @@ namespace Gugarhythm
             gpuRibbonRenderer?.Dispose();
             gpuRibbonRenderer = null;
             if (detailCoverTexture != null) Destroy(detailCoverTexture);
+            if (resultCoverTexture != null) Destroy(resultCoverTexture);
             if (remoteCoverTexture != null) Destroy(remoteCoverTexture);
             if (gcAllocationRecorder.Valid) gcAllocationRecorder.Dispose();
         }
@@ -2066,7 +2102,8 @@ namespace Gugarhythm
             latestHotPathFrameSnapshot = default;
             nextPerformanceHudRefresh = 0;
             menuPanel.gameObject.SetActive(false);
-            resultPanel.gameObject.SetActive(false);
+            HideResultOverlays();
+            SetGameplayHudVisible(true);
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(true);
             running = true;
@@ -2120,6 +2157,7 @@ namespace Gugarhythm
             pauseMenuContent.gameObject.SetActive(true);
             resumeCountdownLabel.gameObject.SetActive(false);
             pauseOverlay.gameObject.SetActive(true);
+            pauseOverlay.SetAsLastSibling();
             SyncPauseSeekSlider();
         }
 
@@ -2194,6 +2232,7 @@ namespace Gugarhythm
             pauseMenuContent.gameObject.SetActive(true);
             resumeCountdownLabel.gameObject.SetActive(false);
             pauseOverlay.gameObject.SetActive(true);
+            pauseOverlay.SetAsLastSibling();
             SyncPauseSeekSlider();
         }
 
@@ -2280,7 +2319,10 @@ namespace Gugarhythm
             ReleaseAllViews();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
-            resultPanel.gameObject.SetActive(false);
+            HideResultOverlays();
+            SetGameplayStageVisible(false);
+            SetGameplayHudVisible(false);
+            ClearResultCover();
             RefreshHud();
             ClearJudgment();
             EndInputDiagnosticsRun("returned-to-library", true);
@@ -2302,6 +2344,7 @@ namespace Gugarhythm
             gpuRibbonRenderer?.ClearHoldStates();
             scoreState.Reset();
             judgmentTimingStatistics.Reset();
+            resultRunStatistics.Reset();
             judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
             ConfigureInputDiagnosticsJudgmentEngine();
             judgmentEvents.Clear();
@@ -3759,11 +3802,167 @@ namespace Gugarhythm
             EndInputDiagnosticsRun("chart-completed", true);
             if (currentLibraryEntry != null && !wasInputDiagnostics && !autoPlayUsedThisRun && !seekUsedThisRun)
                 LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
-            resultPanel.gameObject.SetActive(true);
-            var autoPlayHint = !wasInputDiagnostics && autoPlayUsedThisRun ? "\n\n(AUTO PLAY，成績不計入最佳紀錄)"
-                : !wasInputDiagnostics && seekUsedThisRun ? "\n\n(已調整播放進度，成績不計入最佳紀錄)"
-                : "";
-            resultText.text = $"ACCURACY  {scoreState.AccuracyPercent(chart.PlayableCount):F4}%\n\nMAX COMBO  {scoreState.MaxCombo:N0}\n\nPERFECT  {scoreState.Perfect:N0}\nGREAT  {scoreState.Great:N0}\nGOOD  {scoreState.Good:N0}\nMISS  {scoreState.Miss:N0}\n\nFAST      LATE\n{judgmentTimingStatistics.Fast:N0}          {judgmentTimingStatistics.Late:N0}{autoPlayHint}";
+
+            resultRunStatistics.Build(judgmentEvents);
+            RefreshResultCover(currentLibraryEntry);
+            PopulateResultMainPanel(wasInputDiagnostics);
+            PopulateResultDetailPanel();
+            SetGameplayStageVisible(false);
+            ShowResultMain();
+        }
+
+        void PopulateResultMainPanel(bool wasInputDiagnostics)
+        {
+            var totalNotes = chart == null ? 0 : chart.PlayableCount;
+            var title = currentLibraryEntry != null && !string.IsNullOrWhiteSpace(currentLibraryEntry.Title)
+                ? currentLibraryEntry.Title
+                : chart != null && !string.IsNullOrWhiteSpace(chart.Title) ? chart.Title : "Unknown Chart";
+            var artist = currentLibraryEntry != null && !string.IsNullOrWhiteSpace(currentLibraryEntry.Artist)
+                ? currentLibraryEntry.Artist
+                : chart != null && !string.IsNullOrWhiteSpace(chart.Artist) ? chart.Artist : "";
+            var difficulty = currentLibraryEntry == null
+                ? ""
+                : string.IsNullOrWhiteSpace(currentLibraryEntry.DifficultyName)
+                    ? currentLibraryEntry.DifficultyLevel ?? ""
+                    : string.IsNullOrWhiteSpace(currentLibraryEntry.DifficultyLevel)
+                        ? currentLibraryEntry.DifficultyName
+                        : $"{currentLibraryEntry.DifficultyName} {currentLibraryEntry.DifficultyLevel}";
+            if (resultSongTitleLabel != null) resultSongTitleLabel.text = title;
+            if (resultSongMetaLabel != null)
+            {
+                resultSongMetaLabel.text = string.IsNullOrEmpty(artist)
+                    ? difficulty
+                    : string.IsNullOrEmpty(difficulty) ? artist : $"{artist}  ·  {difficulty}";
+            }
+            resultAccuracyLabel.text = $"{scoreState.AccuracyPercent(totalNotes):F4}%";
+            resultComboLabel.text = $"MAX COMBO  {scoreState.MaxCombo:N0}";
+            if (resultPerfectCountLabel != null) resultPerfectCountLabel.text = scoreState.Perfect.ToString("N0");
+            if (resultGreatCountLabel != null) resultGreatCountLabel.text = scoreState.Great.ToString("N0");
+            if (resultGoodCountLabel != null) resultGoodCountLabel.text = scoreState.Good.ToString("N0");
+            if (resultMissCountLabel != null) resultMissCountLabel.text = scoreState.Miss.ToString("N0");
+            resultFastLateLabel.text =
+                $"FAST  {judgmentTimingStatistics.Fast:N0}    ·    LATE  {judgmentTimingStatistics.Late:N0}";
+            if (!wasInputDiagnostics && autoPlayUsedThisRun)
+                resultHintLabel.text = "AUTO PLAY，成績不計入最佳紀錄";
+            else if (!wasInputDiagnostics && seekUsedThisRun)
+                resultHintLabel.text = "已調整播放進度，成績不計入最佳紀錄";
+            else
+                resultHintLabel.text = string.Empty;
+        }
+
+        void PopulateResultDetailPanel()
+        {
+            RefreshResultHistogram();
+            var lines = new List<string>();
+            foreach (var category in resultRunStatistics.OrderedCategories)
+            {
+                if (!resultRunStatistics.TryGet(category, out var stats) || stats.Count <= 0) continue;
+                lines.Add(
+                    $"{ResultRunStatistics.DisplayName(category),-9}  ACC {stats.AccuracyPercent,7:F2}%   " +
+                    $"FAST {stats.Fast,4:N0}   LATE {stats.Late,4:N0}");
+            }
+            resultCategoryStatsLabel.text = lines.Count == 0 ? "沒有判定資料" : string.Join("\n", lines);
+        }
+
+        void RefreshResultHistogram()
+        {
+            var counts = resultRunStatistics.Histogram.Counts;
+            var maxCount = Mathf.Max(1, resultRunStatistics.Histogram.MaxCount);
+            var maxHeight = resultHistogramRoot == null ? 168f : Mathf.Max(48f, resultHistogramRoot.rect.height);
+            for (var index = 0; index < resultHistogramBars.Length; index++)
+            {
+                var bar = resultHistogramBars[index];
+                if (bar == null) continue;
+                var count = index < counts.Count ? counts[index] : 0;
+                var height = count <= 0 ? 3f : Mathf.Max(6f, maxHeight * count / maxCount);
+                var rect = bar.rectTransform;
+                var width = resultHistogramRoot == null
+                    ? 8f
+                    : Mathf.Max(3f, resultHistogramRoot.rect.width / ResultTimingHistogram.BinCount - 2f);
+                rect.sizeDelta = new Vector2(width, height);
+                var centerMs = -ResultTimingHistogram.RangeMilliseconds +
+                    (index + .5f) * ResultTimingHistogram.BinWidthMilliseconds;
+                if (count <= 0)
+                    bar.color = new Color(.28f, .28f, .28f, .9f);
+                else if (Mathf.Abs(centerMs) < ResultTimingHistogram.BinWidthMilliseconds)
+                    bar.color = Color.white;
+                else if (centerMs < 0f)
+                    bar.color = ResultAccent;
+                else
+                    bar.color = new Color(1f, .45f, .62f, .95f);
+            }
+        }
+
+        void ShowResultMain()
+        {
+            SetGameplayHudVisible(false);
+            SetGameplayStageVisible(false);
+            if (resultDetailPanel != null) resultDetailPanel.gameObject.SetActive(false);
+            if (resultPanel != null) resultPanel.gameObject.SetActive(true);
+            LayoutResultMainPage();
+        }
+
+        void ShowResultDetail()
+        {
+            SetGameplayHudVisible(false);
+            SetGameplayStageVisible(false);
+            if (resultPanel != null) resultPanel.gameObject.SetActive(false);
+            if (resultDetailPanel != null) resultDetailPanel.gameObject.SetActive(true);
+            LayoutResultMainPage();
+            RefreshResultHistogram();
+        }
+
+        void HideResultOverlays()
+        {
+            if (resultPanel != null) resultPanel.gameObject.SetActive(false);
+            if (resultDetailPanel != null) resultDetailPanel.gameObject.SetActive(false);
+        }
+
+        void SetGameplayHudVisible(bool visible)
+        {
+            if (accuracyHudPanel != null) accuracyHudPanel.gameObject.SetActive(visible);
+            else if (accuracyLabel != null) accuracyLabel.gameObject.SetActive(visible);
+            if (comboLabel != null) comboLabel.gameObject.SetActive(visible);
+            if (judgmentImage != null) judgmentImage.gameObject.SetActive(visible);
+            if (judgmentTimingImage != null) judgmentTimingImage.gameObject.SetActive(visible);
+        }
+
+        void ReturnFromResultToLibrary()
+        {
+            // Keep the result page covering the empty stage until LibraryScene loads.
+            SetGameplayStageVisible(false);
+            SetGameplayHudVisible(false);
+            resultRunStatistics.Reset();
+            GugarhythmSceneRouter.OpenLibrary();
+        }
+
+        void RefreshResultCover(LocalChartEntry entry)
+        {
+            if (resultCoverImage == null || resultCoverFallback == null) return;
+            ClearResultCover();
+            if (entry != null) resultCoverTexture = LoadDetailCover(entry);
+            var hasCover = resultCoverTexture != null;
+            resultCoverImage.texture = resultCoverTexture;
+            resultCoverImage.uvRect = new Rect(0, 0, 1, 1);
+            resultCoverImage.gameObject.SetActive(hasCover);
+            resultCoverFallback.gameObject.SetActive(!hasCover);
+            if (hasCover && resultCoverImage.TryGetComponent<AspectRatioFitter>(out var aspect))
+                aspect.aspectRatio = Mathf.Max(.01f, (float)resultCoverTexture.width / resultCoverTexture.height);
+        }
+
+        void ClearResultCover()
+        {
+            if (resultCoverTexture != null)
+            {
+                Destroy(resultCoverTexture);
+                resultCoverTexture = null;
+            }
+            if (resultCoverImage != null)
+            {
+                resultCoverImage.texture = null;
+                resultCoverImage.gameObject.SetActive(false);
+            }
+            if (resultCoverFallback != null) resultCoverFallback.gameObject.SetActive(true);
         }
 
         void LoadArtwork()
@@ -3857,6 +4056,7 @@ namespace Gugarhythm
             var root = canvasRoot;
             Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
             backgroundLayer = RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
+            backgroundLayer.gameObject.SetActive(false);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
             gameplayStageCanvas = stage.gameObject.AddComponent<Canvas>();
             EnableRibbonVertexChannels(gameplayStageCanvas);
@@ -3986,7 +4186,7 @@ namespace Gugarhythm
             BuildLatencyCalibration(safeAreaRoot);
             BuildChartEditor(safeAreaRoot);
             BuildImportDecision(safeAreaRoot);
-            BuildPauseOverlay(safeAreaRoot);
+            BuildPauseOverlay(root);
             BuildResult(safeAreaRoot);
             BuildChartPreview(safeAreaRoot);
             // The dim blue loading veil must cover the physical display,
@@ -4228,11 +4428,22 @@ namespace Gugarhythm
 
         void BuildHud(RectTransform root, RectTransform canvasRoot)
         {
-            var accuracy = Panel("Accuracy", root, new Color(.04f, .08f, .20f, .72f), new Vector2(280, 72), Vector2.zero);
-            PinToAnchor(accuracy, new Vector2(0, 1), new Vector2(0, 1), new Vector2(24, -24));
-            Outline(accuracy.gameObject, new Color(.55f, .75f, 1f, .75f), 2);
-            accuracyLabel = Label("ACCURACY  0.0000%", accuracy, 22); Fill(accuracyLabel.rectTransform);
-            comboLabel = Label("COMBO\n0", root, 52); comboLabel.rectTransform.sizeDelta = new Vector2(360, 170);
+            accuracyHudPanel = Panel("Accuracy", root, ResultSurface, new Vector2(268, 52), Vector2.zero);
+            PinToAnchor(accuracyHudPanel, new Vector2(0, 1), new Vector2(0, 1), new Vector2(20, -20));
+            Outline(accuracyHudPanel.gameObject, ResultBorder, 1);
+            var accent = Panel("Accuracy Accent", accuracyHudPanel, ResultAccent, new Vector2(3, 28), Vector2.zero);
+            accent.GetComponent<Image>().raycastTarget = false;
+            PinToAnchor(accent, new Vector2(0f, .5f), new Vector2(0f, .5f), new Vector2(0f, 0f));
+            accuracyLabel = Label("ACC  0.0000%", accuracyHudPanel, 22);
+            accuracyLabel.alignment = TextAnchor.MiddleLeft;
+            accuracyLabel.rectTransform.anchorMin = new Vector2(0f, 0f);
+            accuracyLabel.rectTransform.anchorMax = new Vector2(1f, 1f);
+            accuracyLabel.rectTransform.offsetMin = new Vector2(18f, 0f);
+            accuracyLabel.rectTransform.offsetMax = new Vector2(-14f, 0f);
+
+            comboLabel = Label("COMBO\n0", root, 48);
+            comboLabel.color = new Color(1f, 1f, 1f, .88f);
+            comboLabel.rectTransform.sizeDelta = new Vector2(360, 170);
             PinToAnchor(comboLabel.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-324, 80));
             comboLabel.gameObject.SetActive(false);
             // Judgment feedback belongs to the full-screen canvas rather than
@@ -4255,8 +4466,14 @@ namespace Gugarhythm
                 new Vector2(0, JudgmentTimingSpriteCenterYOffset));
             foreach (var timing in new[] { JudgmentTiming.Fast, JudgmentTiming.Late })
                 judgmentTimingSprites[timing] = Resources.Load<Texture2D>(JudgmentTimingSpriteResourcePath(timing));
-            pauseButton = MakeButton("暫停", root, new Vector2(-24, -24), PauseGame, new Vector2(150, 64));
-            PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-24, -24));
+
+            pauseButton = MakeFlatButton("暫停", root, Vector2.zero, PauseGame, new Vector2(112, 48), ResultSurface);
+            PinToAnchor(pauseButton.GetComponent<RectTransform>(), new Vector2(1, 1), new Vector2(1, 1), new Vector2(-20, -20));
+            Outline(pauseButton.gameObject, ResultBorder, 1);
+            var pauseLabel = pauseButton.GetComponentInChildren<Text>();
+            pauseLabel.alignment = TextAnchor.MiddleCenter;
+            pauseLabel.fontSize = 20;
+            pauseLabel.color = new Color(.92f, .92f, .92f);
             pauseButton.gameObject.SetActive(false);
         }
 
@@ -4314,9 +4531,127 @@ namespace Gugarhythm
             FitOverlayPanel(importDecisionPanel, new Vector2(620, 420), logicalSafeSize);
             FitOverlayPanel(calibrationPanel, new Vector2(560, 440), logicalSafeSize);
             FitChartPreviewPanel(chartPreviewPanel, 32f);
-            FitOverlayPanel(pauseMenuContent, new Vector2(620, 560), logicalSafeSize);
-            if (pauseMenuContent != null) pauseMenuContent.anchoredPosition = new Vector2(0, 100);
-            FitOverlayPanel(resultPanel, new Vector2(620, 650), logicalSafeSize);
+            FitOverlayPanel(pauseMenuContent, new Vector2(620, 560), new Vector2(ReferenceWidth, CanvasHeight));
+            if (pauseOverlay != null)
+            {
+                Fill(pauseOverlay);
+                pauseOverlay.localScale = Vector3.one;
+            }
+            FitFullScreenOverlay(resultPanel);
+            FitFullScreenOverlay(resultDetailPanel);
+            LayoutResultMainPage();
+        }
+
+        void LayoutResultMainPage()
+        {
+            if (resultContentRoot == null || resultCoverFrame == null || resultRightColumn == null) return;
+            Canvas.ForceUpdateCanvases();
+            var page = resultPanel == null ? Vector2.zero : resultPanel.rect.size;
+            if (page.x <= 1f || page.y <= 1f) return;
+
+            var compact = page.x < 980f || page.y < 560f;
+            var tight = page.x < 820f || page.y < 460f;
+            var pagePad = tight ? 16f : compact ? 24f : 36f;
+            var bottomHeight = tight ? 84f : 96f;
+            var topHeight = tight ? 56f : 72f;
+            var gutter = tight ? 14f : 22f;
+            var metaHeight = tight ? 0f : compact ? 58f : 78f;
+
+            resultContentRoot.offsetMin = new Vector2(pagePad, bottomHeight + 8f);
+            resultContentRoot.offsetMax = new Vector2(-pagePad, -(topHeight + 4f));
+            if (resultActionBand != null)
+            {
+                resultActionBand.offsetMin = Vector2.zero;
+                resultActionBand.offsetMax = new Vector2(0f, bottomHeight);
+            }
+
+            Canvas.ForceUpdateCanvases();
+            var available = resultContentRoot.rect;
+            if (available.width <= 1f || available.height <= 1f) return;
+
+            var maxSideByWidth = Mathf.Max(120f, available.width * (tight ? .30f : compact ? .34f : .38f));
+            var maxSideByHeight = Mathf.Max(120f, available.height - metaHeight);
+            var side = Mathf.Min(maxSideByHeight, maxSideByWidth, tight ? 240f : compact ? 320f : 480f);
+            side = Mathf.Clamp(side, 120f, maxSideByHeight);
+
+            resultCoverFrame.anchorMin = resultCoverFrame.anchorMax = new Vector2(0f, 1f);
+            resultCoverFrame.pivot = new Vector2(0f, 1f);
+            resultCoverFrame.sizeDelta = new Vector2(side, side);
+            resultCoverFrame.anchoredPosition = Vector2.zero;
+            resultRightColumn.offsetMin = new Vector2(side + gutter, 0f);
+            resultRightColumn.offsetMax = Vector2.zero;
+
+            var showMetaUnderCover = metaHeight > 1f;
+            if (resultSongTitleLabel != null)
+            {
+                resultSongTitleLabel.gameObject.SetActive(showMetaUnderCover);
+                resultSongTitleLabel.fontSize = tight ? 16 : compact ? 18 : 22;
+                resultSongTitleLabel.rectTransform.anchoredPosition = new Vector2(0f, -side - 10f);
+                resultSongTitleLabel.rectTransform.sizeDelta = new Vector2(side, tight ? 24f : 32f);
+            }
+            if (resultSongMetaLabel != null)
+            {
+                resultSongMetaLabel.gameObject.SetActive(showMetaUnderCover);
+                resultSongMetaLabel.fontSize = tight ? 12 : 15;
+                resultSongMetaLabel.rectTransform.anchoredPosition = new Vector2(0f, -side - (tight ? 34f : 42f));
+                resultSongMetaLabel.rectTransform.sizeDelta = new Vector2(side, 24f);
+            }
+            if (resultAccuracyLabel != null)
+                resultAccuracyLabel.fontSize = tight ? 36 : compact ? 44 : 56;
+
+            LayoutResultActionButtons(resultActionBand, resultDetailButton, resultLibraryButton, pagePad, tight);
+            if (resultDetailContentRoot != null)
+            {
+                resultDetailContentRoot.offsetMin = new Vector2(pagePad, bottomHeight + 12f);
+                resultDetailContentRoot.offsetMax = new Vector2(-pagePad, -(topHeight + 8f));
+            }
+            if (resultDetailActionBand != null)
+            {
+                resultDetailActionBand.offsetMin = Vector2.zero;
+                resultDetailActionBand.offsetMax = new Vector2(0f, bottomHeight);
+            }
+            LayoutResultActionButtons(resultDetailActionBand, resultDetailBackButton, null, pagePad, tight);
+        }
+
+        static void LayoutResultActionButtons(RectTransform band, Button primary, Button secondary, float pagePad, bool tight)
+        {
+            if (band == null) return;
+            Canvas.ForceUpdateCanvases();
+            var width = band.rect.width;
+            if (width <= 1f) return;
+            var gap = tight ? 12f : 16f;
+            var height = tight ? 48f : 52f;
+            var y = band.rect.height * .5f;
+            if (secondary == null)
+            {
+                if (primary == null) return;
+                var singleWidth = Mathf.Clamp(width - pagePad * 2f, 140f, tight ? 180f : 220f);
+                PlaceResultActionButton(primary, Vector2.zero, new Vector2(singleWidth, height), y);
+                return;
+            }
+
+            var usable = Mathf.Max(200f, width - pagePad * 2f - gap);
+            var buttonWidth = Mathf.Min(tight ? 168f : 200f, usable * .5f);
+            var halfSpan = buttonWidth * .5f + gap * .5f;
+            PlaceResultActionButton(primary, new Vector2(-halfSpan, 0f), new Vector2(buttonWidth, height), y);
+            PlaceResultActionButton(secondary, new Vector2(halfSpan, 0f), new Vector2(buttonWidth, height), y);
+        }
+
+        static void PlaceResultActionButton(Button button, Vector2 center, Vector2 size, float y)
+        {
+            if (button == null) return;
+            var rect = button.GetComponent<RectTransform>();
+            rect.anchorMin = rect.anchorMax = new Vector2(.5f, 0f);
+            rect.pivot = new Vector2(.5f, .5f);
+            rect.sizeDelta = size;
+            rect.anchoredPosition = new Vector2(center.x, y);
+        }
+
+        static void FitFullScreenOverlay(RectTransform panel)
+        {
+            if (panel == null) return;
+            Fill(panel);
+            panel.localScale = Vector3.one;
         }
 
         static void FitOverlayPanel(RectTransform panel, Vector2 designSize, Vector2 available)
@@ -6996,11 +7331,310 @@ namespace Gugarhythm
 
         void BuildResult(RectTransform root)
         {
-            resultPanel = Panel("Result", root, new Color(.04f, .06f, .14f, .96f), new Vector2(620, 650), Vector2.zero); Outline(resultPanel.gameObject, new Color(.9f, .5f, 1f, .75f), 3);
-            var title = Label("RESULT", resultPanel, 38); title.rectTransform.sizeDelta = new Vector2(580, 70); title.rectTransform.anchoredPosition = new Vector2(0, 260);
-            resultText = Label("", resultPanel, 27); resultText.rectTransform.sizeDelta = new Vector2(540, 440); resultText.rectTransform.anchoredPosition = new Vector2(0, 25);
-            MakeButton("返回曲庫", resultPanel, new Vector2(0, -270), GugarhythmSceneRouter.OpenLibrary);
+            const float topHeight = 72f;
+            const float bottomHeight = 100f;
+            const float pagePad = 36f;
+
+            resultPanel = Panel("Result", root, ResultBg, Vector2.zero, Vector2.zero, true);
+            var wash = Panel("Result Wash", resultPanel, new Color(.05f, .38f, .72f, .10f), Vector2.zero, Vector2.zero, true);
+            wash.GetComponent<Image>().raycastTarget = false;
+            wash.anchorMin = new Vector2(0f, .55f);
+            wash.offsetMin = Vector2.zero;
+
+            var topBand = Panel("Result Top Band", resultPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            topBand.GetComponent<Image>().raycastTarget = false;
+            topBand.anchorMin = new Vector2(0f, 1f);
+            topBand.anchorMax = new Vector2(1f, 1f);
+            topBand.pivot = new Vector2(.5f, 1f);
+            topBand.offsetMin = new Vector2(0f, -topHeight);
+            topBand.offsetMax = Vector2.zero;
+            var eyebrow = Label("RESULT", topBand, 14);
+            eyebrow.alignment = TextAnchor.MiddleLeft;
+            eyebrow.color = ResultAccent;
+            eyebrow.rectTransform.anchorMin = new Vector2(0f, .5f);
+            eyebrow.rectTransform.anchorMax = new Vector2(0f, .5f);
+            eyebrow.rectTransform.pivot = new Vector2(0f, .5f);
+            eyebrow.rectTransform.sizeDelta = new Vector2(180f, 24f);
+            eyebrow.rectTransform.anchoredPosition = new Vector2(pagePad, 10f);
+            var title = Label("成績結算", topBand, 28);
+            title.alignment = TextAnchor.MiddleLeft;
+            title.rectTransform.anchorMin = new Vector2(0f, .5f);
+            title.rectTransform.anchorMax = new Vector2(0f, .5f);
+            title.rectTransform.pivot = new Vector2(0f, .5f);
+            title.rectTransform.sizeDelta = new Vector2(320f, 40f);
+            title.rectTransform.anchoredPosition = new Vector2(pagePad, -14f);
+            var accent = Panel("Result Accent", topBand, ResultAccent, new Vector2(48f, 3f), new Vector2(pagePad + 24f, -34f));
+            accent.GetComponent<Image>().raycastTarget = false;
+
+            resultContentRoot = new GameObject("Result Content", typeof(RectTransform)).GetComponent<RectTransform>();
+            resultContentRoot.SetParent(resultPanel, false);
+            resultContentRoot.anchorMin = Vector2.zero;
+            resultContentRoot.anchorMax = Vector2.one;
+            resultContentRoot.offsetMin = new Vector2(pagePad, bottomHeight + 12f);
+            resultContentRoot.offsetMax = new Vector2(-pagePad, -(topHeight + 8f));
+
+            resultCoverFrame = Panel("Result Cover Frame", resultContentRoot, ResultSurfaceAlt, new Vector2(420f, 420f), Vector2.zero);
+            resultCoverFrame.anchorMin = resultCoverFrame.anchorMax = new Vector2(0f, 1f);
+            resultCoverFrame.pivot = new Vector2(0f, 1f);
+            Outline(resultCoverFrame.gameObject, ResultBorder, 1);
+            resultCoverFrame.gameObject.AddComponent<RectMask2D>();
+            resultCoverFallback = BuildResultCoverFallback(resultCoverFrame);
+            resultCoverImage = RawPanel("Result Cover Artwork", resultCoverFrame, null, Color.white, Vector2.zero, Vector2.zero, true)
+                .GetComponent<RawImage>();
+            var coverAspect = resultCoverImage.gameObject.AddComponent<AspectRatioFitter>();
+            coverAspect.aspectMode = AspectRatioFitter.AspectMode.EnvelopeParent;
+            coverAspect.aspectRatio = 1f;
+            resultCoverImage.gameObject.SetActive(false);
+
+            resultSongTitleLabel = Label("曲名", resultContentRoot, 22);
+            resultSongTitleLabel.alignment = TextAnchor.UpperLeft;
+            resultSongTitleLabel.rectTransform.anchorMin = resultSongTitleLabel.rectTransform.anchorMax = new Vector2(0f, 1f);
+            resultSongTitleLabel.rectTransform.pivot = new Vector2(0f, 1f);
+            resultSongTitleLabel.rectTransform.sizeDelta = new Vector2(420f, 34f);
+            resultSongMetaLabel = Label("", resultContentRoot, 16);
+            resultSongMetaLabel.alignment = TextAnchor.UpperLeft;
+            resultSongMetaLabel.color = ResultMuted;
+            resultSongMetaLabel.rectTransform.anchorMin = resultSongMetaLabel.rectTransform.anchorMax = new Vector2(0f, 1f);
+            resultSongMetaLabel.rectTransform.pivot = new Vector2(0f, 1f);
+            resultSongMetaLabel.rectTransform.sizeDelta = new Vector2(420f, 28f);
+
+            resultRightColumn = new GameObject("Result Right Column", typeof(RectTransform)).GetComponent<RectTransform>();
+            resultRightColumn.SetParent(resultContentRoot, false);
+            resultRightColumn.anchorMin = Vector2.zero;
+            resultRightColumn.anchorMax = Vector2.one;
+            resultRightColumn.offsetMin = new Vector2(448f, 0f);
+            resultRightColumn.offsetMax = Vector2.zero;
+
+            var accPanel = MakeResultCard("Result Acc", resultRightColumn);
+            accPanel.anchorMin = new Vector2(0f, .58f);
+            accPanel.anchorMax = new Vector2(1f, 1f);
+            accPanel.offsetMin = Vector2.zero;
+            accPanel.offsetMax = Vector2.zero;
+            var accEyebrow = Label("ACCURACY", accPanel, 13);
+            StyleResultEyebrow(accEyebrow);
+            resultAccuracyLabel = Label("0.0000%", accPanel, 56);
+            resultAccuracyLabel.alignment = TextAnchor.MiddleLeft;
+            resultAccuracyLabel.rectTransform.anchorMin = new Vector2(0f, .5f);
+            resultAccuracyLabel.rectTransform.anchorMax = new Vector2(1f, .5f);
+            resultAccuracyLabel.rectTransform.pivot = new Vector2(0f, .5f);
+            resultAccuracyLabel.rectTransform.offsetMin = new Vector2(28f, -28f);
+            resultAccuracyLabel.rectTransform.offsetMax = new Vector2(-28f, 40f);
+            resultComboLabel = Label("MAX COMBO  0", accPanel, 18);
+            resultComboLabel.alignment = TextAnchor.MiddleLeft;
+            resultComboLabel.color = new Color(.86f, .86f, .86f);
+            resultComboLabel.rectTransform.anchorMin = new Vector2(0f, 0f);
+            resultComboLabel.rectTransform.anchorMax = new Vector2(1f, 0f);
+            resultComboLabel.rectTransform.pivot = new Vector2(0f, 0f);
+            resultComboLabel.rectTransform.offsetMin = new Vector2(28f, 42f);
+            resultComboLabel.rectTransform.offsetMax = new Vector2(-28f, 70f);
+            resultHintLabel = Label("", accPanel, 14);
+            resultHintLabel.alignment = TextAnchor.MiddleLeft;
+            resultHintLabel.color = new Color(1f, .72f, .42f);
+            resultHintLabel.rectTransform.anchorMin = new Vector2(0f, 0f);
+            resultHintLabel.rectTransform.anchorMax = new Vector2(1f, 0f);
+            resultHintLabel.rectTransform.pivot = new Vector2(0f, 0f);
+            resultHintLabel.rectTransform.offsetMin = new Vector2(28f, 16f);
+            resultHintLabel.rectTransform.offsetMax = new Vector2(-28f, 38f);
+
+            var judgmentPanel = MakeResultCard("Result Judgments", resultRightColumn);
+            judgmentPanel.anchorMin = new Vector2(0f, 0f);
+            judgmentPanel.anchorMax = new Vector2(1f, .55f);
+            judgmentPanel.offsetMin = Vector2.zero;
+            judgmentPanel.offsetMax = new Vector2(0f, -16f);
+            var judgmentEyebrow = Label("JUDGMENT", judgmentPanel, 13);
+            StyleResultEyebrow(judgmentEyebrow);
+            resultPerfectCountLabel = MakeResultStatRow(judgmentPanel, "PERFECT", 0.78f, out _);
+            resultGreatCountLabel = MakeResultStatRow(judgmentPanel, "GREAT", 0.60f, out _);
+            resultGoodCountLabel = MakeResultStatRow(judgmentPanel, "GOOD", 0.42f, out _);
+            resultMissCountLabel = MakeResultStatRow(judgmentPanel, "MISS", 0.24f, out _);
+            resultFastLateLabel = Label("FAST  0    ·    LATE  0", judgmentPanel, 16);
+            resultFastLateLabel.alignment = TextAnchor.MiddleLeft;
+            resultFastLateLabel.color = ResultMuted;
+            resultFastLateLabel.rectTransform.anchorMin = new Vector2(0f, 0f);
+            resultFastLateLabel.rectTransform.anchorMax = new Vector2(1f, 0f);
+            resultFastLateLabel.rectTransform.pivot = new Vector2(0f, 0f);
+            resultFastLateLabel.rectTransform.offsetMin = new Vector2(28f, 16f);
+            resultFastLateLabel.rectTransform.offsetMax = new Vector2(-28f, 42f);
+
+            var actionBand = Panel("Result Action Band", resultPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            actionBand.GetComponent<Image>().raycastTarget = false;
+            actionBand.anchorMin = new Vector2(0f, 0f);
+            actionBand.anchorMax = new Vector2(1f, 0f);
+            actionBand.pivot = new Vector2(.5f, 0f);
+            actionBand.offsetMin = Vector2.zero;
+            actionBand.offsetMax = new Vector2(0f, bottomHeight);
+            resultActionBand = actionBand;
+            resultDetailButton = MakeResultActionButton("詳細", actionBand, Vector2.zero, ShowResultDetail, new Vector2(180f, 52f), true);
+            resultLibraryButton = MakeResultActionButton("返回曲庫", actionBand, Vector2.zero, ReturnFromResultToLibrary, new Vector2(180f, 52f), false);
             resultPanel.gameObject.SetActive(false);
+
+            BuildResultDetail(root);
+            LayoutResultMainPage();
+        }
+
+        RectTransform MakeResultCard(string name, RectTransform parent)
+        {
+            var card = Panel(name, parent, ResultSurface, Vector2.zero, Vector2.zero, true);
+            Outline(card.gameObject, ResultBorder, 1);
+            return card;
+        }
+
+        static void StyleResultEyebrow(Text label)
+        {
+            label.alignment = TextAnchor.MiddleLeft;
+            label.color = ResultAccent;
+            label.rectTransform.anchorMin = new Vector2(0f, 1f);
+            label.rectTransform.anchorMax = new Vector2(1f, 1f);
+            label.rectTransform.pivot = new Vector2(0f, 1f);
+            label.rectTransform.offsetMin = new Vector2(28f, -36f);
+            label.rectTransform.offsetMax = new Vector2(-28f, -12f);
+        }
+
+        Text MakeResultStatRow(RectTransform parent, string name, float normalizedY, out Text nameLabel)
+        {
+            nameLabel = Label(name, parent, 16);
+            nameLabel.alignment = TextAnchor.MiddleLeft;
+            nameLabel.color = ResultMuted;
+            nameLabel.rectTransform.anchorMin = new Vector2(0f, normalizedY);
+            nameLabel.rectTransform.anchorMax = new Vector2(.45f, normalizedY);
+            nameLabel.rectTransform.pivot = new Vector2(0f, .5f);
+            nameLabel.rectTransform.offsetMin = new Vector2(28f, -16f);
+            nameLabel.rectTransform.offsetMax = new Vector2(0f, 16f);
+            var count = Label("0", parent, 28);
+            count.alignment = TextAnchor.MiddleRight;
+            count.rectTransform.anchorMin = new Vector2(.45f, normalizedY);
+            count.rectTransform.anchorMax = new Vector2(1f, normalizedY);
+            count.rectTransform.pivot = new Vector2(1f, .5f);
+            count.rectTransform.offsetMin = new Vector2(0f, -20f);
+            count.rectTransform.offsetMax = new Vector2(-28f, 20f);
+            return count;
+        }
+
+        Button MakeResultActionButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size, bool primary)
+        {
+            var color = primary ? ResultAccent : new Color(.22f, .22f, .22f, 1f);
+            var button = MakeFlatButton(text, parent, position, action, size, color);
+            var label = button.GetComponentInChildren<Text>();
+            label.alignment = TextAnchor.MiddleCenter;
+            label.fontSize = 20;
+            label.color = primary ? Color.white : new Color(.90f, .90f, .90f);
+            Outline(button.gameObject, primary ? new Color(1f, 1f, 1f, .18f) : ResultBorder, 1);
+            return button;
+        }
+
+        RectTransform BuildResultCoverFallback(RectTransform coverFrame)
+        {
+            var fallback = new GameObject("Result Cover Fallback", typeof(RectTransform)).GetComponent<RectTransform>();
+            fallback.SetParent(coverFrame, false);
+            Fill(fallback);
+            Panel("Cover Magenta", fallback, new Color(.61f, .33f, .45f), new Vector2(640, 220), new Vector2(-90, 150));
+            Panel("Cover Cyan", fallback, new Color(.29f, .55f, .68f), new Vector2(640, 280), new Vector2(0, 10));
+            Panel("Cover Blue", fallback, new Color(.23f, .35f, .77f), new Vector2(640, 220), new Vector2(110, -150));
+            var letter = Label("G", fallback, 120);
+            letter.color = new Color(1f, 1f, 1f, .16f);
+            Fill(letter.rectTransform);
+            var brand = Label("GUGARHYTHM", fallback, 18);
+            brand.alignment = TextAnchor.UpperRight;
+            brand.rectTransform.sizeDelta = new Vector2(200, 40);
+            brand.rectTransform.anchoredPosition = new Vector2(100, 160);
+            return fallback;
+        }
+
+        void BuildResultDetail(RectTransform root)
+        {
+            const float pagePad = 36f;
+            resultDetailPanel = Panel("Result Detail", root, ResultBg, Vector2.zero, Vector2.zero, true);
+            var wash = Panel("Result Detail Wash", resultDetailPanel, new Color(.05f, .38f, .72f, .10f), Vector2.zero, Vector2.zero, true);
+            wash.GetComponent<Image>().raycastTarget = false;
+            wash.anchorMin = new Vector2(0f, .55f);
+
+            var topBand = Panel("Result Detail Top Band", resultDetailPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            topBand.GetComponent<Image>().raycastTarget = false;
+            topBand.anchorMin = new Vector2(0f, 1f);
+            topBand.anchorMax = new Vector2(1f, 1f);
+            topBand.pivot = new Vector2(.5f, 1f);
+            topBand.offsetMin = new Vector2(0f, -72f);
+            topBand.offsetMax = Vector2.zero;
+            var eyebrow = Label("DETAIL", topBand, 14);
+            eyebrow.alignment = TextAnchor.MiddleLeft;
+            eyebrow.color = ResultAccent;
+            eyebrow.rectTransform.anchorMin = new Vector2(0f, .5f);
+            eyebrow.rectTransform.anchorMax = new Vector2(0f, .5f);
+            eyebrow.rectTransform.pivot = new Vector2(0f, .5f);
+            eyebrow.rectTransform.sizeDelta = new Vector2(180f, 24f);
+            eyebrow.rectTransform.anchoredPosition = new Vector2(pagePad, 10f);
+            var title = Label("判定詳細", topBand, 28);
+            title.alignment = TextAnchor.MiddleLeft;
+            title.rectTransform.anchorMin = new Vector2(0f, .5f);
+            title.rectTransform.anchorMax = new Vector2(0f, .5f);
+            title.rectTransform.pivot = new Vector2(0f, .5f);
+            title.rectTransform.sizeDelta = new Vector2(320f, 40f);
+            title.rectTransform.anchoredPosition = new Vector2(pagePad, -14f);
+
+            var content = new GameObject("Result Detail Content", typeof(RectTransform)).GetComponent<RectTransform>();
+            content.SetParent(resultDetailPanel, false);
+            content.anchorMin = Vector2.zero;
+            content.anchorMax = Vector2.one;
+            content.offsetMin = new Vector2(pagePad, 112f);
+            content.offsetMax = new Vector2(-pagePad, -84f);
+            resultDetailContentRoot = content;
+
+            var histogramPanel = MakeResultCard("Result Histogram", content);
+            histogramPanel.anchorMin = new Vector2(0f, .48f);
+            histogramPanel.anchorMax = new Vector2(1f, 1f);
+            histogramPanel.offsetMax = new Vector2(0f, -12f);
+            var histogramEyebrow = Label("TIMING DISTRIBUTION", histogramPanel, 13);
+            StyleResultEyebrow(histogramEyebrow);
+
+            resultHistogramRoot = Panel("Histogram Bars", histogramPanel, new Color(0, 0, 0, 0), Vector2.zero, Vector2.zero, true);
+            resultHistogramRoot.GetComponent<Image>().raycastTarget = false;
+            resultHistogramRoot.anchorMin = new Vector2(0f, 0f);
+            resultHistogramRoot.anchorMax = new Vector2(1f, 1f);
+            resultHistogramRoot.offsetMin = new Vector2(28f, 40f);
+            resultHistogramRoot.offsetMax = new Vector2(-28f, -52f);
+            var barWidth = 1f / ResultTimingHistogram.BinCount;
+            for (var index = 0; index < ResultTimingHistogram.BinCount; index++)
+            {
+                var bar = Panel($"Bin {index}", resultHistogramRoot, new Color(.28f, .28f, .28f, .9f),
+                    new Vector2(8f, 2f), Vector2.zero);
+                bar.GetComponent<Image>().raycastTarget = false;
+                bar.anchorMin = bar.anchorMax = new Vector2((index + .5f) * barWidth, 0f);
+                bar.pivot = new Vector2(.5f, 0f);
+                bar.anchoredPosition = Vector2.zero;
+                resultHistogramBars[index] = bar.GetComponent<Image>();
+            }
+
+            var axis = Label("EARLY  -100ms                 0                 +100ms  LATE", histogramPanel, 14);
+            axis.alignment = TextAnchor.MiddleCenter;
+            axis.color = ResultMuted;
+            axis.rectTransform.anchorMin = new Vector2(0f, 0f);
+            axis.rectTransform.anchorMax = new Vector2(1f, 0f);
+            axis.rectTransform.pivot = new Vector2(.5f, 0f);
+            axis.rectTransform.offsetMin = new Vector2(28f, 12f);
+            axis.rectTransform.offsetMax = new Vector2(-28f, 34f);
+
+            var categoryPanel = MakeResultCard("Result Categories", content);
+            categoryPanel.anchorMin = new Vector2(0f, 0f);
+            categoryPanel.anchorMax = new Vector2(1f, .45f);
+            var categoryEyebrow = Label("BY NOTE TYPE", categoryPanel, 13);
+            StyleResultEyebrow(categoryEyebrow);
+            resultCategoryStatsLabel = Label("", categoryPanel, 20);
+            resultCategoryStatsLabel.alignment = TextAnchor.UpperLeft;
+            resultCategoryStatsLabel.rectTransform.anchorMin = new Vector2(0f, 0f);
+            resultCategoryStatsLabel.rectTransform.anchorMax = new Vector2(1f, 1f);
+            resultCategoryStatsLabel.rectTransform.offsetMin = new Vector2(28f, 18f);
+            resultCategoryStatsLabel.rectTransform.offsetMax = new Vector2(-28f, -48f);
+
+            var actionBand = Panel("Result Detail Action Band", resultDetailPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            actionBand.GetComponent<Image>().raycastTarget = false;
+            actionBand.anchorMin = new Vector2(0f, 0f);
+            actionBand.anchorMax = new Vector2(1f, 0f);
+            actionBand.pivot = new Vector2(.5f, 0f);
+            actionBand.offsetMin = Vector2.zero;
+            actionBand.offsetMax = new Vector2(0f, 100f);
+            resultDetailActionBand = actionBand;
+            resultDetailBackButton = MakeResultActionButton("返回", actionBand, Vector2.zero, ShowResultMain, new Vector2(180f, 52f), false);
+            resultDetailPanel.gameObject.SetActive(false);
         }
 
         void BuildChartPreview(RectTransform root)
@@ -7495,7 +8129,7 @@ namespace Gugarhythm
         {
             var totalNotes = chart?.PlayableCount ?? 0;
             if (hudState.ShouldUpdateAccuracy(scoreState.AccuracyNumerator, totalNotes))
-                accuracyLabel.text = $"ACCURACY  {scoreState.AccuracyPercent(totalNotes):F4}%";
+                accuracyLabel.text = $"ACC  {scoreState.AccuracyPercent(totalNotes):F4}%";
             var comboVisible = running && scoreState.Combo > 0;
             if (!hudState.ShouldUpdateCombo(scoreState.Combo, comboVisible)) return;
             comboLabel.text = "COMBO\n" + scoreState.Combo;
