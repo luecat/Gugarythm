@@ -5767,11 +5767,10 @@ namespace Gugarhythm
                 deleteText.color = new Color(1f, .35f, .35f);
                 Outline(delete.gameObject, new Color(.78f, .28f, .28f), 1);
             }
-            var listHeight = Mathf.Max(tags.Count * 64f, 0f);
             settingsTagListContent.anchorMin = new Vector2(0f, 1f);
             settingsTagListContent.anchorMax = new Vector2(1f, 1f);
             settingsTagListContent.pivot = new Vector2(.5f, 1f);
-            settingsTagListContent.sizeDelta = new Vector2(0f, listHeight);
+            settingsTagListContent.sizeDelta = new Vector2(0f, tags.Count * 64f);
             settingsTagListContent.anchoredPosition = Vector2.zero;
             RefreshSettingsTagsListScroll();
         }
@@ -5780,13 +5779,21 @@ namespace Gugarhythm
         {
             if (settingsTagScroll == null || settingsTagListContent == null || settingsTagContent == null)
                 return;
+            Canvas.ForceUpdateCanvases();
             var viewportHeight = settingsTagContent.rect.height;
-            if (viewportHeight <= 1f) return;
-            var neededHeight = settingsTagListContent.sizeDelta.y;
+            // 用列數算真實需要高度，不要拿已被撐成 viewport 的 sizeDelta 反推。
+            var neededHeight = settingsTagListContent.childCount * 64f;
+            if (viewportHeight <= 1f)
+            {
+                // 版面尚未量好時先鎖住，避免「明明都看得到還能拖」。
+                ApplyScrollAxes(settingsTagScroll, horizontal: false, vertical: false);
+                return;
+            }
             var needsVertical = neededHeight > viewportHeight + 1f;
-            if (!needsVertical)
-                settingsTagListContent.sizeDelta = new Vector2(0f, viewportHeight);
+            settingsTagListContent.sizeDelta = new Vector2(0f, needsVertical ? neededHeight : viewportHeight);
+            settingsTagListContent.anchoredPosition = Vector2.zero;
             ApplyScrollAxes(settingsTagScroll, horizontal: false, vertical: needsVertical);
+            settingsTagScroll.verticalNormalizedPosition = 1f;
         }
 
         void PromptDeleteChart()
