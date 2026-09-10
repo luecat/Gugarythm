@@ -33,8 +33,8 @@ namespace Gugarhythm
             var changed = false;
             foreach (var suffix in new[]
                      {
-                         "audio-offset-seconds", "settings-delay-offset-seconds", "scroll-speed", "upper-hidden-bar-percent",
-                         "music-volume", "key-volume",
+                         "audio-offset-seconds", "settings-delay-offset-seconds", "scroll-speed", "playback-rate",
+                         "upper-hidden-bar-percent", "music-volume", "key-volume",
                      })
                 changed |= MigrateFloat(suffix);
             changed |= MigrateString("bundled-charts-version");
@@ -360,6 +360,8 @@ namespace Gugarhythm
         const float VisibleTrackLaneEdge = CentralHalfLanes;
         const float PerspectiveDepthRatio = 3.2f;
         public const float DefaultScrollSpeed = 4f;
+        public const float DefaultPlaybackRate = GameplayTiming.DefaultPlaybackRate;
+        const string PlaybackRatePreferenceKey = "gugarhythm-playback-rate";
         public const float NoteApproachDurationSeconds = 2f;
         const float InitialOffscreenLeadSeconds = .25f;
         // Curves are sampled on fixed chart-time boundaries. A denser grid
@@ -637,6 +639,7 @@ namespace Gugarhythm
         ScrollRect settingsContentScroll;
         RectTransform settingsAudioPanel;
         RectTransform settingsGamePanel;
+        RectTransform settingsAdvancedPanel;
         RectTransform settingsTagsPanel;
         RectTransform settingsAccountPanel;
         RectTransform difficultyTagConfirmationPanel;
@@ -732,6 +735,7 @@ namespace Gugarhythm
         InputField settingsTagInput;
         Text importDecisionText;
         Text speedLabel;
+        Text overallSpeedLabel;
         Text upperHiddenBarLabel;
         Text settingsMusicVolumeLabel;
         Text settingsKeyVolumeLabel;
@@ -749,6 +753,7 @@ namespace Gugarhythm
         Button calibrationResetOffsetButton;
         Button settingsAudioNavigationButton;
         Button settingsGameNavigationButton;
+        Button settingsAdvancedNavigationButton;
         Button settingsTagsNavigationButton;
         Button settingsAccountNavigationButton;
         Button settingsAccountLoginButton;
@@ -836,6 +841,7 @@ namespace Gugarhythm
         readonly Button[] hitParticleEffectButtons = new Button[4];
         readonly Button[] hapticFeedbackButtons = new Button[3];
         Slider speedSlider;
+        Slider overallSpeedSlider;
         Slider upperHiddenBarSlider;
         Slider settingsMusicVolumeSlider;
         Slider settingsKeyVolumeSlider;
@@ -873,6 +879,7 @@ namespace Gugarhythm
         int calibrationRoundIndex;
         bool calibrationFourthBeatTapRegistered;
         float scrollSpeed = DefaultScrollSpeed;
+        float playbackRate = DefaultPlaybackRate;
         float upperHiddenBarPercent;
         bool fastLateDisplayEnabled;
         bool autoPlayEnabled;
@@ -1060,6 +1067,8 @@ namespace Gugarhythm
 #endif
             LandscapeOrientation.Lock();
             scrollSpeed = Mathf.Clamp(PlayerPrefs.GetFloat("gugarhythm-scroll-speed", DefaultScrollSpeed), 1f, 20f);
+            playbackRate = GameplayTiming.ClampPlaybackRate(
+                PlayerPrefs.GetFloat(PlaybackRatePreferenceKey, DefaultPlaybackRate));
             upperHiddenBarPercent = ClampUpperHiddenBarPercent(
                 PlayerPrefs.GetFloat("gugarhythm-upper-hidden-bar-percent", 0f));
             fastLateDisplayEnabled = PlayerPrefs.GetInt(FastLateDisplayPreferenceKey, 1) != 0;
@@ -1425,11 +1434,11 @@ namespace Gugarhythm
             var rawDspTime = AudioSettings.dspTime;
             var realtime = Time.realtimeSinceStartupAsDouble;
             var authoritativeSongTime = GameplayTiming.ChartTimeAtDsp(
-                rawDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+                rawDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset, playbackRate);
             var presentationDspTime = presentationClock.Sample(
                 rawDspTime, realtime, presentationClockHardResetThreshold);
             var presentationSongTime = GameplayTiming.ChartTimeAtDsp(
-                presentationDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+                presentationDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset, playbackRate);
             lastObservedSongTime = authoritativeSongTime;
             CollectInput();
             // Input remains fully routed to JudgmentEngine below.  Do not draw
@@ -1548,6 +1557,28 @@ namespace Gugarhythm
             if (speedLabel != null)
                 speedLabel.text = $"{value:F1}";
             PlayerPrefs.SetFloat("gugarhythm-scroll-speed", value);
+        }
+
+        public float PlaybackRate => playbackRate;
+
+        void SetOverallSpeed(float value)
+        {
+            value = Mathf.Round(GameplayTiming.ClampPlaybackRate(value) * 100f) / 100f;
+            playbackRate = value;
+            if (overallSpeedSlider != null && !Mathf.Approximately(overallSpeedSlider.value, value))
+                overallSpeedSlider.SetValueWithoutNotify(value);
+            if (overallSpeedLabel != null)
+                overallSpeedLabel.text = $"{value:F2}×";
+            PlayerPrefs.SetFloat(PlaybackRatePreferenceKey, value);
+            ApplyPlaybackRateToAudioSources();
+        }
+
+        void ApplyPlaybackRateToAudioSources()
+        {
+            var pitch = GameplayTiming.ClampPlaybackRate(playbackRate);
+            if (music != null) music.pitch = pitch;
+            if (effects != null) effects.pitch = pitch;
+            if (holdEffects != null) holdEffects.pitch = pitch;
         }
 
         public static float ClampUpperHiddenBarPercent(float value) =>
@@ -1789,74 +1820,76 @@ namespace Gugarhythm
             scroll.verticalNormalizedPosition = 1f;
         }
 
+        void HideAllSettingsContentPanels()
+        {
+            if (settingsAudioPanel != null) settingsAudioPanel.gameObject.SetActive(false);
+            if (settingsGamePanel != null) settingsGamePanel.gameObject.SetActive(false);
+            if (settingsAdvancedPanel != null) settingsAdvancedPanel.gameObject.SetActive(false);
+            if (settingsTagsPanel != null) settingsTagsPanel.gameObject.SetActive(false);
+            if (settingsAccountPanel != null) settingsAccountPanel.gameObject.SetActive(false);
+            HideInputDiagnosticsSettings();
+        }
+
+        void SetSettingsNavigationSelection(Button selected)
+        {
+            SetSettingsNavigationColor(settingsAudioNavigationButton, selected == settingsAudioNavigationButton);
+            SetSettingsNavigationColor(settingsGameNavigationButton, selected == settingsGameNavigationButton);
+            SetSettingsNavigationColor(settingsAdvancedNavigationButton, selected == settingsAdvancedNavigationButton);
+            SetSettingsNavigationColor(settingsTagsNavigationButton, selected == settingsTagsNavigationButton);
+            SetSettingsNavigationColor(settingsAccountNavigationButton, selected == settingsAccountNavigationButton);
+            SetSettingsNavigationColor(settingsDebugNavigationButton, selected == settingsDebugNavigationButton);
+        }
+
         void ShowSettingsAudio()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
-            HideInputDiagnosticsSettings();
+            if (settingsAudioPanel == null) return;
+            HideAllSettingsContentPanels();
             settingsAudioPanel.gameObject.SetActive(true);
-            settingsGamePanel.gameObject.SetActive(false);
-            settingsTagsPanel.gameObject.SetActive(false);
-            settingsAccountPanel.gameObject.SetActive(false);
-            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
-            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-        
+            SetSettingsNavigationSelection(settingsAudioNavigationButton);
             ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
-}
+        }
 
         void ShowSettingsGame()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
-            HideInputDiagnosticsSettings();
-            settingsAudioPanel.gameObject.SetActive(false);
+            if (settingsGamePanel == null) return;
+            HideAllSettingsContentPanels();
             settingsGamePanel.gameObject.SetActive(true);
-            settingsTagsPanel.gameObject.SetActive(false);
-            settingsAccountPanel.gameObject.SetActive(false);
-            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
-            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-        
+            SetSettingsNavigationSelection(settingsGameNavigationButton);
             ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
-}
+        }
+
+        void ShowSettingsAdvanced()
+        {
+            if (settingsAdvancedPanel == null) return;
+            HideAllSettingsContentPanels();
+            settingsAdvancedPanel.gameObject.SetActive(true);
+            SetSettingsNavigationSelection(settingsAdvancedNavigationButton);
+            ResetSettingsTabScrollPositions();
+            RefreshSettingsOverflowFromCurrentShell();
+        }
 
         void ShowSettingsTags()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
-            HideInputDiagnosticsSettings();
-            settingsAudioPanel.gameObject.SetActive(false);
-            settingsGamePanel.gameObject.SetActive(false);
+            if (settingsTagsPanel == null) return;
+            HideAllSettingsContentPanels();
             settingsTagsPanel.gameObject.SetActive(true);
-            settingsAccountPanel.gameObject.SetActive(false);
-            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
-            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-        
+            SetSettingsNavigationSelection(settingsTagsNavigationButton);
             ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
-}
+        }
 
         void ShowSettingsAccount()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null || settingsTagsPanel == null || settingsAccountPanel == null) return;
-            HideInputDiagnosticsSettings();
-            settingsAudioPanel.gameObject.SetActive(false);
-            settingsGamePanel.gameObject.SetActive(false);
-            settingsTagsPanel.gameObject.SetActive(false);
+            if (settingsAccountPanel == null) return;
+            HideAllSettingsContentPanels();
             settingsAccountPanel.gameObject.SetActive(true);
-            settingsAudioNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsGameNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsTagsNavigationButton.GetComponent<Image>().color = new Color(.18f, .18f, .18f);
-            settingsAccountNavigationButton.GetComponent<Image>().color = new Color(.08f, .28f, .42f);
+            SetSettingsNavigationSelection(settingsAccountNavigationButton);
             RefreshAccountSettings();
-        
             ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
-}
+        }
 
         void OpenAutoAdjustPanel()
         {
@@ -2361,14 +2394,16 @@ namespace Gugarhythm
             var firstWaterfallSongTime = FirstWaterfallSongTimeForApproachDuration(chart, ApproachDuration);
             var earliestAudioSafeStart = GameplayTiming.EarliestAudioSafeChartTime(chart.BgmOffset, audioOffsetSeconds);
             var initialSongTime = Math.Min(0d, Math.Min(firstWaterfallSongTime, earliestAudioSafeStart));
-            scheduledDsp = GameplayTiming.ScheduledDspForChartTime(playbackReadyDsp, initialSongTime, chart.BgmOffset);
+            scheduledDsp = GameplayTiming.ScheduledDspForChartTime(
+                playbackReadyDsp, initialSongTime, chart.BgmOffset, playbackRate);
             GameplayTiming.RewindToStart(music);
+            ApplyPlaybackRateToAudioSources();
             // Prebuild every chart object at its off-screen perspective
             // position before the scheduled audio begins. Only objects near
             // the visible waterfall are kept active; the pool absorbs the
             // first activation without rendering the whole chart at once.
             lastObservedSongTime = GameplayTiming.ChartTimeAtDsp(
-                rawDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+                rawDspTime, scheduledDsp, accumulatedPause, chart.BgmOffset, playbackRate);
             presentationClock.Reset(rawDspTime, realtime);
             ResetFramePacingDiagnostics(rawDspTime, rawDspTime);
             SetGameplayStageVisible(true);
@@ -2502,10 +2537,13 @@ namespace Gugarhythm
             {
                 var nextDsp = AudioSettings.dspTime + .25;
                 var clipTime = GameplayTiming.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
-                var playbackDsp = GameplayTiming.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds);
+                var playbackDsp = GameplayTiming.PlaybackDspForChartTime(
+                    nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, playbackRate);
                 music.Stop();
                 GameplayTiming.ApplyClipTime(music, clipTime);
-                scheduledDsp = GameplayTiming.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
+                ApplyPlaybackRateToAudioSources();
+                scheduledDsp = GameplayTiming.ScheduledDspForRecovery(
+                    nextDsp, interruptedSongTime, chart.BgmOffset, playbackRate);
                 accumulatedPause = 0;
                 music.PlayScheduled(playbackDsp);
                 resumeNeedsAudioReschedule = false;
@@ -2732,7 +2770,7 @@ namespace Gugarhythm
         }
 
         double CurrentSongTime() => GameplayTiming.ChartTimeAtDsp(
-            AudioSettings.dspTime, scheduledDsp, accumulatedPause, chart.BgmOffset);
+            AudioSettings.dspTime, scheduledDsp, accumulatedPause, chart.BgmOffset, playbackRate);
 
         double CurrentInputSongTime() => GameplayTiming.ApplyInputOffset(CurrentSongTime(), inputOffsetSeconds);
 
@@ -2951,7 +2989,8 @@ namespace Gugarhythm
 
         double InputEventSongTime(double inputTime) =>
             GameplayTiming.ApplyInputOffset(
-                GameplayTiming.ChartTimeAtDsp(InputEventDspTime(inputTime), scheduledDsp, accumulatedPause, chart.BgmOffset),
+                GameplayTiming.ChartTimeAtDsp(
+                    InputEventDspTime(inputTime), scheduledDsp, accumulatedPause, chart.BgmOffset, playbackRate),
                 inputOffsetSeconds);
 
         static float ScreenToCanvasY(float screenY) => (screenY / Math.Max(1, Screen.height) - .5f) * CanvasHeight;
@@ -4249,6 +4288,7 @@ namespace Gugarhythm
             holdEffects.spatialBlend = 0;
             holdEffects.loop = true;
             holdEffects.volume = 0;
+            ApplyPlaybackRateToAudioSources();
             for (var index = 0; index < calibrationTickSources.Length; index++)
             {
                 var source = gameObject.AddComponent<AudioSource>();
@@ -5090,6 +5130,7 @@ namespace Gugarhythm
 
             FillSettingsContentPanel(settingsAudioPanel);
             FillSettingsContentPanel(settingsGamePanel);
+            FillSettingsContentPanel(settingsAdvancedPanel);
             FillSettingsContentPanel(settingsTagsPanel);
             FillSettingsContentPanel(settingsAccountPanel);
             FillSettingsContentPanel(settingsDebugPanel);
@@ -5101,6 +5142,7 @@ namespace Gugarhythm
         {
             if (settingsAudioPanel != null && settingsAudioPanel.gameObject.activeSelf) return settingsAudioPanel;
             if (settingsGamePanel != null && settingsGamePanel.gameObject.activeSelf) return settingsGamePanel;
+            if (settingsAdvancedPanel != null && settingsAdvancedPanel.gameObject.activeSelf) return settingsAdvancedPanel;
             if (settingsTagsPanel != null && settingsTagsPanel.gameObject.activeSelf) return settingsTagsPanel;
             if (settingsAccountPanel != null && settingsAccountPanel.gameObject.activeSelf) return settingsAccountPanel;
             if (settingsDebugPanel != null && settingsDebugPanel.gameObject.activeSelf) return settingsDebugPanel;
@@ -5460,8 +5502,9 @@ namespace Gugarhythm
 
             settingsAudioNavigationButton = MakeFlatButton("音訊", settingsNavigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
             settingsGameNavigationButton = MakeFlatButton("遊戲", settingsNavigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsTagsNavigationButton = MakeFlatButton("標籤", settingsNavigation, new Vector2(0, 125), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsAccountNavigationButton = MakeFlatButton("帳號", settingsNavigation, new Vector2(0, 45), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsAdvancedNavigationButton = MakeFlatButton("進階", settingsNavigation, new Vector2(0, 125), ShowSettingsAdvanced, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsTagsNavigationButton = MakeFlatButton("標籤", settingsNavigation, new Vector2(0, 45), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsAccountNavigationButton = MakeFlatButton("帳號", settingsNavigation, new Vector2(0, -35), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             var card = Panel("Settings Audio Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
 
             settingsAudioPanel = card;
@@ -5665,6 +5708,29 @@ namespace Gugarhythm
             gameScroll.content = gameContent;
             gameScroll.verticalNormalizedPosition = 1f;
             settingsGamePanel.gameObject.SetActive(false);
+
+            settingsAdvancedPanel = Panel("Settings Advanced Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f),
+                new Vector2(1030, 760), Vector2.zero);
+            Fill(settingsAdvancedPanel);
+            const float AdvancedSliderWidth = 650f;
+            var overallSpeedTitle = Label("整體速度", settingsAdvancedPanel, 24);
+            overallSpeedTitle.alignment = TextAnchor.MiddleLeft;
+            overallSpeedTitle.rectTransform.sizeDelta = new Vector2(760f, 42);
+            overallSpeedTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
+            overallSpeedSlider = MakeSlider(settingsAdvancedPanel, new Vector2(-25f, 215),
+                GameplayTiming.MinimumPlaybackRate, GameplayTiming.MaximumPlaybackRate, playbackRate,
+                SetOverallSpeed, new Vector2(18, 28));
+            overallSpeedSlider.GetComponent<RectTransform>().sizeDelta = new Vector2(AdvancedSliderWidth, 18);
+            overallSpeedLabel = Label("", settingsAdvancedPanel, 20);
+            overallSpeedLabel.rectTransform.sizeDelta = new Vector2(700f, 36);
+            overallSpeedLabel.rectTransform.anchoredPosition = new Vector2(0, 150);
+            var overallSpeedHint = Label("調整整局游玩與音樂／按鍵音的播放倍率。", settingsAdvancedPanel, 18);
+            overallSpeedHint.alignment = TextAnchor.MiddleLeft;
+            overallSpeedHint.color = new Color(.66f, .66f, .66f);
+            overallSpeedHint.rectTransform.sizeDelta = new Vector2(900f, 36);
+            overallSpeedHint.rectTransform.anchoredPosition = new Vector2(0, 95);
+            SetOverallSpeed(playbackRate);
+            settingsAdvancedPanel.gameObject.SetActive(false);
 
             settingsTagsPanel = Panel("Settings Tags Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
             Fill(settingsTagsPanel);

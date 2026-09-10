@@ -6,14 +6,32 @@ namespace Gugarhythm
     /// <summary>
     /// Owns the conversion between the chart clock and audio playback phase.
     /// The device offset intentionally never participates in chart-time mapping.
+    /// <paramref name="playbackRate"/> scales wall-clock DSP elapsed time into chart
+    /// time so AudioSource.pitch stays locked to note timing.
     /// </summary>
     public static class GameplayTiming
     {
-        public static double ChartTimeAtDsp(double dspTime, double scheduledDsp, double accumulatedPause,
-            double chartBgmOffset) => dspTime - scheduledDsp - accumulatedPause - chartBgmOffset;
+        public const float DefaultPlaybackRate = 1f;
+        public const float MinimumPlaybackRate = .5f;
+        public const float MaximumPlaybackRate = 2f;
 
-        public static double ScheduledDspForChartTime(double nextDsp, double chartTime, double chartBgmOffset) =>
-            nextDsp - chartTime - chartBgmOffset;
+        public static float ClampPlaybackRate(float rate) =>
+            float.IsFinite(rate)
+                ? Mathf.Clamp(rate, MinimumPlaybackRate, MaximumPlaybackRate)
+                : DefaultPlaybackRate;
+
+        public static double NormalizePlaybackRate(double rate) =>
+            double.IsFinite(rate) && rate > 0
+                ? Math.Clamp(rate, MinimumPlaybackRate, MaximumPlaybackRate)
+                : DefaultPlaybackRate;
+
+        public static double ChartTimeAtDsp(double dspTime, double scheduledDsp, double accumulatedPause,
+            double chartBgmOffset, double playbackRate = DefaultPlaybackRate) =>
+            NormalizePlaybackRate(playbackRate) * (dspTime - scheduledDsp - accumulatedPause) - chartBgmOffset;
+
+        public static double ScheduledDspForChartTime(double nextDsp, double chartTime, double chartBgmOffset,
+            double playbackRate = DefaultPlaybackRate) =>
+            nextDsp - (chartTime + chartBgmOffset) / NormalizePlaybackRate(playbackRate);
 
         public static double PlaybackDspForSchedule(double scheduledDsp, double deviceOffset) =>
             scheduledDsp + deviceOffset;
@@ -65,10 +83,15 @@ namespace Gugarhythm
         }
 
         public static double PlaybackDspForChartTime(double nextDsp, double chartTime, double chartBgmOffset,
-            double deviceOffset) => nextDsp + Math.Max(0, -chartTime - chartBgmOffset + deviceOffset);
+            double deviceOffset, double playbackRate = DefaultPlaybackRate)
+        {
+            var rate = NormalizePlaybackRate(playbackRate);
+            return nextDsp + Math.Max(0, (-chartTime - chartBgmOffset + deviceOffset) / rate);
+        }
 
-        public static double ScheduledDspForRecovery(double nextDsp, double chartTime, double chartBgmOffset) =>
-            ScheduledDspForChartTime(nextDsp, chartTime, chartBgmOffset);
+        public static double ScheduledDspForRecovery(double nextDsp, double chartTime, double chartBgmOffset,
+            double playbackRate = DefaultPlaybackRate) =>
+            ScheduledDspForChartTime(nextDsp, chartTime, chartBgmOffset, playbackRate);
 
         public static double ReplaceDeviceOffset(double replacementOffset) =>
             double.IsFinite(replacementOffset) ? Math.Clamp(replacementOffset, -.3, .3) : 0;

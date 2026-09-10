@@ -5017,6 +5017,10 @@ public static class RuntimeValidation
                 Math.Abs(GameplayTiming.PlaybackDspForChartTime(400, -.4, .3, .1) - 400.2) < .0001 &&
                 Math.Abs(GameplayTiming.ScheduledDspForRecovery(400, 100, 0) - 300) < .0001,
             "Playback recovery must preserve the established device-offset sign and chart anchor");
+        Require(Math.Abs(GameplayTiming.ChartTimeAtDsp(202, 200, 0, .5, 2) - 3.5) < .0001 &&
+                Math.Abs(GameplayTiming.ScheduledDspForChartTime(400, 10, .3, 2) - 394.85) < .0001 &&
+                Math.Abs(GameplayTiming.PlaybackDspForChartTime(400, -.4, .3, .1, 2) - 400.1) < .0001,
+            "Playback rate must scale chart time against DSP elapsed while preserving clip mapping");
         var seekableEnd = GameplayTiming.SeekableClipTime(60f, 60f, 44100 * 60, 44100);
         Require(seekableEnd < 60f && seekableEnd >= 60f - 0.03f,
             "Seekable clip time must stop short of the inclusive FMOD end");

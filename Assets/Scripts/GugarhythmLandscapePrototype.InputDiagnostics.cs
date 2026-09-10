@@ -20,7 +20,7 @@ namespace Gugarhythm
         {
             // Keep DEBUG below the player-facing account menu; the previous
             // shared position constructed DEBUG last and made 帳號 impossible to see or press.
-            settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, -35),
+            settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, -115),
                 ShowSettingsDebug, new Vector2(220, 68), new Color(.18f, .18f, .18f));
             settingsDebugPanel = Panel("Settings Debug Panel", settingsContentInner,
                 new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
@@ -82,28 +82,18 @@ namespace Gugarhythm
 
         void ShowSettingsDebug()
         {
-            if (settingsAudioPanel == null || settingsGamePanel == null ||
-                settingsTagsPanel == null || settingsAccountPanel == null || settingsDebugPanel == null) return;
-            settingsAudioPanel.gameObject.SetActive(false);
-            settingsGamePanel.gameObject.SetActive(false);
-            settingsTagsPanel.gameObject.SetActive(false);
-            settingsAccountPanel.gameObject.SetActive(false);
+            if (settingsDebugPanel == null) return;
+            HideAllSettingsContentPanels();
             settingsDebugPanel.gameObject.SetActive(true);
-            SetSettingsNavigationColor(settingsAudioNavigationButton, false);
-            SetSettingsNavigationColor(settingsGameNavigationButton, false);
-            SetSettingsNavigationColor(settingsTagsNavigationButton, false);
-            SetSettingsNavigationColor(settingsAccountNavigationButton, false);
-            SetSettingsNavigationColor(settingsDebugNavigationButton, true);
+            SetSettingsNavigationSelection(settingsDebugNavigationButton);
             RefreshInputDiagnosticsSettingsStatus();
-        
             ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
-}
+        }
 
         void HideInputDiagnosticsSettings()
         {
             if (settingsDebugPanel != null) settingsDebugPanel.gameObject.SetActive(false);
-            SetSettingsNavigationColor(settingsDebugNavigationButton, false);
         }
 
         static void SetSettingsNavigationColor(Button button, bool selected)
