@@ -11,9 +11,9 @@ namespace Gugarhythm
     // per-target clip cost every frame the note moves — which is every
     // frame. Geometry here is submitted directly in the batch's own local
     // space (the batch RectTransform is Filled to match its layer, same as
-    // NoteParticleBatchGraphic), so quads need no per-note RectTransform to
-    // anchor to; only Flick's arrow overlay still needs one and keeps using
-    // the pooled HorizontalSlicedRawImage path instead of this batch.
+    // NoteParticleBatchGraphic), so quads need no per-note RectTransform.
+    // Flick bodies and persistent Hold heads also draw here; Flick arrows
+    // use FlickArrowBatchGraphic.
     public sealed class NoteBodyBatchGraphic : MaskableGraphic
     {
         public Texture texture;
@@ -32,13 +32,7 @@ namespace Gugarhythm
 
         public void Prepare(int quadCapacity)
         {
-            quadCapacity = Mathf.Max(0, quadCapacity);
-            if (capacity >= quadCapacity) return;
-            capacity = quadCapacity;
-            Array.Resize(ref upperLefts, capacity);
-            Array.Resize(ref upperRights, capacity);
-            Array.Resize(ref lowerRights, capacity);
-            Array.Resize(ref lowerLefts, capacity);
+            EnsureCapacity(Mathf.Max(0, quadCapacity), quiet: true);
         }
 
         public void BeginFrame()
@@ -49,7 +43,7 @@ namespace Gugarhythm
 
         public void AddQuad(Vector2 upperLeft, Vector2 upperRight, Vector2 lowerRight, Vector2 lowerLeft)
         {
-            if (activeCount >= capacity) return;
+            EnsureCapacity(activeCount + 1, quiet: false);
             upperLefts[activeCount] = upperLeft;
             upperRights[activeCount] = upperRight;
             lowerRights[activeCount] = lowerRight;
@@ -78,6 +72,20 @@ namespace Gugarhythm
                 AddSlicedQuad(helper, upperLefts[index], upperRights[index], lowerRights[index], lowerLefts[index], ratio);
         }
 
+        void EnsureCapacity(int needed, bool quiet)
+        {
+            if (capacity >= needed) return;
+            var next = capacity <= 0 ? Mathf.Max(8, needed) : capacity;
+            while (next < needed) next *= 2;
+            if (!quiet && capacity > 0)
+                Debug.LogWarning($"NoteBodyBatchGraphic grew from {capacity} to {next}; Prepare underestimated note body quads.");
+            capacity = next;
+            Array.Resize(ref upperLefts, capacity);
+            Array.Resize(ref upperRights, capacity);
+            Array.Resize(ref lowerRights, capacity);
+            Array.Resize(ref lowerLefts, capacity);
+        }
+
         void AddSlicedQuad(VertexHelper helper, Vector2 upperLeft, Vector2 upperRight, Vector2 lowerRight, Vector2 lowerLeft, float ratio)
         {
             if (ratio <= .001f || texture == null)
@@ -85,9 +93,6 @@ namespace Gugarhythm
                 AddSurfaceQuad(helper, upperLeft, upperRight, lowerRight, lowerLeft, 0, 1);
                 return;
             }
-            // Mirrors HorizontalSlicedRawImage.AddSurfaceSlices exactly, minus
-            // the horizontalStart/End clipping range: every note here always
-            // submits the full 0..1 span, so that parameter is dropped.
             var averageHeight = ((upperLeft - lowerLeft).magnitude + (upperRight - lowerRight).magnitude) * .5f;
             var widestEdge = Mathf.Max((upperRight - upperLeft).magnitude, (lowerRight - lowerLeft).magnitude);
             if (widestEdge <= .0001f) return;

@@ -98,10 +98,13 @@ public final class GugaHapticFeedback {
 
     private static void vibrateWave(Vibrator vibrator, VibrationEffect effect) {
         if (effect == null) return;
+        // USAGE_TOUCH is the stable haptic usage on API 33+ stubs shipped with
+        // Unity's Android toolchain; USAGE_GAME is missing from some SDK jars
+        // and fails javac even when compileSdk is 36.
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
             vibrator.vibrate(
                     effect,
-                    VibrationAttributes.createForUsage(VibrationAttributes.USAGE_GAME));
+                    VibrationAttributes.createForUsage(VibrationAttributes.USAGE_TOUCH));
         } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
             vibrator.vibrate(effect);
         } else {

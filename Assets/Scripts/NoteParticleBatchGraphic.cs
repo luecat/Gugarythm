@@ -25,11 +25,7 @@ namespace Gugarhythm
 
         public void Prepare(int quadCapacity)
         {
-            quadCapacity = Mathf.Max(0, quadCapacity);
-            if (capacity >= quadCapacity) return;
-            capacity = quadCapacity;
-            Array.Resize(ref centers, capacity);
-            Array.Resize(ref sizes, capacity);
+            EnsureCapacity(Mathf.Max(0, quadCapacity), quiet: true);
         }
 
         public void BeginFrame()
@@ -40,11 +36,23 @@ namespace Gugarhythm
 
         public void AddQuad(Vector2 center, Vector2 size)
         {
-            if (activeCount >= capacity) return;
+            EnsureCapacity(activeCount + 1, quiet: false);
             centers[activeCount] = center;
             sizes[activeCount] = size;
             activeCount++;
             AddHash(center.x); AddHash(center.y); AddHash(size.x); AddHash(size.y);
+        }
+
+        void EnsureCapacity(int needed, bool quiet)
+        {
+            if (capacity >= needed) return;
+            var next = capacity <= 0 ? Mathf.Max(8, needed) : capacity;
+            while (next < needed) next *= 2;
+            if (!quiet && capacity > 0)
+                Debug.LogWarning($"NoteParticleBatchGraphic grew from {capacity} to {next}; Prepare underestimated particle quads.");
+            capacity = next;
+            Array.Resize(ref centers, capacity);
+            Array.Resize(ref sizes, capacity);
         }
 
         public void EndFrame()

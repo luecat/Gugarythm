@@ -76,25 +76,28 @@ namespace Gugarhythm
         public void QueryNotes(double visualTime, double behind, double ahead, List<RuntimeNote> output)
         {
             Query(notes, visualTime, behind, ahead, false, output);
-            output.Sort(NoteOrder);
+            // Single TimeScale group: Seal already ordered entries by visual Min,
+            // which matches chart-time order for forward groups; skip the O(V log V)
+            // merge sort that only matters when multiple groups interleave.
+            if (notes.Count > 1) output.Sort(NoteOrder);
         }
 
         public void QueryNotes(VisualFrameContext frame, double behind, double ahead, List<RuntimeNote> output)
         {
             Query(notes, frame, behind, ahead, false, output);
-            output.Sort(NoteOrder);
+            if (notes.Count > 1) output.Sort(NoteOrder);
         }
 
         public void QueryHoldRuns(double visualTime, double behind, double ahead, List<HoldRenderRun> output)
         {
             Query(holdRuns, visualTime, behind, ahead, true, output);
-            output.Sort(HoldOrder);
+            if (holdRuns.Count > 1) output.Sort(HoldOrder);
         }
 
         public void QueryHoldRuns(VisualFrameContext frame, double behind, double ahead, List<HoldRenderRun> output)
         {
             Query(holdRuns, frame, behind, ahead, true, output);
-            output.Sort(HoldOrder);
+            if (holdRuns.Count > 1) output.Sort(HoldOrder);
         }
 
         public void QuerySimLines(double visualTime, double behind, double ahead, List<RuntimeSimLine> output)
@@ -112,6 +115,7 @@ namespace Gugarhythm
         public void QueryGuides(double visualTime, double behind, double ahead, List<RuntimeGuide> output)
         {
             Query(guides, visualTime, behind, ahead, true, output);
+            // Guide draw order follows authoring index, not visual Min — always sort.
             output.Sort(guideOrderComparison);
         }
 

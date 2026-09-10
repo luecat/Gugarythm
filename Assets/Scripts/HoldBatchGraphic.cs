@@ -60,10 +60,16 @@ namespace Gugarhythm
 
         public void BeginPath(int pointCount)
         {
-            if (activePathCount >= paths.Length) return;
+            EnsurePathCapacity(activePathCount + 1);
             activePath = activePathCount++;
             var path = paths[activePath];
-            path.Count = expectedPointCount = Mathf.Min(Mathf.Max(0, pointCount), path.Centers.Length);
+            var neededPoints = Mathf.Max(0, pointCount);
+            if (path.Centers.Length < neededPoints)
+            {
+                Debug.LogWarning($"HoldBatchGraphic path grew points from {path.Centers.Length} to {neededPoints}; Prepare underestimated tessellation.");
+                path.Prepare(neededPoints);
+            }
+            path.Count = expectedPointCount = neededPoints;
             AddHash(expectedPointCount);
         }
 
@@ -80,6 +86,24 @@ namespace Gugarhythm
                 ? 0
                 : path.Lengths[index - 1] + Vector2.Distance(path.Centers[index - 1], center);
             AddHash(center.x); AddHash(center.y); AddHash(path.Widths[index]);
+        }
+
+        void EnsurePathCapacity(int needed)
+        {
+            if (paths.Length >= needed) return;
+            var oldLength = paths.Length;
+            var next = oldLength <= 0 ? Mathf.Max(4, needed) : oldLength;
+            while (next < needed) next *= 2;
+            if (oldLength > 0)
+                Debug.LogWarning($"HoldBatchGraphic grew paths from {oldLength} to {next}; Prepare underestimated Hold path count.");
+            Array.Resize(ref paths, next);
+            var pointCapacity = oldLength > 0 ? paths[0].Centers.Length : AdaptiveHoldTessellator.MaxPointsPerRun;
+            if (pointCapacity < 2) pointCapacity = 2;
+            for (var index = oldLength; index < paths.Length; index++)
+            {
+                paths[index] = new PathBuffer();
+                paths[index].Prepare(pointCapacity);
+            }
         }
 
         public void EndPath() => activePath = -1;

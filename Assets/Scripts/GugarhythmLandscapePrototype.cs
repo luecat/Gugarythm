@@ -440,13 +440,10 @@ namespace Gugarhythm
         readonly Dictionary<int, NoteBodyVisual> noteBodyVisualCache = new();
         readonly Dictionary<Texture2D, int> traceBodyCapacityByTexture = new();
         readonly Dictionary<Texture2D, int> noteBodyCapacityByTexture = new();
-        readonly Dictionary<int, HorizontalSlicedRawImage> persistentHoldHeadViews = new();
         readonly HashSet<int> renderedPersistentHoldHeads = new();
         readonly HashSet<int> renderedNoteIds = new();
-        readonly HashSet<RuntimeSimLine> renderedSimLines = new();
         readonly Dictionary<HoldRenderRun, TaperedConnectorGraphic> holdRunViews = new();
         readonly Dictionary<RuntimeConnector, TaperedConnectorGraphic> connectorViews = new();
-        readonly Dictionary<RuntimeSimLine, SimLineGraphic> simLineViews = new();
         readonly Dictionary<RuntimeGuide, TaperedConnectorGraphic> guideViews = new();
         readonly Dictionary<int, RuntimeNote> holdRoots = new();
         readonly Dictionary<int, List<RuntimeNote>> holdCheckpoints = new();
@@ -454,8 +451,10 @@ namespace Gugarhythm
         readonly HoldJudgmentAudioState holdAudioState = new();
         readonly Stack<HorizontalSlicedRawImage> notePool = new();
         readonly Stack<TaperedConnectorGraphic> connectorPool = new();
-        readonly Stack<SimLineGraphic> simLinePool = new();
         readonly Stack<TaperedConnectorGraphic> guidePool = new();
+        readonly Dictionary<Texture2D, FlickArrowBatchGraphic> flickArrowBatches = new();
+        readonly Dictionary<Texture2D, int> flickArrowCapacityByTexture = new();
+        SimLineBatchGraphic simLineBatch;
         readonly Dictionary<int, TouchMemory> touches = new();
         readonly TouchInputBuffer touchInputBuffer = new();
         readonly List<BufferedTouchSample> bufferedTouchSamples = new(32);
@@ -481,10 +480,8 @@ namespace Gugarhythm
         readonly HashSet<HoldRenderRun> exactCpuHoldRuns = new();
         readonly Dictionary<RuntimeHoldPath, HoldRenderCache> holdRenderCaches = new();
         readonly List<int> noteViewReleaseKeys = new();
-        readonly List<int> persistentHeadReleaseKeys = new();
         readonly List<HoldRenderRun> holdRunReleaseKeys = new();
         readonly List<RuntimeConnector> connectorReleaseKeys = new();
-        readonly List<RuntimeSimLine> simLineReleaseKeys = new();
         readonly List<RuntimeGuide> guideReleaseKeys = new();
         readonly ScoreState scoreState = new();
         readonly List<IChartImporter> importers = new() { new GgrChartImporter() };
@@ -2606,22 +2603,34 @@ namespace Gugarhythm
             traceDiamondYellowBatch?.Prepare(traceYellowCapacity);
             traceBodyCapacityByTexture.Clear();
             noteBodyCapacityByTexture.Clear();
+            flickArrowCapacityByTexture.Clear();
             foreach (var note in chart.Notes)
             {
-                // Flick keeps its own pooled per-note view (see UpdateVisuals),
-                // so it never draws from a body batch and must not reserve
-                // capacity here.
-                if (note.IsHoldMidArchetype || note.Kind == RuntimeNoteKind.Flick) continue;
+                if (note.IsHoldMidArchetype) continue;
                 var body = ResolveNoteBodyVisual(note).Body;
-                if (body == null) continue;
-                var capacities = note.IsTraceArchetype ? traceBodyCapacityByTexture : noteBodyCapacityByTexture;
-                capacities.TryGetValue(body, out var count);
-                capacities[body] = count + 1;
+                if (body != null)
+                {
+                    var capacities = IsTrace(note) ? traceBodyCapacityByTexture : noteBodyCapacityByTexture;
+                    capacities.TryGetValue(body, out var count);
+                    capacities[body] = count + 1;
+                }
+                if (note.Kind == RuntimeNoteKind.Flick)
+                {
+                    var arrow = ResolveFlickArrowTexture(note);
+                    if (arrow != null)
+                    {
+                        flickArrowCapacityByTexture.TryGetValue(arrow, out var arrowCount);
+                        flickArrowCapacityByTexture[arrow] = arrowCount + 1;
+                    }
+                }
             }
             foreach (var pair in traceBodyBatches)
                 pair.Value.Prepare(traceBodyCapacityByTexture.TryGetValue(pair.Key, out var traceCapacity) ? traceCapacity : 0);
             foreach (var pair in noteBodyBatches)
                 pair.Value.Prepare(noteBodyCapacityByTexture.TryGetValue(pair.Key, out var capacity) ? capacity : 0);
+            foreach (var pair in flickArrowBatches)
+                pair.Value.Prepare(flickArrowCapacityByTexture.TryGetValue(pair.Key, out var arrowCapacity) ? arrowCapacity : 0);
+            simLineBatch?.Prepare(Mathf.Max(8, chart.SimLines.Count));
             if (gpuRibbonRenderer == null || !ReferenceEquals(gpuRibbonRenderer.Chart, chart))
             {
                 gpuRibbonRenderer?.Dispose();
@@ -3064,7 +3073,7 @@ namespace Gugarhythm
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled) SimLinesProfiler.Begin();
 #endif
-            renderedSimLines.Clear();
+            simLineBatch?.BeginFrame();
             chartRenderIndex.QuerySimLines(visualFrameContext, 0,
                 SimLineIndexAhead(ApproachDuration, CanvasHeight), visibleSimLines);
             foreach (var simLine in visibleSimLines)
@@ -3078,16 +3087,9 @@ namespace Gugarhythm
                 var leadingApproach = Mathf.Max(aApproach, bApproach);
                 var trailingApproach = Mathf.Min(aApproach, bApproach);
                 var visible = Mathf.Min(aY, bY) <= TopY + 8 && HasVisibleDecorationSegment(leadingApproach, trailingApproach);
-                if (!visible)
-                {
-                    continue;
-                }
-                renderedSimLines.Add(simLine);
-                if (!simLineViews.TryGetValue(simLine, out var line))
-                {
-                    line = AcquireSimLine();
-                    simLineViews[simLine] = line;
-                }
+                if (!visible) continue;
+                Vector2 startPoint;
+                Vector2 endPoint;
                 if (aApproach > 1 || bApproach > 1)
                 {
                     var clippedProgress = Mathf.InverseLerp(aApproach, bApproach, 1);
@@ -3095,25 +3097,25 @@ namespace Gugarhythm
                     if (aApproach > 1) { aScreen = 1; aY = HitY; }
                     else { bScreen = 1; bY = HitY; }
                     if (aApproach > 1)
-                        line.SetGeometry(new Vector2(X(clippedLane, aScreen), aY), new Vector2(X(simLine.B.Lane, bScreen), bY),
-                            Mathf.Lerp(.65f, 2.25f, Mathf.Clamp01((aScreen + bScreen) * .5f)));
+                    {
+                        startPoint = new Vector2(X(clippedLane, aScreen), aY);
+                        endPoint = new Vector2(X(simLine.B.Lane, bScreen), bY);
+                    }
                     else
-                        line.SetGeometry(new Vector2(X(simLine.A.Lane, aScreen), aY), new Vector2(X(clippedLane, bScreen), bY),
-                            Mathf.Lerp(.65f, 2.25f, Mathf.Clamp01((aScreen + bScreen) * .5f)));
-                    continue;
+                    {
+                        startPoint = new Vector2(X(simLine.A.Lane, aScreen), aY);
+                        endPoint = new Vector2(X(clippedLane, bScreen), bY);
+                    }
+                }
+                else
+                {
+                    startPoint = new Vector2(X(simLine.A.Lane, aScreen), aY);
+                    endPoint = new Vector2(X(simLine.B.Lane, bScreen), bY);
                 }
                 var depth = Mathf.Clamp01((aScreen + bScreen) * .5f);
-                line.SetGeometry(
-                    new Vector2(X(simLine.A.Lane, aScreen), aY),
-                    new Vector2(X(simLine.B.Lane, bScreen), bY),
-                    Mathf.Lerp(.65f, 2.25f, depth));
+                simLineBatch?.AddLine(startPoint, endPoint, Mathf.Lerp(.65f, 2.25f, depth));
             }
-
-            simLineReleaseKeys.Clear();
-            foreach (var pair in simLineViews)
-                if (!renderedSimLines.Contains(pair.Key)) simLineReleaseKeys.Add(pair.Key);
-            foreach (var simLine in simLineReleaseKeys)
-                if (simLineViews.TryGetValue(simLine, out var line)) ReleaseSimLine(simLine, line);
+            simLineBatch?.EndFrame();
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled) SimLinesProfiler.End();
@@ -3132,6 +3134,7 @@ namespace Gugarhythm
             traceDiamondYellowBatch?.BeginFrame();
             foreach (var pair in traceBodyBatches) pair.Value.BeginFrame();
             foreach (var pair in noteBodyBatches) pair.Value.BeginFrame();
+            foreach (var pair in flickArrowBatches) pair.Value.BeginFrame();
             chartRenderIndex.QueryNotes(visualFrameContext, NoteQueryBehindMargin(ApproachDuration), ApproachDuration * 2, visibleNotes);
             foreach (var note in visibleNotes)
             {
@@ -3169,78 +3172,40 @@ namespace Gugarhythm
                     ? BuildHoldHeadSurface(note.Lane, renderSize, screenProgress, height)
                     : BuildNoteSurfaceQuad(note.Lane, renderSize, screenProgress, height);
 
+                if (!noteBodyVisualCache.TryGetValue(note.Index, out var visual))
+                {
+                    visual = ResolveNoteBodyVisual(note);
+                    noteBodyVisualCache[note.Index] = visual;
+                }
+                // Tap/Trace/Sustain/Damage/Hold-head/Flick bodies never need
+                // their own RectTransform; they draw into the shared
+                // per-texture batch. Flick arrows use FlickArrowBatchGraphic.
+                var bodyBatches = IsTrace(note) ? traceBodyBatches : noteBodyBatches;
+                if (visual.Body != null && bodyBatches.TryGetValue(visual.Body, out var bodyBatch))
+                    bodyBatch.AddQuad(quad.UpperLeft, quad.UpperRight, quad.LowerRight, quad.LowerLeft);
+                if (visual.TraceDiamond != null && ShouldShowNoteParticle(note, true))
+                {
+                    var particleAspect = visual.TraceDiamond.width / (float)Mathf.Max(1, visual.TraceDiamond.height);
+                    TraceDiamondBatchFor(visual.TraceDiamond)?.AddQuad(
+                        NoteSurfaceQuadCenter(quad), new Vector2(height * particleAspect, height));
+                }
                 if (note.Kind == RuntimeNoteKind.Flick)
                 {
-                    // Flick keeps its own pooled per-note view: its arrow
-                    // overlay animates outward from the note and needs a
-                    // per-note RectTransform to anchor to, so it is not
-                    // worth folding into the shared body batch below.
-                    // Parent into the tier-matched anchor (not noteLayer
-                    // directly) so a Trace-styled Flick still renders under
-                    // the regular-note tier instead of always on top.
-                    if (!noteViews.TryGetValue(note.Index, out var view))
-                    {
-                        view = AcquireNoteView(IsTrace(note) ? traceFlickAnchor : flickAnchor);
-                        noteViews[note.Index] = view;
-                        ApplyNoteTexture(view, note);
-                    }
-                    ApplyNoteSurfaceQuad(view, quad);
-                    view.color = Color.white;
-                    var traceParticle = view.TraceParticle;
-                    if (traceParticle != null && ShouldShowNoteParticle(note, traceParticle.texture != null))
-                    {
-                        var particleTexture = traceParticle.texture;
-                        var particleAspect = particleTexture.width / (float)Mathf.Max(1, particleTexture.height);
-                        TraceDiamondBatchFor(particleTexture)?.AddQuad(
-                            NoteSurfaceQuadCenter(quad), new Vector2(height * particleAspect, height));
-                    }
-                    var flickArrow = view.FlickArrow;
-                    if (flickArrow != null && flickArrow.gameObject.activeSelf && flickArrow.texture != null)
+                    var arrowTexture = ResolveFlickArrowTexture(note);
+                    if (arrowTexture != null && flickArrowBatches.TryGetValue(arrowTexture, out var arrowBatch))
                     {
                         var spriteIndex = FlickSpriteIndex(note.Size);
                         var arrowBaseWidth = LaneWidth(note.Lane, Mathf.Min(note.Size, 3f) * .5f, screenProgress) * FlickArrowScale;
                         var logicalSize = FlickLogicalSizes[spriteIndex];
-                        var arrowWidth = arrowBaseWidth * flickArrow.texture.width / logicalSize;
-                        var arrowHeight = arrowBaseWidth * flickArrow.texture.height / logicalSize;
-                        // The source layout is logically square, but its atlas crop
-                        // is not. Applying the width expansion to both axes was the
-                        // reason side arrows became huge and vertically stretched.
-                        flickArrow.rectTransform.sizeDelta = new Vector2(arrowWidth, arrowHeight);
-                        var animationProgress = Mathf.Repeat(Time.unscaledTime, .5f) / .5f;
+                        var arrowWidth = arrowBaseWidth * arrowTexture.width / logicalSize;
+                        var arrowHeight = arrowBaseWidth * arrowTexture.height / logicalSize;
                         var laneUnit = LaneWidth(0, 1f, screenProgress) * .5f;
-                        flickArrow.rectTransform.anchoredPosition = new Vector2(
-                            note.Direction * laneUnit * animationProgress,
-                            arrowHeight * .5f + laneUnit * 2 * animationProgress);
-                        flickArrow.color = new Color(1, 1, 1, 1 - animationProgress * animationProgress * animationProgress);
-                    }
-                }
-                else
-                {
-                    // Tap/Trace/Sustain/Damage/Hold-head bodies never need
-                    // their own RectTransform (no child overlay depends on
-                    // one), so they draw straight into the shared per-texture
-                    // batch instead of a pooled view. The texture/Trace
-                    // diamond classification is resolved once per note index
-                    // and cached, matching how ApplyNoteTexture used to run
-                    // only on a pooled view's first acquire rather than every
-                    // frame.
-                    if (!noteBodyVisualCache.TryGetValue(note.Index, out var visual))
-                    {
-                        visual = ResolveNoteBodyVisual(note);
-                        noteBodyVisualCache[note.Index] = visual;
-                    }
-                    // A hold head has no tier of its own: it joins the Trace
-                    // tier or the regular tier exactly like any other note,
-                    // by the same IsTrace check ShouldUseTracePersistentHoldVisual
-                    // already uses for the anchored/Persistent Hold Head state.
-                    var bodyBatches = IsTrace(note) ? traceBodyBatches : noteBodyBatches;
-                    if (visual.Body != null && bodyBatches.TryGetValue(visual.Body, out var bodyBatch))
-                        bodyBatch.AddQuad(quad.UpperLeft, quad.UpperRight, quad.LowerRight, quad.LowerLeft);
-                    if (visual.TraceDiamond != null && ShouldShowNoteParticle(note, true))
-                    {
-                        var particleAspect = visual.TraceDiamond.width / (float)Mathf.Max(1, visual.TraceDiamond.height);
-                        TraceDiamondBatchFor(visual.TraceDiamond)?.AddQuad(
-                            NoteSurfaceQuadCenter(quad), new Vector2(height * particleAspect, height));
+                        arrowBatch.AddArrow(
+                            NoteSurfaceQuadCenter(quad),
+                            new Vector2(arrowWidth, arrowHeight),
+                            note.Direction,
+                            laneUnit,
+                            note.Direction > 0);
                     }
                 }
             }
@@ -3249,22 +3214,11 @@ namespace Gugarhythm
             traceDiamondMintBatch?.EndFrame();
             traceDiamondPinkBatch?.EndFrame();
             traceDiamondYellowBatch?.EndFrame();
-            foreach (var pair in traceBodyBatches) pair.Value.EndFrame();
-            foreach (var pair in noteBodyBatches) pair.Value.EndFrame();
-            // Flick keeps SetAsLastSibling on acquire (see AcquireNoteView),
-            // which would otherwise draw a newly acquired Flick body over the
-            // particle tier. Keep the particle layer pinned above every note
-            // body without touching per-note sibling order; skip the reorder
-            // on frames where nothing new was acquired so it doesn't dirty
-            // the Canvas every frame.
+            // Keep note/trace body batches open through Hold persistent-head
+            // rendering so heads share the same CanvasRenderer set.
+            foreach (var pair in flickArrowBatches) pair.Value.EndFrame();
             if (particleLayer != null && particleLayer.GetSiblingIndex() != noteLayer.childCount - 1)
                 particleLayer.SetAsLastSibling();
-
-            noteViewReleaseKeys.Clear();
-            foreach (var pair in noteViews)
-                if (!renderedNoteIds.Contains(pair.Key)) noteViewReleaseKeys.Add(pair.Key);
-            foreach (var key in noteViewReleaseKeys)
-                if (noteViews.TryGetValue(key, out var oldView)) ReleaseNoteView(key, oldView);
 
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled) NotesProfiler.End();
@@ -3331,11 +3285,8 @@ namespace Gugarhythm
                 missedHoldGreenBatch.EndFrame();
                 missedHoldYellowBatch.EndFrame();
             }
-            persistentHeadReleaseKeys.Clear();
-            foreach (var pair in persistentHoldHeadViews)
-                if (!renderedPersistentHoldHeads.Contains(pair.Key)) persistentHeadReleaseKeys.Add(pair.Key);
-            foreach (var key in persistentHeadReleaseKeys)
-                if (persistentHoldHeadViews.TryGetValue(key, out var oldHead)) ReleasePersistentHoldHead(key, oldHead);
+            foreach (var pair in traceBodyBatches) pair.Value.EndFrame();
+            foreach (var pair in noteBodyBatches) pair.Value.EndFrame();
 #if UNITY_EDITOR || DEVELOPMENT_BUILD
             if (performanceDiagnosticsEnabled)
             {
@@ -3465,23 +3416,7 @@ namespace Gugarhythm
         void RenderPersistentHoldHead(RuntimeNote root, HoldPathSample sample)
         {
             var rootIndex = root.Index;
-            renderedPersistentHoldHeads.Add(rootIndex);
-            if (!persistentHoldHeadViews.TryGetValue(rootIndex, out var view))
-            {
-                view = AcquireNoteView(persistentHoldHeadLayer);
-                persistentHoldHeadViews[rootIndex] = view;
-                var trace = ShouldUseTracePersistentHoldVisual(root);
-                var traceKey = root.Critical ? "yellow" : "mint";
-                view.texture = trace
-                    ? traceTextures.TryGetValue(traceKey, out var traceTexture) ? traceTexture : null
-                    : buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var holdTexture) ? holdTexture : null;
-                view.color = Color.white;
-                view.capRatio = NoteCapRatio;
-                var particle = view.TraceParticle;
-                if (particle != null) particle.gameObject.SetActive(false);
-                var flickArrow = view.FlickArrow;
-                if (flickArrow != null) flickArrow.gameObject.SetActive(false);
-            }
+            if (!renderedPersistentHoldHeads.Add(rootIndex)) return;
             var lane = sample.Lane;
             var size = sample.Size;
             var screenProgress = PerspectiveProgress(1f);
@@ -3491,7 +3426,15 @@ namespace Gugarhythm
             var bodyWidth = LaneWidth(lane, size, screenProgress);
             var renderWidth = HoldHeadRenderQuadWidth(bodyWidth, height, root.Critical);
             var renderSize = size * renderWidth / Mathf.Max(.001f, bodyWidth);
-            ApplyNoteSurfaceQuad(view, BuildHoldHeadSurface(lane, renderSize, screenProgress, height));
+            var quad = BuildHoldHeadSurface(lane, renderSize, screenProgress, height);
+            var trace = ShouldUseTracePersistentHoldVisual(root);
+            var traceKey = root.Critical ? "yellow" : "mint";
+            Texture2D body = trace
+                ? (traceTextures.TryGetValue(traceKey, out var traceTexture) ? traceTexture : null)
+                : (buttonTextures.TryGetValue(root.Critical ? "yellow" : "mint", out var holdTexture) ? holdTexture : null);
+            var bodyBatches = trace ? traceBodyBatches : noteBodyBatches;
+            if (body != null && bodyBatches.TryGetValue(body, out var bodyBatch))
+                bodyBatch.AddQuad(quad.UpperLeft, quad.UpperRight, quad.LowerRight, quad.LowerLeft);
         }
 
         bool IsHoldCurrentlyMissed(RuntimeConnector connector)
@@ -4279,6 +4222,11 @@ namespace Gugarhythm
             var guideBatchRect = guideBatchObject.GetComponent<RectTransform>(); guideBatchRect.SetParent(guideLayer, false); Fill(guideBatchRect);
             guideBatch = guideBatchObject.GetComponent<GuideBatchGraphic>(); guideBatch.raycastTarget = false; guideBatch.color = Color.white;
             simLineLayer = Layer("Synchronization Lines", stage);
+            var simLineBatchObject = new GameObject("Synchronization Line Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(SimLineBatchGraphic));
+            var simLineBatchRect = simLineBatchObject.GetComponent<RectTransform>(); simLineBatchRect.SetParent(simLineLayer, false); Fill(simLineBatchRect);
+            simLineBatch = simLineBatchObject.GetComponent<SimLineBatchGraphic>();
+            simLineBatch.raycastTarget = false;
+            simLineBatch.color = new Color(1f, 1f, 1f, .92f);
             noteLayer = Layer("Notes", stage);
             noteUpperHiddenClip = noteLayer.gameObject.AddComponent<RectMask2D>();
             // Trace body (trace-only textures) is the lowest tier inside
@@ -4288,45 +4236,16 @@ namespace Gugarhythm
             // ShouldUseTracePersistentHoldVisual already uses for the
             // anchored/Persistent Hold Head state.
             CreateNoteBodyBatchSet(traceBodyBatches, "Trace Body Batch", includeButtons: false, includeDamage: false);
-            // A Trace-styled Flick's pooled view parents here instead of
-            // noteLayer directly, so it stays at the Trace tier (see
-            // traceFlickAnchor's field comment and UpdateVisuals).
+            // Reserved empty anchors keep historical sibling slots / clip
+            // wiring stable; Flick and persistent Hold heads now batch.
             traceFlickAnchor = Layer("Trace Flick Anchor", noteLayer);
-            // The pooled Persistent Hold Head layer (anchored heads) can be
-            // either style per instance, so it is built here between the two
-            // tiers rather than split further: a Trace-styled anchored head
-            // still draws above the Trace tier, a solid one draws at the
-            // regular tier's position. Two different notes rarely occupy the
-            // exact same screen point, so this is an accepted compromise
-            // rather than a fourth batch set.
             persistentHoldHeadLayer = Layer("Persistent Hold Heads", noteLayer);
             persistentHoldHeadUpperHiddenClip = persistentHoldHeadLayer.gameObject.AddComponent<RectMask2D>();
-            // Regular note bodies (Tap/Sustain/Damage/Critical, and any
-            // solid-styled hold head — never Trace, that is its own tier
-            // below) share one batch per texture instead of a pooled
-            // per-note view: this is the numerically dominant note type in a
-            // dense chart, so it is what actually drove both the draw-call
-            // count and RectMask2D's per-target clip cost on noteLayer.
-            // Flick is the one exception — its arrow overlay still needs a
-            // per-note RectTransform to anchor to, so it keeps the old
-            // pooled-view path, parenting into flickAnchor at this tier
-            // (or traceFlickAnchor at the Trace tier below) instead of
-            // noteLayer directly. Two batched notes of different textures
-            // overlapping the same screen position no longer resolve by
-            // spawn order but by which batch was created first; this is an
-            // accepted, narrow z-order trade against the per-frame
-            // CanvasRenderer and clip cost of giving every body its own view.
             CreateNoteBodyBatchSet(noteBodyBatches, "Note Body Batch", includeTrace: false);
-            // A plain (non-Trace) Flick's pooled view parents here (see
-            // traceFlickAnchor's field comment and UpdateVisuals).
             flickAnchor = Layer("Flick Anchor", noteLayer);
+            CreateFlickArrowBatchSet();
             // Particles (顆粒) — Trace diamonds and Hold mid ticks — are the
-            // topmost tier, above every note body. Both used to be per-note
-            // or bottom-pinned children; batching them into one shared layer
-            // keeps their draw calls low while satisfying the confirmed
-            // order. The layer is kept pinned to the top of noteLayer's
-            // children (see UpdateVisuals) so it stays above Flick's pooled
-            // views too, since those still get SetAsLastSibling'd on acquire.
+            // topmost tier, above every note body and Flick arrow batch.
             particleLayer = Layer("Particle Layer", noteLayer);
             holdMidMintBatch = CreateNoteParticleBatch("Hold Mid Mint Batch", holdMidMintTexture, particleLayer);
             holdMidYellowBatch = CreateNoteParticleBatch("Hold Mid Yellow Batch", holdMidYellowTexture, particleLayer);
@@ -5148,13 +5067,16 @@ namespace Gugarhythm
             var compact = UseCompactMobileChrome;
             var chipSize = compact ? new Vector2(160f, 72f) : new Vector2(146f, 42f);
             var chipGapX = 10f;
+            var chipRowGap = compact ? 12f : 10f;
             var chipCol0 = 34f;
             var chipCol1 = chipCol0 + chipSize.x + chipGapX;
             var brandY = compact ? -28f : -34f;
             var headingY = compact ? -64f : -74f;
             var sourceY = compact ? -120f : -132f;
-            var scopeY = compact ? sourceY - (chipSize.y + 10f) : -184f;
-            var searchTop = compact ? scopeY - (chipSize.y * .5f + 14f) : -248f;
+            var scopeY = compact ? sourceY - (chipSize.y + chipRowGap) : -184f;
+            // Source/scope chips use top-left pivot, so the search bar must
+            // clear the full chip height — not half, which used to cover 公開/私人.
+            var searchTop = compact ? scopeY - chipSize.y - 14f : -248f;
             var searchBottom = searchTop - 56f;
             var sortY = compact ? searchBottom - 34f : -346f;
             var listTop = compact ? sortY - 40f : -396f;
@@ -8126,6 +8048,7 @@ namespace Gugarhythm
             var archetype = note.Archetype ?? string.Empty;
             var trace = IsTrace(note);
             var damage = IsDamage(note);
+            var flick = note.Kind == RuntimeNoteKind.Flick;
             var traceKey = note.Critical ? "yellow" :
                 archetype.IndexOf("Flick", StringComparison.OrdinalIgnoreCase) >= 0 ? "pink" : "mint";
             var buttonKey = note.Critical ? "yellow" :
@@ -8134,6 +8057,8 @@ namespace Gugarhythm
 
             Texture2D body;
             if (damage) body = damageTexture;
+            else if (flick && trace) body = traceTextures.TryGetValue(traceKey, out var traceFlickTexture) ? traceFlickTexture : null;
+            else if (flick) body = buttonTextures.TryGetValue(note.Critical ? "yellow" : "pink", out var flickButtonTexture) ? flickButtonTexture : null;
             else if (trace) body = traceTextures.TryGetValue(traceKey, out var traceTexture) ? traceTexture : null;
             else body = buttonTextures.TryGetValue(buttonKey, out var buttonTexture) ? buttonTexture : null;
 
@@ -8142,6 +8067,15 @@ namespace Gugarhythm
                     traceKey == "pink" ? traceDiamondPinkTexture : traceDiamondMintTexture
                 : null;
             return new NoteBodyVisual(body, traceDiamond);
+        }
+
+        Texture2D ResolveFlickArrowTexture(RuntimeNote note)
+        {
+            var side = note.Direction != 0;
+            var index = FlickSpriteIndex(note.Size);
+            return note.Critical
+                ? side ? flickCriticalSideTextures[index] : flickCriticalCenterTextures[index]
+                : side ? flickNormalSideTextures[index] : flickNormalCenterTextures[index];
         }
 
         void ApplyNoteTexture(HorizontalSlicedRawImage view, RuntimeNote note)
@@ -8200,7 +8134,29 @@ namespace Gugarhythm
         static int FlickSpriteIndex(float size) => Mathf.Clamp(Mathf.RoundToInt(size * 2), 1, 6) - 1;
 
         void ReleaseNoteView(int index, HorizontalSlicedRawImage view) { noteViews.Remove(index); view.gameObject.SetActive(false); notePool.Push(view); }
-        void ReleasePersistentHoldHead(int rootIndex, HorizontalSlicedRawImage view) { persistentHoldHeadViews.Remove(rootIndex); view.gameObject.SetActive(false); notePool.Push(view); }
+        void CreateFlickArrowBatchSet()
+        {
+            void Add(Texture2D texture)
+            {
+                if (texture == null || flickArrowBatches.ContainsKey(texture)) return;
+                var go = new GameObject("Flick Arrow Batch", typeof(RectTransform), typeof(CanvasRenderer), typeof(FlickArrowBatchGraphic));
+                var rect = go.GetComponent<RectTransform>();
+                rect.SetParent(flickAnchor, false);
+                Fill(rect);
+                var batch = go.GetComponent<FlickArrowBatchGraphic>();
+                batch.texture = texture;
+                batch.raycastTarget = false;
+                batch.color = Color.white;
+                flickArrowBatches[texture] = batch;
+            }
+            for (var index = 0; index < flickNormalCenterTextures.Length; index++)
+            {
+                Add(flickNormalCenterTextures[index]);
+                Add(flickNormalSideTextures[index]);
+                Add(flickCriticalCenterTextures[index]);
+                Add(flickCriticalSideTextures[index]);
+            }
+        }
         TaperedConnectorGraphic AcquireConnector()
         {
             if (connectorPool.Count > 0)
@@ -8218,19 +8174,6 @@ namespace Gugarhythm
         }
         void ReleaseConnector(RuntimeConnector connector, TaperedConnectorGraphic line) { connectorViews.Remove(connector); line.gameObject.SetActive(false); connectorPool.Push(line); }
         void ReleaseHoldRun(HoldRenderRun run, TaperedConnectorGraphic line) { holdRunViews.Remove(run); line.gameObject.SetActive(false); connectorPool.Push(line); }
-        SimLineGraphic AcquireSimLine()
-        {
-            if (simLinePool.Count > 0)
-            {
-                var pooled = simLinePool.Pop(); pooled.gameObject.SetActive(true); return pooled;
-            }
-            var go = new GameObject("Synchronization Line", typeof(RectTransform), typeof(CanvasRenderer), typeof(SimLineGraphic));
-            var rect = go.GetComponent<RectTransform>(); rect.SetParent(simLineLayer, false); Fill(rect);
-            var graphic = go.GetComponent<SimLineGraphic>(); graphic.raycastTarget = false;
-            graphic.color = new Color(.78f, .83f, 1f, .28f);
-            return graphic;
-        }
-        void ReleaseSimLine(RuntimeSimLine simLine, SimLineGraphic line) { simLineViews.Remove(simLine); line.gameObject.SetActive(false); simLinePool.Push(line); }
         TaperedConnectorGraphic AcquireGuide()
         {
             if (guidePool.Count > 0)
@@ -8340,11 +8283,6 @@ namespace Gugarhythm
         void ReleaseGuide(RuntimeGuide guide, TaperedConnectorGraphic line) { guideViews.Remove(guide); line.gameObject.SetActive(false); guidePool.Push(line); }
         void ReleaseAllViews()
         {
-            persistentHeadReleaseKeys.Clear();
-            foreach (var pair in persistentHoldHeadViews) persistentHeadReleaseKeys.Add(pair.Key);
-            foreach (var key in persistentHeadReleaseKeys)
-                if (persistentHoldHeadViews.TryGetValue(key, out var head)) ReleasePersistentHoldHead(key, head);
-
             noteViewReleaseKeys.Clear();
             foreach (var pair in noteViews) noteViewReleaseKeys.Add(pair.Key);
             foreach (var key in noteViewReleaseKeys)
@@ -8353,6 +8291,7 @@ namespace Gugarhythm
             // them; a reloaded chart must not resolve a batched note's body
             // texture from stale entries keyed by a previous chart's indices.
             noteBodyVisualCache.Clear();
+            renderedPersistentHoldHeads.Clear();
 
             holdRunReleaseKeys.Clear();
             foreach (var pair in holdRunViews) holdRunReleaseKeys.Add(pair.Key);
@@ -8364,10 +8303,7 @@ namespace Gugarhythm
             foreach (var connector in connectorReleaseKeys)
                 if (connectorViews.TryGetValue(connector, out var hold)) ReleaseConnector(connector, hold);
 
-            simLineReleaseKeys.Clear();
-            foreach (var pair in simLineViews) simLineReleaseKeys.Add(pair.Key);
-            foreach (var simLine in simLineReleaseKeys)
-                if (simLineViews.TryGetValue(simLine, out var line)) ReleaseSimLine(simLine, line);
+
 
             guideReleaseKeys.Clear();
             foreach (var pair in guideViews) guideReleaseKeys.Add(pair.Key);
