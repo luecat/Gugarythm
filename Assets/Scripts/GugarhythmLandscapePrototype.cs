@@ -650,7 +650,9 @@ namespace Gugarhythm
         RectTransform pauseOverlay;
         RectTransform pauseMenuContent;
         RectTransform resultPanel;
+        RectTransform resultSafeRoot;
         RectTransform resultDetailPanel;
+        RectTransform resultDetailSafeRoot;
         RectTransform resultContentRoot;
         RectTransform resultCoverFrame;
         RectTransform resultCoverFallback;
@@ -697,7 +699,15 @@ namespace Gugarhythm
         Text resultGoodCountLabel;
         Text resultMissCountLabel;
         Text resultFastLateLabel;
+        Text resultEyebrowLabel;
+        Text resultTitleLabel;
+        RectTransform resultTitleAccent;
+        Text resultDetailEyebrowLabel;
+        Text resultDetailTitleLabel;
+        RectTransform resultDetailTitleAccent;
         Text resultCategoryStatsLabel;
+        ResultCategoryRowView resultCategoryHeader;
+        ResultCategoryRowView[] resultCategoryRows;
         readonly Image[] resultHistogramBars = new Image[ResultTimingHistogram.BinCount];
         readonly ResultRunStatistics resultRunStatistics = new();
         static readonly Color ResultBg = new(.12f, .12f, .12f, 1f);
@@ -712,6 +722,8 @@ namespace Gugarhythm
         InputField chartEditorDifficultyNameInput;
         InputField chartEditorLevelInput;
         RectTransform libraryListContent;
+        RectTransform libraryListRoot;
+        float libraryListBottomInset;
         RectTransform difficultyButtonContent;
         RectTransform chartEditorTagContent;
         RectTransform settingsTagContent;
@@ -759,15 +771,21 @@ namespace Gugarhythm
         string lastAudioCachePath;
         string lastAudioExtension;
         Coroutine gpuRibbonWarmCoroutine;
+        Coroutine detailCoverLoadCoroutine;
         bool localChartPreloadStarted;
         // 預載入階段要不要連 AudioClip 一起解碼。目前維持 false（保守預設）：
         // 背景只做純 .NET 的解包與 BGM 落盤，解碼留到選曲時在主執行緒發生。
         // 尚未實機驗證記憶體與幀率影響，所以上機量測前不要貿然翻成 true。
+        // 選曲後仍會把解碼結果寫回 preloadedLocalCharts.Music，並用 LRU 常駐最近幾首，
+        // 讓快速切歌不必每次重解碼。
         const bool PreloadAudioUpFront = false;
         const int MaxResidentPreloadedClips = 8;
         const int PreloadStartDelayFrames = 2;
         readonly Dictionary<string, int> preloadedClipLru = new();
         int preloadedClipLruTick;
+        // 曲庫選歌世代：換歌／按開始時遞增，用來作廢過期的封面載入等非同步工作。
+        int libraryLoadGeneration;
+        int detailCoverLoadGeneration;
         ChartLibrarySource librarySource = ChartLibrarySource.Local;
         IChartVaultClient chartVaultClient;
         RemoteChartCatalogCache remoteCatalogCache;
@@ -787,6 +805,12 @@ namespace Gugarhythm
         bool chartVaultLoginPending;
         bool destroying;
         int remoteOperationGeneration;
+        // 曲庫列表就地更新高亮用：排序／搜尋／列順序不變時，選歌不必 Destroy 整列。
+        ChartLibrarySort libraryListBuiltSort;
+        bool libraryListBuiltAscending;
+        string libraryListBuiltFilter = string.Empty;
+        string libraryListBuiltDifficultyName = string.Empty;
+        readonly List<string> libraryListBuiltGroupIds = new();
         int remoteCoverGeneration;
         string chartVaultSessionToken;
         string pendingChartVaultLoginState;
@@ -1275,6 +1299,8 @@ namespace Gugarhythm
             destroying = true;
             remoteOperationGeneration++;
             remoteCoverGeneration++;
+            libraryLoadGeneration++;
+            detailCoverLoadGeneration++;
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
             Application.deepLinkActivated -= HandleChartVaultDeepLink;
             UnsubscribeTouchCallbacks();
@@ -2034,12 +2060,13 @@ namespace Gugarhythm
             return padded;
         }
 
-        IEnumerator LoadMusic(byte[] bytes, string extension, double leadingSilenceSeconds = 0)
+        IEnumerator LoadMusic(byte[] bytes, string extension, double leadingSilenceSeconds = 0,
+            int requiredGeneration = -1, LocalChartEntry stashEntry = null)
         {
             // Application.persistentDataPath 屬 Unity API，只能在主執行緒讀；
             // 讀完立刻交給純 .NET 的備檔 helper，之後的解碼流程完全不變。
             var cachePath = PrepareAudioCacheFile(bytes, extension, Application.persistentDataPath);
-            yield return LoadMusicFromCachePath(cachePath, extension, leadingSilenceSeconds);
+            yield return LoadMusicFromCachePath(cachePath, extension, leadingSilenceSeconds, requiredGeneration, stashEntry);
         }
 
         // 純 .NET：把 BGM 位元組寫進 persistentDataPath/AudioCache 並回傳完整路徑，失敗回 null。
@@ -2136,14 +2163,23 @@ namespace Gugarhythm
         // 解碼段：必須主執行緒。streamAudio = false 與 PrependLeadingSilence 是音訊時間軸行為，
         // 動了就會改變首播偏移與譜面判定基準，所以這裡完全沿用原有邏輯，只是來源改成已備好的快取路徑。
         // 若已有 silence-baked WAV，直接解那份並跳過整段 PCM copy。
-        IEnumerator LoadMusicFromCachePath(string path, string extension, double leadingSilenceSeconds = 0)
+        // requiredGeneration >= 0 時：曲庫連點選歌用。解碼結果先放區域變數，
+        // 世代過期就不寫入 music.clip（可選擇 stash 進 LRU），避免舊請求蓋掉新選取。
+        IEnumerator LoadMusicFromCachePath(string path, string extension, double leadingSilenceSeconds = 0,
+            int requiredGeneration = -1, LocalChartEntry stashEntry = null)
         {
             musicLoadSucceeded = false;
-            music.clip = null;
-            lastAudioCachePath = null;
-            lastAudioExtension = extension;
+            if (requiredGeneration < 0)
+            {
+                music.clip = null;
+                lastAudioCachePath = null;
+                lastAudioExtension = extension;
+            }
+            else
+                lastAudioExtension = extension;
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) yield break;
 
+            AudioClip loadedClip = null;
             var bakedPath = SilenceBakedCachePath(path, leadingSilenceSeconds);
             if (!string.IsNullOrEmpty(bakedPath) && File.Exists(bakedPath))
             {
@@ -2155,40 +2191,52 @@ namespace Gugarhythm
                     {
                         try
                         {
-                            music.clip = DownloadHandlerAudioClip.GetContent(bakedRequest);
-                            musicLoadSucceeded = music.clip != null;
-                            lastAudioCachePath = path;
-                            lastAudioExtension = extension;
-                            yield break;
+                            loadedClip = DownloadHandlerAudioClip.GetContent(bakedRequest);
                         }
                         catch (Exception)
                         {
-                            music.clip = null;
+                            loadedClip = null;
                         }
                     }
                 }
             }
 
-            using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, AudioTypeForExtension(extension));
-            if (request.downloadHandler is DownloadHandlerAudioClip audioHandler) audioHandler.streamAudio = false;
-            yield return request.SendWebRequest();
-            if (request.result != UnityWebRequest.Result.Success) yield break;
-            try
+            if (loadedClip == null)
             {
-                var decodedClip = DownloadHandlerAudioClip.GetContent(request);
-                music.clip = PrependLeadingSilence(decodedClip, leadingSilenceSeconds);
-                var prepended = !ReferenceEquals(music.clip, decodedClip);
-                if (prepended && decodedClip != null) Destroy(decodedClip);
-                musicLoadSucceeded = music.clip != null;
-                lastAudioCachePath = path;
-                lastAudioExtension = extension;
-                if (musicLoadSucceeded && prepended && !string.IsNullOrEmpty(bakedPath))
-                    TryWriteSilenceBakedWav(music.clip, bakedPath);
+                using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, AudioTypeForExtension(extension));
+                if (request.downloadHandler is DownloadHandlerAudioClip audioHandler) audioHandler.streamAudio = false;
+                yield return request.SendWebRequest();
+                if (request.result != UnityWebRequest.Result.Success) yield break;
+                try
+                {
+                    var decodedClip = DownloadHandlerAudioClip.GetContent(request);
+                    loadedClip = PrependLeadingSilence(decodedClip, leadingSilenceSeconds);
+                    var prepended = !ReferenceEquals(loadedClip, decodedClip);
+                    if (prepended && decodedClip != null) Destroy(decodedClip);
+                    if (loadedClip != null && prepended && !string.IsNullOrEmpty(bakedPath))
+                        TryWriteSilenceBakedWav(loadedClip, bakedPath);
+                }
+                catch (Exception)
+                {
+                    loadedClip = null;
+                }
             }
-            catch (Exception)
+
+            if (requiredGeneration >= 0 && requiredGeneration != libraryLoadGeneration)
             {
-                music.clip = null;
+                if (stashEntry != null && loadedClip != null)
+                    RememberDecodedClip(stashEntry, loadedClip);
+                else if (loadedClip != null)
+                    Destroy(loadedClip);
+                yield break;
             }
+
+            music.clip = loadedClip;
+            musicLoadSucceeded = music.clip != null;
+            lastAudioCachePath = path;
+            lastAudioExtension = extension;
+            if (stashEntry != null && music.clip != null)
+                RememberDecodedClip(stashEntry, music.clip);
         }
 
         void StartGame()
@@ -2196,15 +2244,17 @@ namespace Gugarhythm
             if (GugarhythmSceneRouter.IsLibrary)
             {
                 if (librarySource != ChartLibrarySource.Local) return;
-                if (loading || selectedLibraryEntry == null) return;
+                if (selectedLibraryEntry == null) return;
 
-                // Prefer transferring the chart/audio already loaded for the detail pane so
-                // the gameplay scene skips ZIP re-import and a second full BGM decode.
-                if (chart != null && music.clip != null && musicLoadSucceeded &&
-                    currentLibraryEntry != null && currentLibraryEntry.Id == selectedLibraryEntry.Id)
+                // 取消曲庫背景暖解碼；進遊戲後由 Gameplay 載入畫面承接剩餘工作。
+                libraryLoadGeneration++;
+
+                // 1) 當前選取已綁定 chart（clip 可有可無）→ 移交，免再 Import。
+                if (chart != null && currentLibraryEntry != null &&
+                    currentLibraryEntry.Id == selectedLibraryEntry.Id)
                 {
-                    var transferredClip = music.clip;
-                    music.clip = null;
+                    var transferredClip = musicLoadSucceeded ? music.clip : null;
+                    if (transferredClip != null) music.clip = null;
                     if (ChartSelectionSession.Ensure().SetPreparedSelection(
                             selectedLibraryEntry,
                             chart,
@@ -2213,13 +2263,42 @@ namespace Gugarhythm
                             chart.BgmStartDelaySeconds,
                             transferredClip))
                     {
+                        if (transferredClip != null &&
+                            preloadedLocalCharts.TryGetValue(selectedLibraryEntry.Id, out var resident) &&
+                            resident != null && ReferenceEquals(resident.Music, transferredClip))
+                            resident.Music = null;
                         GugarhythmSceneRouter.OpenGameplay();
                         return;
                     }
 
-                    music.clip = transferredClip;
+                    if (transferredClip != null) music.clip = transferredClip;
                 }
 
+                // 2) 預載入已有 chart（可能含 LRU clip）→ 音訊可延到 Gameplay 再解。
+                if (preloadedLocalCharts.TryGetValue(selectedLibraryEntry.Id, out var cached) &&
+                    cached?.Chart != null)
+                {
+                    var transferredClip = cached.Music;
+                    if (ChartSelectionSession.Ensure().SetPreparedSelection(
+                            selectedLibraryEntry,
+                            cached.Chart,
+                            cached.AudioCachePath,
+                            cached.Chart.BgmExtension,
+                            cached.Chart.BgmStartDelaySeconds,
+                            transferredClip))
+                    {
+                        cached.Music = null;
+                        if (music != null && ReferenceEquals(music.clip, transferredClip))
+                        {
+                            music.clip = null;
+                            musicLoadSucceeded = false;
+                        }
+                        GugarhythmSceneRouter.OpenGameplay();
+                        return;
+                    }
+                }
+
+                // 3) Fallback：帶原始 GGR，Gameplay 再 Import + 解碼。
                 if (!LocalChartLibrary.TryReadSource(selectedLibraryEntry, out var bytes))
                 {
                     SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。");
@@ -2283,7 +2362,7 @@ namespace Gugarhythm
             var earliestAudioSafeStart = GameplayTiming.EarliestAudioSafeChartTime(chart.BgmOffset, audioOffsetSeconds);
             var initialSongTime = Math.Min(0d, Math.Min(firstWaterfallSongTime, earliestAudioSafeStart));
             scheduledDsp = GameplayTiming.ScheduledDspForChartTime(playbackReadyDsp, initialSongTime, chart.BgmOffset);
-            music.time = 0;
+            GameplayTiming.RewindToStart(music);
             // Prebuild every chart object at its off-screen perspective
             // position before the scheduled audio begins. Only objects near
             // the visible waterfall are kept active; the pool absorbs the
@@ -2425,7 +2504,7 @@ namespace Gugarhythm
                 var clipTime = GameplayTiming.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
                 var playbackDsp = GameplayTiming.PlaybackDspForChartTime(nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds);
                 music.Stop();
-                music.time = clipTime;
+                GameplayTiming.ApplyClipTime(music, clipTime);
                 scheduledDsp = GameplayTiming.ScheduledDspForRecovery(nextDsp, interruptedSongTime, chart.BgmOffset);
                 accumulatedPause = 0;
                 music.PlayScheduled(playbackDsp);
@@ -3900,7 +3979,7 @@ namespace Gugarhythm
             presentationClock.Invalidate();
             running = false;
             paused = false;
-            music.Stop();
+            if (music != null && music.isPlaying) music.Stop();
             ClearHoldSound();
             pauseOverlay.gameObject.SetActive(false);
             pauseButton.gameObject.SetActive(false);
@@ -3961,15 +4040,33 @@ namespace Gugarhythm
         void PopulateResultDetailPanel()
         {
             RefreshResultHistogram();
-            var lines = new List<string>();
-            foreach (var category in resultRunStatistics.OrderedCategories)
+            var visible = 0;
+            if (resultCategoryRows != null)
             {
-                if (!resultRunStatistics.TryGet(category, out var stats) || stats.Count <= 0) continue;
-                lines.Add(
-                    $"{ResultRunStatistics.DisplayName(category),-9}  ACC {stats.AccuracyPercent,7:F2}%   " +
-                    $"FAST {stats.Fast,4:N0}   LATE {stats.Late,4:N0}");
+                for (var index = 0; index < resultCategoryRows.Length; index++)
+                {
+                    var row = resultCategoryRows[index];
+                    if (row?.Root == null) continue;
+                    var show = resultRunStatistics.TryGet(row.Category, out var stats) && stats.Count > 0;
+                    row.Root.gameObject.SetActive(show);
+                    if (!show) continue;
+                    row.Name.text = ResultRunStatistics.DisplayName(row.Category);
+                    row.Acc.text = $"{stats.AccuracyPercent:F2}%";
+                    row.Fast.text = stats.Fast.ToString("N0");
+                    row.Late.text = stats.Late.ToString("N0");
+                    visible++;
+                }
             }
-            resultCategoryStatsLabel.text = lines.Count == 0 ? "沒有判定資料" : string.Join("\n", lines);
+
+            if (resultCategoryHeader?.Root != null)
+                resultCategoryHeader.Root.gameObject.SetActive(visible > 0);
+            if (resultCategoryStatsLabel != null)
+            {
+                resultCategoryStatsLabel.gameObject.SetActive(visible == 0);
+                resultCategoryStatsLabel.text = visible == 0 ? "沒有判定資料" : string.Empty;
+            }
+
+            LayoutResultCategoryRows();
         }
 
         void RefreshResultHistogram()
@@ -4006,7 +4103,12 @@ namespace Gugarhythm
             SetGameplayHudVisible(false);
             SetGameplayStageVisible(false);
             if (resultDetailPanel != null) resultDetailPanel.gameObject.SetActive(false);
-            if (resultPanel != null) resultPanel.gameObject.SetActive(true);
+            if (resultPanel != null)
+            {
+                resultPanel.gameObject.SetActive(true);
+                resultPanel.SetAsLastSibling();
+            }
+            ApplySafeAreaInsets(resultSafeRoot);
             LayoutResultMainPage();
         }
 
@@ -4015,7 +4117,12 @@ namespace Gugarhythm
             SetGameplayHudVisible(false);
             SetGameplayStageVisible(false);
             if (resultPanel != null) resultPanel.gameObject.SetActive(false);
-            if (resultDetailPanel != null) resultDetailPanel.gameObject.SetActive(true);
+            if (resultDetailPanel != null)
+            {
+                resultDetailPanel.gameObject.SetActive(true);
+                resultDetailPanel.SetAsLastSibling();
+            }
+            ApplySafeAreaInsets(resultDetailSafeRoot);
             LayoutResultMainPage();
             RefreshResultHistogram();
         }
@@ -4132,7 +4239,9 @@ namespace Gugarhythm
             // canvas. Keep a normal camera active for a stable Game/Android view.
             gameCamera.cullingMask = ~0;
             music = gameObject.AddComponent<AudioSource>();
-            music.playOnAwake = false; music.spatialBlend = 0;
+            music.playOnAwake = false;
+            music.spatialBlend = 0;
+            music.loop = false;
             effects = gameObject.AddComponent<AudioSource>();
             effects.playOnAwake = false; effects.spatialBlend = 0;
             holdEffects = gameObject.AddComponent<AudioSource>();
@@ -4275,7 +4384,9 @@ namespace Gugarhythm
             BuildChartEditor(safeAreaRoot);
             BuildImportDecision(safeAreaRoot);
             BuildPauseOverlay(root);
-            BuildResult(safeAreaRoot);
+            // Result pages own a full-bleed background so cutout/notch insets stay
+            // the same ResultBg color; interactive content stays in resultSafeRoot.
+            BuildResult(root);
             BuildChartPreview(safeAreaRoot);
             // The dim blue loading veil must cover the physical display,
             // including Android cutout insets, and remain above menu UI.
@@ -4630,6 +4741,8 @@ namespace Gugarhythm
             }
             FitFullScreenOverlay(resultPanel);
             FitFullScreenOverlay(resultDetailPanel);
+            ApplySafeAreaInsets(resultSafeRoot);
+            ApplySafeAreaInsets(resultDetailSafeRoot);
             LayoutResultMainPage();
         }
 
@@ -4637,7 +4750,8 @@ namespace Gugarhythm
         {
             if (resultContentRoot == null || resultCoverFrame == null || resultRightColumn == null) return;
             Canvas.ForceUpdateCanvases();
-            var page = resultPanel == null ? Vector2.zero : resultPanel.rect.size;
+            var pageHost = resultSafeRoot != null ? resultSafeRoot : resultPanel;
+            var page = pageHost == null ? Vector2.zero : pageHost.rect.size;
             if (page.x <= 1f || page.y <= 1f) return;
 
             var compact = page.x < 980f || page.y < 560f;
@@ -4646,9 +4760,12 @@ namespace Gugarhythm
             // Grow the action band with the buttons so short phones do not clip taller CTAs.
             var actionHeight = UseCompactMobileChrome ? CompactTouch : (tight ? 48f : 52f);
             var bottomHeight = actionHeight + (tight ? 28f : 36f);
-            var topHeight = tight ? 56f : 72f;
+            var topHeight = tight ? 68f : 88f;
             var gutter = tight ? 14f : 22f;
-            var metaHeight = tight ? 0f : compact ? 58f : 78f;
+            var metaHeight = tight ? 0f : compact ? 76f : 96f;
+
+            ResizeResultTopBand(resultEyebrowLabel, topHeight);
+            ResizeResultTopBand(resultDetailEyebrowLabel, topHeight);
 
             resultContentRoot.offsetMin = new Vector2(pagePad, bottomHeight + 8f);
             resultContentRoot.offsetMax = new Vector2(-pagePad, -(topHeight + 4f));
@@ -4674,20 +4791,23 @@ namespace Gugarhythm
             resultRightColumn.offsetMin = new Vector2(side + gutter, 0f);
             resultRightColumn.offsetMax = Vector2.zero;
 
+            LayoutResultPageHeader(resultEyebrowLabel, resultTitleLabel, resultTitleAccent, pagePad, tight);
+            LayoutResultPageHeader(resultDetailEyebrowLabel, resultDetailTitleLabel, resultDetailTitleAccent, pagePad, tight);
+
             var showMetaUnderCover = metaHeight > 1f;
             if (resultSongTitleLabel != null)
             {
                 resultSongTitleLabel.gameObject.SetActive(showMetaUnderCover);
-                resultSongTitleLabel.fontSize = tight ? 16 : compact ? 18 : 22;
-                resultSongTitleLabel.rectTransform.anchoredPosition = new Vector2(0f, -side - 10f);
-                resultSongTitleLabel.rectTransform.sizeDelta = new Vector2(side, tight ? 24f : 32f);
+                resultSongTitleLabel.fontSize = tight ? 16 : compact ? 20 : 24;
+                resultSongTitleLabel.rectTransform.anchoredPosition = new Vector2(0f, -side - 16f);
+                resultSongTitleLabel.rectTransform.sizeDelta = new Vector2(side, tight ? 26f : 36f);
             }
             if (resultSongMetaLabel != null)
             {
                 resultSongMetaLabel.gameObject.SetActive(showMetaUnderCover);
                 resultSongMetaLabel.fontSize = tight ? 12 : 15;
-                resultSongMetaLabel.rectTransform.anchoredPosition = new Vector2(0f, -side - (tight ? 34f : 42f));
-                resultSongMetaLabel.rectTransform.sizeDelta = new Vector2(side, 24f);
+                resultSongMetaLabel.rectTransform.anchoredPosition = new Vector2(0f, -side - (tight ? 46f : 56f));
+                resultSongMetaLabel.rectTransform.sizeDelta = new Vector2(side, tight ? 22f : 28f);
             }
             if (resultAccuracyLabel != null)
                 resultAccuracyLabel.fontSize = tight ? 36 : compact ? 44 : 56;
@@ -4704,6 +4824,7 @@ namespace Gugarhythm
                 resultDetailActionBand.offsetMax = new Vector2(0f, bottomHeight);
             }
             LayoutResultActionButtons(resultDetailActionBand, resultDetailBackButton, null, pagePad, tight, actionHeight);
+            LayoutResultCategoryRows();
         }
 
         static void LayoutResultActionButtons(RectTransform band, Button primary, Button secondary, float pagePad, bool tight, float actionHeight)
@@ -4740,11 +4861,68 @@ namespace Gugarhythm
             rect.anchoredPosition = new Vector2(center.x, y);
         }
 
+        static void ResizeResultTopBand(Text eyebrow, float topHeight)
+        {
+            if (eyebrow == null) return;
+            var band = eyebrow.rectTransform.parent as RectTransform;
+            if (band == null) return;
+            band.anchorMin = new Vector2(0f, 1f);
+            band.anchorMax = new Vector2(1f, 1f);
+            band.pivot = new Vector2(.5f, 1f);
+            band.offsetMin = new Vector2(0f, -topHeight);
+            band.offsetMax = Vector2.zero;
+        }
+
+        static void LayoutResultPageHeader(Text eyebrow, Text title, RectTransform accent, float pagePad, bool tight)
+        {
+            if (eyebrow != null)
+            {
+                eyebrow.fontSize = tight ? 12 : 14;
+                eyebrow.alignment = TextAnchor.UpperLeft;
+                var rect = eyebrow.rectTransform;
+                rect.anchorMin = new Vector2(0f, 1f);
+                rect.anchorMax = new Vector2(1f, 1f);
+                rect.pivot = new Vector2(0f, 1f);
+                rect.offsetMin = new Vector2(pagePad, tight ? -26f : -28f);
+                rect.offsetMax = new Vector2(-pagePad, tight ? -8f : -10f);
+            }
+
+            if (title != null)
+            {
+                title.fontSize = tight ? 22 : 28;
+                title.alignment = TextAnchor.UpperLeft;
+                var rect = title.rectTransform;
+                rect.anchorMin = new Vector2(0f, 1f);
+                rect.anchorMax = new Vector2(1f, 1f);
+                rect.pivot = new Vector2(0f, 1f);
+                rect.offsetMin = new Vector2(pagePad, tight ? -64f : -78f);
+                rect.offsetMax = new Vector2(-pagePad, tight ? -30f : -32f);
+            }
+
+            if (accent != null)
+            {
+                accent.anchorMin = accent.anchorMax = new Vector2(0f, 1f);
+                accent.pivot = new Vector2(0f, 1f);
+                accent.sizeDelta = new Vector2(48f, 3f);
+                accent.anchoredPosition = new Vector2(pagePad, tight ? -66f : -80f);
+            }
+        }
+
         static void FitFullScreenOverlay(RectTransform panel)
         {
             if (panel == null) return;
             Fill(panel);
             panel.localScale = Vector3.one;
+        }
+
+        static void ApplySafeAreaInsets(RectTransform target)
+        {
+            if (target == null || Screen.width <= 0 || Screen.height <= 0) return;
+            var safe = Screen.safeArea;
+            target.anchorMin = new Vector2(safe.xMin / Screen.width, safe.yMin / Screen.height);
+            target.anchorMax = new Vector2(safe.xMax / Screen.width, safe.yMax / Screen.height);
+            target.offsetMin = Vector2.zero;
+            target.offsetMax = Vector2.zero;
         }
 
         static void FitOverlayPanel(RectTransform panel, Vector2 designSize, Vector2 available)
@@ -5074,15 +5252,10 @@ namespace Gugarhythm
             var headingY = compact ? -64f : -74f;
             var sourceY = compact ? -120f : -132f;
             var scopeY = compact ? sourceY - (chipSize.y + chipRowGap) : -184f;
-            // Source/scope chips use top-left pivot, so the search bar must
-            // clear the full chip height — not half, which used to cover 公開/私人.
-            var searchTop = compact ? scopeY - chipSize.y - 14f : -248f;
-            var searchBottom = searchTop - 56f;
-            var sortY = compact ? searchBottom - 34f : -346f;
-            var listTop = compact ? sortY - 40f : -396f;
             var importBarHeight = compact ? 72f : 64f;
             var importBottomPad = compact ? 18f : 22f;
             var importTop = importBottomPad + importBarHeight;
+            libraryListBottomInset = importTop + 14f;
 
             var brand = Label("GUGARHYTHM", library, compact ? 17 : 19);
             brand.color = new Color(.68f, .68f, .68f);
@@ -5115,14 +5288,12 @@ namespace Gugarhythm
             librarySearchInput = MakeInputField("搜尋", library, Vector2.zero, new Vector2(0, 56));
             var searchRect = librarySearchInput.GetComponent<RectTransform>();
             searchRect.anchorMin = new Vector2(0, 1); searchRect.anchorMax = new Vector2(1, 1); searchRect.pivot = new Vector2(.5f, 1);
-            searchRect.offsetMin = new Vector2(34, searchBottom); searchRect.offsetMax = new Vector2(-22, searchTop);
             librarySearchInput.onValueChanged.AddListener(_ => RefreshLibraryUI());
             const int libraryHeaderFontSize = 22;
-            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46); PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, sortY));
-            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46); PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, sortY));
+            librarySortLabel = Label("排序", library, libraryHeaderFontSize); librarySortLabel.color = new Color(.62f, .62f, .62f); librarySortLabel.alignment = TextAnchor.MiddleCenter; librarySortLabel.rectTransform.sizeDelta = new Vector2(72, 46);
+            librarySortModeLabel = Label("準確率", library, libraryHeaderFontSize); librarySortModeLabel.color = new Color(.9f, .9f, .9f); librarySortModeLabel.alignment = TextAnchor.MiddleCenter; librarySortModeLabel.rectTransform.sizeDelta = new Vector2(112, 46);
             MakeInvisibleButton(librarySortModeLabel.rectTransform, CycleLibrarySort);
             libraryDirectionIcon = Panel("Sort Direction", library, Color.clear, new Vector2(58, 52), Vector2.zero);
-            PinToAnchor(libraryDirectionIcon, new Vector2(0, 1), new Vector2(.5f, .5f), new Vector2(248, sortY));
             AddSortArrowIcon(libraryDirectionIcon);
             MakeInvisibleButton(libraryDirectionIcon, () =>
             {
@@ -5136,9 +5307,9 @@ namespace Gugarhythm
                 RefreshLibraryUI();
             });
             libraryListContent = MakeVerticalScroll("Library Scroll", library, Vector2.zero, new Vector2(0, 0));
-            var listRoot = libraryListContent.parent.GetComponent<RectTransform>();
-            listRoot.anchorMin = new Vector2(0, 0); listRoot.anchorMax = new Vector2(1, 1);
-            listRoot.offsetMin = new Vector2(22, importTop + 14f); listRoot.offsetMax = new Vector2(-2, listTop);
+            libraryListRoot = libraryListContent.parent.GetComponent<RectTransform>();
+            libraryListRoot.anchorMin = new Vector2(0, 0); libraryListRoot.anchorMax = new Vector2(1, 1);
+            LayoutLibrarySourceStack();
 
             importLibraryButton = MakeOutlinedButton("＋ 匯入 GGR", library, Vector2.zero, RequestImport, new Vector2(0, importBarHeight));
             var importRect = importLibraryButton.GetComponent<RectTransform>();
@@ -6376,6 +6547,7 @@ namespace Gugarhythm
                 remotePrivateScopeButton.image.color = remoteCatalogScope == RemoteChartCatalogScope.Private
                     ? new Color(.10f, .34f, .50f) : new Color(.20f, .20f, .20f);
             }
+            LayoutLibrarySourceStack();
             if (importLibraryButton != null) importLibraryButton.gameObject.SetActive(!online);
             if (refreshRemoteLibraryButton != null)
             {
@@ -6398,6 +6570,39 @@ namespace Gugarhythm
                 downloadRemoteChartButton.gameObject.SetActive(online);
                 downloadRemoteChartButton.interactable = online && selectedRemoteChart != null && !remoteChartDownloading;
             }
+        }
+
+        // Local mode hides 公開/私人 and collapses that row so search/sort/list
+        // move up; Online mode restores the row and pushes those controls down.
+        void LayoutLibrarySourceStack()
+        {
+            if (librarySearchInput == null || libraryListRoot == null) return;
+            var online = librarySource == ChartLibrarySource.Online;
+            var compact = UseCompactMobileChrome;
+            var chipHeight = compact ? 72f : 42f;
+            var chipRowGap = compact ? 12f : 10f;
+            var sourceY = compact ? -120f : -132f;
+            var scopeY = compact ? sourceY - (chipHeight + chipRowGap) : -184f;
+            var searchTop = online
+                ? scopeY - chipHeight - 14f
+                : sourceY - chipHeight - 14f;
+            var searchBottom = searchTop - 56f;
+            var sortY = searchBottom - (compact ? 34f : 42f);
+            var listTop = sortY - (compact ? 40f : 50f);
+
+            var searchRect = librarySearchInput.GetComponent<RectTransform>();
+            searchRect.offsetMin = new Vector2(34f, searchBottom);
+            searchRect.offsetMax = new Vector2(-22f, searchTop);
+
+            if (librarySortLabel != null)
+                PinToAnchor(librarySortLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(28, sortY));
+            if (librarySortModeLabel != null)
+                PinToAnchor(librarySortModeLabel.rectTransform, new Vector2(0, 1), new Vector2(0, .5f), new Vector2(112, sortY));
+            if (libraryDirectionIcon != null)
+                PinToAnchor(libraryDirectionIcon, new Vector2(0, 1), new Vector2(.5f, .5f), new Vector2(248, sortY));
+
+            libraryListRoot.offsetMin = new Vector2(22f, libraryListBottomInset);
+            libraryListRoot.offsetMax = new Vector2(-2f, listTop);
         }
 
         void SelectRemoteCatalogScope(RemoteChartCatalogScope scope)
@@ -6629,24 +6834,60 @@ namespace Gugarhythm
             libraryCountLabel.text = groups.Count.ToString();
             librarySortModeLabel.text = librarySort == ChartLibrarySort.Accuracy ? "準確率" : librarySort == ChartLibrarySort.Difficulty ? "難度" : "曲名";
             libraryDirectionIcon.localRotation = Quaternion.Euler(0, 0, librarySortAscending ? 180 : 0);
-            ClearChildren(libraryListContent);
-            const float rowHeight = 102f;
-            var contentSize = libraryListContent.sizeDelta;
-            contentSize.y = Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height, groups.Count * rowHeight + 8);
-            libraryListContent.sizeDelta = contentSize;
-            for (var index = 0; index < groups.Count; index++) BuildLibraryRow(groups[index], index, rowHeight);
-            RefreshDetailUI(groups);
 
-            // Selecting a chart rebuilds the rows so the highlight and details
-            // stay in sync. Keep the user's current list position instead of
-            // implicitly focusing the selected chart or jumping to the top.
-            if (restoreLibraryScrollPosition)
+            const float rowHeight = 102f;
+            var difficultyKey = selectedDifficultyName ?? string.Empty;
+            var canUpdateSelectionInPlace = libraryListBuiltGroupIds.Count == groups.Count
+                && libraryListBuiltSort == librarySort
+                && libraryListBuiltAscending == librarySortAscending
+                && string.Equals(libraryListBuiltFilter, filter, StringComparison.Ordinal)
+                && string.Equals(libraryListBuiltDifficultyName, difficultyKey, StringComparison.Ordinal)
+                && libraryListContent.childCount == groups.Count;
+            if (canUpdateSelectionInPlace)
             {
-                Canvas.ForceUpdateCanvases();
-                libraryScroll.verticalNormalizedPosition = preservedLibraryScrollPosition;
+                for (var index = 0; index < groups.Count; index++)
+                {
+                    if (!string.Equals(libraryListBuiltGroupIds[index], groups[index].GroupId, StringComparison.Ordinal))
+                    {
+                        canUpdateSelectionInPlace = false;
+                        break;
+                    }
+                }
             }
-            Canvas.ForceUpdateCanvases();
-            LayoutRebuilder.ForceRebuildLayoutImmediate(libraryListContent);
+
+            if (canUpdateSelectionInPlace)
+            {
+                for (var index = 0; index < groups.Count; index++)
+                    ApplyLibraryRowSelectionVisual(libraryListContent.GetChild(index) as RectTransform, groups[index], index, rowHeight);
+                RefreshDetailUI(groups);
+            }
+            else
+            {
+                ClearChildren(libraryListContent);
+                var contentSize = libraryListContent.sizeDelta;
+                contentSize.y = Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height, groups.Count * rowHeight + 8);
+                libraryListContent.sizeDelta = contentSize;
+                for (var index = 0; index < groups.Count; index++) BuildLibraryRow(groups[index], index, rowHeight);
+                libraryListBuiltSort = librarySort;
+                libraryListBuiltAscending = librarySortAscending;
+                libraryListBuiltFilter = filter;
+                libraryListBuiltDifficultyName = difficultyKey;
+                libraryListBuiltGroupIds.Clear();
+                for (var index = 0; index < groups.Count; index++)
+                    libraryListBuiltGroupIds.Add(groups[index].GroupId ?? string.Empty);
+                RefreshDetailUI(groups);
+
+                // Selecting a chart rebuilds the rows so the highlight and details
+                // stay in sync. Keep the user's current list position instead of
+                // implicitly focusing the selected chart or jumping to the top.
+                if (restoreLibraryScrollPosition)
+                {
+                    Canvas.ForceUpdateCanvases();
+                    libraryScroll.verticalNormalizedPosition = preservedLibraryScrollPosition;
+                }
+                Canvas.ForceUpdateCanvases();
+                LayoutRebuilder.ForceRebuildLayoutImmediate(libraryListContent);
+            }
             libraryScrollPositionInitialized = true;
             if (startButton != null)
                 startButton.interactable = ShouldEnableLibraryStartButton(librarySource, selectedLibraryEntry != null);
@@ -6708,6 +6949,9 @@ namespace Gugarhythm
             librarySortModeLabel.text = remoteLibrarySort == ChartLibrarySort.Difficulty ? "難度" : "曲名";
             libraryDirectionIcon.localRotation = Quaternion.Euler(0, 0, remoteLibrarySortAscending ? 180 : 0);
             ClearChildren(libraryListContent);
+            libraryListBuiltGroupIds.Clear();
+            libraryListBuiltFilter = string.Empty;
+            libraryListBuiltDifficultyName = string.Empty;
             const float rowHeight = 118f;
             var contentSize = libraryListContent.sizeDelta;
             contentSize.y = Mathf.Max(libraryListContent.parent.GetComponent<RectTransform>().rect.height,
@@ -7057,80 +7301,72 @@ namespace Gugarhythm
             MakeInvisibleButton(row, () => SelectLibraryEntry(hasSelectedDifficulty ?? group.Difficulties[0], true));
         }
 
+        void ApplyLibraryRowSelectionVisual(RectTransform row, LocalChartGroup group, int index, float rowHeight)
+        {
+            if (row == null || group == null) return;
+            var selected = selectedLibraryEntry != null && group.GroupId == selectedLibraryEntry.GroupId;
+            if (row.TryGetComponent<Image>(out var background))
+                background.color = selected ? new Color(.12f, .25f, .36f) : new Color(.16f, .16f, .16f);
+            var rowHorizontalInset = selected ? LibraryDividerHorizontalInset : 0f;
+            row.offsetMin = new Vector2(rowHorizontalInset, -rowHeight * (index + 1));
+            row.offsetMax = new Vector2(-rowHorizontalInset, -rowHeight * index);
+            if (row.childCount > 0)
+            {
+                var first = row.GetChild(0) as RectTransform;
+                if (first != null && first.name == "Chart Divider")
+                {
+                    var dividerHorizontalInset = selected ? 0f : LibraryDividerHorizontalInset;
+                    first.offsetMin = new Vector2(dividerHorizontalInset, -PersistentGrayDividerThickness);
+                    first.offsetMax = new Vector2(-dividerHorizontalInset, 0);
+                }
+            }
+        }
+
         void SelectLibraryEntry(LocalChartEntry entry, bool loadSource)
         {
             if (entry == null) return;
             selectedLibraryEntry = entry;
             currentLibraryEntry = entry;
             selectedDifficultyName = entry.DifficultyName ?? string.Empty;
-            if (loadSource) StartCoroutine(LoadLibraryEntry(entry));
-            else RefreshLibraryUI();
+
+            // 曲庫選歌只換 UI／綁定已預載的 chart。不解碼 BGM、不鎖「開始」；
+            // 音訊改到 Gameplay 載入畫面處理，切歌才能接近 0 延遲。
+            libraryLoadGeneration++;
+            BindLibraryEntryAssetsInstant(entry);
+            RefreshLibraryUI();
+            if (!loadSource) return;
+            if (chart != null && musicLoadSucceeded && music.clip != null)
+                ScheduleGpuRibbonWarm(chart);
         }
 
-        IEnumerator LoadLibraryEntry(LocalChartEntry entry)
+        // 同步綁定預載 chart／已解碼 clip；沒有 clip 也不要紧，開始可直接進 Gameplay 再解。
+        void BindLibraryEntryAssetsInstant(LocalChartEntry entry)
         {
-            // 預載入命中的話，連 GGR 原始檔都不必在主執行緒讀，直接走這一路。
-            // 命中條件從 Chart != null && Music != null 放寬成只看 Chart，
-            // 因為預設預載入只解包不解碼，Music 會是 null。
-            if (preloadedLocalCharts.TryGetValue(entry.Id, out var cached) && cached.Chart != null)
+            if (entry == null) return;
+            if (preloadedLocalCharts.TryGetValue(entry.Id, out var cached) && cached?.Chart != null)
             {
-                loading = true;
-                startButton.interactable = false;
                 presentationClock.Invalidate();
                 chart = cached.Chart;
                 lastAudioCachePath = cached.AudioCachePath;
-                lastAudioExtension = chart.BgmExtension;
+                lastAudioExtension = cached.Chart.BgmExtension;
                 if (cached.Music != null)
                 {
                     music.clip = cached.Music;
                     musicLoadSucceeded = true;
+                    TouchPreloadedClipLru(entry.Id);
                 }
                 else
-                {
-                    // 預載入只幫我把 BGM 落盤、沒解碼：這一刻才在主執行緒解碼一次。
                     musicLoadSucceeded = false;
-                    if (!string.IsNullOrEmpty(cached.AudioCachePath))
-                        yield return LoadMusicFromCachePath(cached.AudioCachePath, chart.BgmExtension, chart.BgmStartDelaySeconds);
-                    else if (chart.BgmBytes != null)
-                        yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
-                }
-                if (!musicLoadSucceeded || music.clip == null)
-                {
-                    SetStatus("GGR 音樂格式不支援或無法解碼。");
-                    loading = false;
-                    startButton.interactable = false;
-                    yield break;
-                }
-                TouchPreloadedClipLru(entry.Id);
-                EvictPreloadedClipsIfOverLimit();
-                currentLibraryEntry = entry;
-                selectedLibraryEntry = entry;
-                startButton.interactable = true;
                 SetStatus($"{chart.PlayableCount:N0} notes");
-                loading = false;
-                RefreshLibraryUI();
-                ScheduleGpuRibbonWarm(chart);
-                yield break;
+                return;
             }
-            // 未命中快取：維持原本「主執行緒同步讀檔 + Import + LoadMusic」的 fallback 不變。
-            if (!LocalChartLibrary.TryReadSource(entry, out var bytes)) { SetStatus("找不到已儲存的 GGR 檔案。請重新匯入。"); yield break; }
-            loading = true;
-            startButton.interactable = false;
-            yield return null;
-            var result = new GgrChartImporter().Import(entry.SourceFile, bytes, null, decodeCover: false);
-            if (!result.Success) { SetStatus("譜面載入失敗：" + result.Error); loading = false; yield break; }
-            presentationClock.Invalidate();
-            chart = result.Chart;
+
+            // 尚未預載完：清掉上一首就緒狀態，避免 Start 誤用舊 chart/clip。
+            chart = null;
             musicLoadSucceeded = false;
-            if (chart.BgmBytes != null) yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
-            if (!musicLoadSucceeded) { SetStatus("GGR 音樂格式不支援或無法解碼。"); loading = false; yield break; }
-            currentLibraryEntry = entry;
-            selectedLibraryEntry = entry;
-            startButton.interactable = true;
-            SetStatus($"{chart.PlayableCount:N0} notes");
-            loading = false;
-            RefreshLibraryUI();
-            ScheduleGpuRibbonWarm(chart);
+            lastAudioCachePath = null;
+            lastAudioExtension = null;
+            SetStatus(entry.Title ?? string.Empty);
         }
 
         void ScheduleGpuRibbonWarm(RuntimeChart warmChart)
@@ -7177,6 +7413,9 @@ namespace Gugarhythm
         // 3. Unity API（Texture2D / ImageConversion / UnityWebRequest / AudioClip / Application.*）
         //    一律留主執行緒，所以 persistentDataPath 要先在主執行緒取好再傳進背景。
         // 4. 用旗標控制，預設走「最省記憶體、最不卡」的路徑，而且要能一鍵回退。
+        // 5. 選曲 UX：高亮與「開始」立刻可用；曲庫不解碼 BGM。
+        //    按開始可帶未解碼的 prepared chart（或原始 GGR）進 Gameplay，由載入畫面解碼。
+        //    若 PreloadAudioUpFront / 既有 LRU 已有 Music，開始可直接移交免再解。
         //
         // Phase 2（本次刻意不做）：BGM 改 streamAudio = true 串流解碼。
         //    前置靜音得改成播放排程偏移併入既有 GameplayTiming（BgmOffset / audioOffsetSeconds），
@@ -7188,10 +7427,11 @@ namespace Gugarhythm
         //        ImageConversion.LoadImage / SHA256 長條。
         //    (2) 再確認 TextChartImporters.cs 與 GgrPackageReader 全程無 Unity API（含 Debug.Log）。
         //    (3) decodeCover = false 後，選曲封面仍要由 LoadDetailCover 正常顯示，含損壞/缺封面 fallback。
-        //    (4) 預設下啟動後常駐 AudioClip 應為 0，切歌多次不應累積。
+        //    (4) 預設下啟動後常駐 AudioClip 應為 0；選曲後最多 MaxResidentPreloadedClips 首常駐。
         //    (5) 回歸測試「有 leading silence」的譜面，確認同步與現況一致。
         //    (6) 回退：PreloadAudioUpFront = true 即近似舊行為，
         //        但仍享有背景解壓/解析與跳過封面解碼的收益。
+        //    (7) 快速連點曲庫列：高亮與開始應立刻可用；進遊戲載入畫面承接解碼。
         IEnumerator PreloadLocalCharts()
         {
             localChartPreloadStarted = true;
@@ -7268,20 +7508,40 @@ namespace Gugarhythm
             return new PreloadWork { Chart = result.Chart, AudioCachePath = audioPath };
         }
 
-        // 記一筆「最近用過」，只在真的會常駐 AudioClip 時才有意義。
+        // 記一筆「最近用過」。選曲解碼後也會寫入 Music，所以不論 PreloadAudioUpFront
+        // 是否開啟，都需要 LRU 淘汰，避免 Android 上常駐過多完整解碼的 AudioClip。
         void TouchPreloadedClipLru(string id)
         {
             if (string.IsNullOrEmpty(id)) return;
             preloadedClipLru[id] = ++preloadedClipLruTick;
         }
 
-        // 只有 PreloadAudioUpFront = true 才會讓 AudioClip 常駐，這時才需要設上限。
-        // 淘汰時一律跳過正在使用的 clip（草稿那版會先music.clip=null再Destroy，
+        void RememberDecodedClip(LocalChartEntry entry, AudioClip clip)
+        {
+            if (entry == null || clip == null) return;
+            if (!preloadedLocalCharts.TryGetValue(entry.Id, out var cached) || cached == null)
+            {
+                cached = new PreloadedLocalChart { Entry = entry };
+                preloadedLocalCharts[entry.Id] = cached;
+            }
+            if (cached.Music != null
+                && !ReferenceEquals(cached.Music, clip)
+                && !ReferenceEquals(cached.Music, music != null ? music.clip : null))
+                Destroy(cached.Music);
+            cached.Music = clip;
+            if (cached.Chart == null && chart != null && currentLibraryEntry != null && currentLibraryEntry.Id == entry.Id)
+                cached.Chart = chart;
+            if (string.IsNullOrEmpty(cached.AudioCachePath))
+                cached.AudioCachePath = lastAudioCachePath;
+            TouchPreloadedClipLru(entry.Id);
+            EvictPreloadedClipsIfOverLimit();
+        }
+
+        // 淘汰時一律跳過正在使用的 clip（草稿那版會先 music.clip=null 再 Destroy，
         // 選曲當下就可能把自己正在播的音效銷掉，所以改成保留使用中曲目）。
         // Chart 與 AudioCachePath 永遠保留，之後選到同一首還能再解碼。
         void EvictPreloadedClipsIfOverLimit()
         {
-            if (!PreloadAudioUpFront) return;
             while (true)
             {
                 var resident = 0;
@@ -7291,7 +7551,7 @@ namespace Gugarhythm
                 {
                     if (pair.Value?.Music == null) continue;
                     resident++;
-                    if (ReferenceEquals(music.clip, pair.Value.Music)) continue;
+                    if (music != null && ReferenceEquals(music.clip, pair.Value.Music)) continue;
                     var tick = preloadedClipLru.TryGetValue(pair.Key, out var known) ? known : 0;
                     if (tick < oldestTick)
                     {
@@ -7370,17 +7630,45 @@ namespace Gugarhythm
             if (detailCoverImage == null || detailCoverFallback == null) return;
             if (entry == null)
             {
+                detailCoverLoadGeneration++;
                 detailCoverEntryId = null;
                 if (detailCoverTexture != null) Destroy(detailCoverTexture);
                 detailCoverTexture = null;
+                ApplyDetailCoverVisuals();
+                return;
             }
-            else if (detailCoverEntryId != entry.Id)
-            {
-                detailCoverEntryId = entry.Id;
-                if (detailCoverTexture != null) Destroy(detailCoverTexture);
-                detailCoverTexture = LoadDetailCover(entry);
-            }
+            if (detailCoverEntryId == entry.Id) return;
 
+            detailCoverEntryId = entry.Id;
+            if (detailCoverTexture != null) Destroy(detailCoverTexture);
+            detailCoverTexture = null;
+            ApplyDetailCoverVisuals();
+            // 封面解碼（含可能的 GGR 讀檔）放到下一幀，讓列表高亮先畫出來。
+            var generation = ++detailCoverLoadGeneration;
+            if (detailCoverLoadCoroutine != null) StopCoroutine(detailCoverLoadCoroutine);
+            detailCoverLoadCoroutine = StartCoroutine(LoadDetailCoverDeferred(entry, generation));
+        }
+
+        IEnumerator LoadDetailCoverDeferred(LocalChartEntry entry, int generation)
+        {
+            yield return null;
+            detailCoverLoadCoroutine = null;
+            if (generation != detailCoverLoadGeneration || entry == null || detailCoverEntryId != entry.Id)
+                yield break;
+            var texture = LoadDetailCover(entry);
+            if (generation != detailCoverLoadGeneration || detailCoverEntryId != entry.Id)
+            {
+                if (texture != null) Destroy(texture);
+                yield break;
+            }
+            if (detailCoverTexture != null) Destroy(detailCoverTexture);
+            detailCoverTexture = texture;
+            ApplyDetailCoverVisuals();
+        }
+
+        void ApplyDetailCoverVisuals()
+        {
+            if (detailCoverImage == null || detailCoverFallback == null) return;
             var hasCover = detailCoverTexture != null;
             detailCoverImage.texture = detailCoverTexture;
             detailCoverImage.uvRect = new Rect(0, 0, 1, 1);
@@ -7390,9 +7678,27 @@ namespace Gugarhythm
                 aspect.aspectRatio = Mathf.Max(.01f, (float)detailCoverTexture.width / detailCoverTexture.height);
         }
 
-        static Texture2D LoadDetailCover(LocalChartEntry entry)
+        Texture2D LoadDetailCover(LocalChartEntry entry)
         {
-            if (entry == null || !LocalChartLibrary.TryReadSource(entry, out var bytes)) return null;
+            if (entry == null) return null;
+            // 預載入已把 CoverBytes 留在 RuntimeChart 上：不必再讀整包 GGR + ZIP。
+            if (preloadedLocalCharts.TryGetValue(entry.Id, out var cached)
+                && cached?.Chart?.CoverBytes != null
+                && cached.Chart.CoverBytes.Length > 0)
+            {
+                try { return GgrChartImporter.DecodeCoverTexture(cached.Chart.CoverBytes, false); }
+                catch (Exception) { /* fall through to file path */ }
+            }
+            if (chart != null
+                && currentLibraryEntry != null
+                && currentLibraryEntry.Id == entry.Id
+                && chart.CoverBytes != null
+                && chart.CoverBytes.Length > 0)
+            {
+                try { return GgrChartImporter.DecodeCoverTexture(chart.CoverBytes, false); }
+                catch (Exception) { /* fall through */ }
+            }
+            if (!LocalChartLibrary.TryReadSource(entry, out var bytes)) return null;
             try
             {
                 var package = GgrPackageReader.Read(bytes);
@@ -7540,7 +7846,7 @@ namespace Gugarhythm
 
         void BuildResult(RectTransform root)
         {
-            const float topHeight = 72f;
+            const float topHeight = 88f;
             const float bottomHeight = 100f;
             const float pagePad = 36f;
 
@@ -7550,7 +7856,10 @@ namespace Gugarhythm
             wash.anchorMin = new Vector2(0f, .55f);
             wash.offsetMin = Vector2.zero;
 
-            var topBand = Panel("Result Top Band", resultPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            resultSafeRoot = Layer("Result Safe", resultPanel);
+            ApplySafeAreaInsets(resultSafeRoot);
+
+            var topBand = Panel("Result Top Band", resultSafeRoot, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
             topBand.GetComponent<Image>().raycastTarget = false;
             topBand.anchorMin = new Vector2(0f, 1f);
             topBand.anchorMax = new Vector2(1f, 1f);
@@ -7558,25 +7867,18 @@ namespace Gugarhythm
             topBand.offsetMin = new Vector2(0f, -topHeight);
             topBand.offsetMax = Vector2.zero;
             var eyebrow = Label("RESULT", topBand, 14);
-            eyebrow.alignment = TextAnchor.MiddleLeft;
+            resultEyebrowLabel = eyebrow;
+            eyebrow.alignment = TextAnchor.UpperLeft;
             eyebrow.color = ResultAccent;
-            eyebrow.rectTransform.anchorMin = new Vector2(0f, .5f);
-            eyebrow.rectTransform.anchorMax = new Vector2(0f, .5f);
-            eyebrow.rectTransform.pivot = new Vector2(0f, .5f);
-            eyebrow.rectTransform.sizeDelta = new Vector2(180f, 24f);
-            eyebrow.rectTransform.anchoredPosition = new Vector2(pagePad, 10f);
             var title = Label("成績結算", topBand, 28);
-            title.alignment = TextAnchor.MiddleLeft;
-            title.rectTransform.anchorMin = new Vector2(0f, .5f);
-            title.rectTransform.anchorMax = new Vector2(0f, .5f);
-            title.rectTransform.pivot = new Vector2(0f, .5f);
-            title.rectTransform.sizeDelta = new Vector2(320f, 40f);
-            title.rectTransform.anchoredPosition = new Vector2(pagePad, -14f);
-            var accent = Panel("Result Accent", topBand, ResultAccent, new Vector2(48f, 3f), new Vector2(pagePad + 24f, -34f));
-            accent.GetComponent<Image>().raycastTarget = false;
+            resultTitleLabel = title;
+            title.alignment = TextAnchor.UpperLeft;
+            resultTitleAccent = Panel("Result Accent", topBand, ResultAccent, new Vector2(48f, 3f), Vector2.zero);
+            resultTitleAccent.GetComponent<Image>().raycastTarget = false;
+            LayoutResultPageHeader(resultEyebrowLabel, resultTitleLabel, resultTitleAccent, pagePad, false);
 
             resultContentRoot = new GameObject("Result Content", typeof(RectTransform)).GetComponent<RectTransform>();
-            resultContentRoot.SetParent(resultPanel, false);
+            resultContentRoot.SetParent(resultSafeRoot, false);
             resultContentRoot.anchorMin = Vector2.zero;
             resultContentRoot.anchorMax = Vector2.one;
             resultContentRoot.offsetMin = new Vector2(pagePad, bottomHeight + 12f);
@@ -7665,7 +7967,7 @@ namespace Gugarhythm
             resultFastLateLabel.rectTransform.offsetMin = new Vector2(28f, 16f);
             resultFastLateLabel.rectTransform.offsetMax = new Vector2(-28f, 42f);
 
-            var actionBand = Panel("Result Action Band", resultPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            var actionBand = Panel("Result Action Band", resultSafeRoot, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
             actionBand.GetComponent<Image>().raycastTarget = false;
             actionBand.anchorMin = new Vector2(0f, 0f);
             actionBand.anchorMax = new Vector2(1f, 0f);
@@ -7719,6 +8021,70 @@ namespace Gugarhythm
             return count;
         }
 
+        ResultCategoryRowView MakeResultCategoryRow(RectTransform parent, ResultNoteCategory category, bool header)
+        {
+            var root = new GameObject(header ? "Category Header" : $"Category {category}", typeof(RectTransform))
+                .GetComponent<RectTransform>();
+            root.SetParent(parent, false);
+            var fontSize = header ? 13 : 18;
+            var row = new ResultCategoryRowView
+            {
+                Category = category,
+                Root = root,
+                Name = MakeResultCategoryCell(root, 0f, .22f, TextAnchor.MiddleLeft, fontSize),
+                Acc = MakeResultCategoryCell(root, .22f, .50f, TextAnchor.MiddleRight, fontSize),
+                Fast = MakeResultCategoryCell(root, .50f, .75f, TextAnchor.MiddleRight, fontSize),
+                Late = MakeResultCategoryCell(root, .75f, 1f, TextAnchor.MiddleRight, fontSize),
+            };
+            root.gameObject.SetActive(false);
+            return row;
+        }
+
+        static Text MakeResultCategoryCell(RectTransform parent, float minX, float maxX, TextAnchor align, int fontSize)
+        {
+            var text = Label("", parent, fontSize);
+            text.alignment = align;
+            text.fontSize = fontSize;
+            text.horizontalOverflow = HorizontalWrapMode.Overflow;
+            text.verticalOverflow = VerticalWrapMode.Overflow;
+            var rect = text.rectTransform;
+            rect.anchorMin = new Vector2(minX, 0f);
+            rect.anchorMax = new Vector2(maxX, 1f);
+            rect.pivot = new Vector2(align == TextAnchor.MiddleRight ? 1f : 0f, .5f);
+            rect.offsetMin = new Vector2(align == TextAnchor.MiddleLeft ? 0f : 8f, 0f);
+            rect.offsetMax = new Vector2(align == TextAnchor.MiddleRight ? 0f : -8f, 0f);
+            return text;
+        }
+
+        void LayoutResultCategoryRows()
+        {
+            const float rowHeight = 36f;
+            var packed = 0;
+            if (resultCategoryHeader?.Root != null && resultCategoryHeader.Root.gameObject.activeSelf)
+            {
+                PlaceResultCategoryRow(resultCategoryHeader.Root, packed, rowHeight);
+                packed++;
+            }
+
+            if (resultCategoryRows == null) return;
+            for (var index = 0; index < resultCategoryRows.Length; index++)
+            {
+                var row = resultCategoryRows[index];
+                if (row?.Root == null || !row.Root.gameObject.activeSelf) continue;
+                PlaceResultCategoryRow(row.Root, packed, rowHeight);
+                packed++;
+            }
+        }
+
+        static void PlaceResultCategoryRow(RectTransform root, int packed, float rowHeight)
+        {
+            root.anchorMin = new Vector2(0f, 1f);
+            root.anchorMax = new Vector2(1f, 1f);
+            root.pivot = new Vector2(.5f, 1f);
+            root.sizeDelta = new Vector2(0f, rowHeight);
+            root.anchoredPosition = new Vector2(0f, -packed * rowHeight);
+        }
+
         Button MakeResultActionButton(string text, RectTransform parent, Vector2 position, Action action, Vector2 size, bool primary)
         {
             var color = primary ? ResultAccent : new Color(.22f, .22f, .22f, 1f);
@@ -7757,31 +8123,29 @@ namespace Gugarhythm
             wash.GetComponent<Image>().raycastTarget = false;
             wash.anchorMin = new Vector2(0f, .55f);
 
-            var topBand = Panel("Result Detail Top Band", resultDetailPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            resultDetailSafeRoot = Layer("Result Detail Safe", resultDetailPanel);
+            ApplySafeAreaInsets(resultDetailSafeRoot);
+
+            var topBand = Panel("Result Detail Top Band", resultDetailSafeRoot, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
             topBand.GetComponent<Image>().raycastTarget = false;
             topBand.anchorMin = new Vector2(0f, 1f);
             topBand.anchorMax = new Vector2(1f, 1f);
             topBand.pivot = new Vector2(.5f, 1f);
-            topBand.offsetMin = new Vector2(0f, -72f);
+            topBand.offsetMin = new Vector2(0f, -88f);
             topBand.offsetMax = Vector2.zero;
             var eyebrow = Label("DETAIL", topBand, 14);
-            eyebrow.alignment = TextAnchor.MiddleLeft;
+            resultDetailEyebrowLabel = eyebrow;
+            eyebrow.alignment = TextAnchor.UpperLeft;
             eyebrow.color = ResultAccent;
-            eyebrow.rectTransform.anchorMin = new Vector2(0f, .5f);
-            eyebrow.rectTransform.anchorMax = new Vector2(0f, .5f);
-            eyebrow.rectTransform.pivot = new Vector2(0f, .5f);
-            eyebrow.rectTransform.sizeDelta = new Vector2(180f, 24f);
-            eyebrow.rectTransform.anchoredPosition = new Vector2(pagePad, 10f);
             var title = Label("判定詳細", topBand, 28);
-            title.alignment = TextAnchor.MiddleLeft;
-            title.rectTransform.anchorMin = new Vector2(0f, .5f);
-            title.rectTransform.anchorMax = new Vector2(0f, .5f);
-            title.rectTransform.pivot = new Vector2(0f, .5f);
-            title.rectTransform.sizeDelta = new Vector2(320f, 40f);
-            title.rectTransform.anchoredPosition = new Vector2(pagePad, -14f);
+            resultDetailTitleLabel = title;
+            title.alignment = TextAnchor.UpperLeft;
+            resultDetailTitleAccent = Panel("Result Detail Accent", topBand, ResultAccent, new Vector2(48f, 3f), Vector2.zero);
+            resultDetailTitleAccent.GetComponent<Image>().raycastTarget = false;
+            LayoutResultPageHeader(resultDetailEyebrowLabel, resultDetailTitleLabel, resultDetailTitleAccent, pagePad, false);
 
             var content = new GameObject("Result Detail Content", typeof(RectTransform)).GetComponent<RectTransform>();
-            content.SetParent(resultDetailPanel, false);
+            content.SetParent(resultDetailSafeRoot, false);
             content.anchorMin = Vector2.zero;
             content.anchorMax = Vector2.one;
             content.offsetMin = new Vector2(pagePad, 112f);
@@ -7827,14 +8191,34 @@ namespace Gugarhythm
             categoryPanel.anchorMax = new Vector2(1f, .45f);
             var categoryEyebrow = Label("BY NOTE TYPE", categoryPanel, 13);
             StyleResultEyebrow(categoryEyebrow);
-            resultCategoryStatsLabel = Label("", categoryPanel, 20);
+            resultCategoryStatsLabel = Label("沒有判定資料", categoryPanel, 18);
             resultCategoryStatsLabel.alignment = TextAnchor.UpperLeft;
-            resultCategoryStatsLabel.rectTransform.anchorMin = new Vector2(0f, 0f);
-            resultCategoryStatsLabel.rectTransform.anchorMax = new Vector2(1f, 1f);
+            resultCategoryStatsLabel.color = ResultMuted;
+            resultCategoryStatsLabel.rectTransform.anchorMin = Vector2.zero;
+            resultCategoryStatsLabel.rectTransform.anchorMax = Vector2.one;
             resultCategoryStatsLabel.rectTransform.offsetMin = new Vector2(28f, 18f);
             resultCategoryStatsLabel.rectTransform.offsetMax = new Vector2(-28f, -48f);
+            var rowsRoot = new GameObject("Result Category Rows", typeof(RectTransform)).GetComponent<RectTransform>();
+            rowsRoot.SetParent(categoryPanel, false);
+            rowsRoot.anchorMin = Vector2.zero;
+            rowsRoot.anchorMax = Vector2.one;
+            rowsRoot.offsetMin = new Vector2(28f, 18f);
+            rowsRoot.offsetMax = new Vector2(-28f, -48f);
+            resultCategoryHeader = MakeResultCategoryRow(rowsRoot, ResultNoteCategory.Tap, true);
+            resultCategoryHeader.Name.text = string.Empty;
+            resultCategoryHeader.Acc.text = "ACC";
+            resultCategoryHeader.Fast.text = "FAST";
+            resultCategoryHeader.Late.text = "LATE";
+            resultCategoryHeader.Name.color = ResultMuted;
+            resultCategoryHeader.Acc.color = ResultMuted;
+            resultCategoryHeader.Fast.color = ResultMuted;
+            resultCategoryHeader.Late.color = ResultMuted;
+            var categories = resultRunStatistics.OrderedCategories;
+            resultCategoryRows = new ResultCategoryRowView[categories.Count];
+            for (var index = 0; index < categories.Count; index++)
+                resultCategoryRows[index] = MakeResultCategoryRow(rowsRoot, categories[index], false);
 
-            var actionBand = Panel("Result Detail Action Band", resultDetailPanel, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
+            var actionBand = Panel("Result Detail Action Band", resultDetailSafeRoot, new Color(0f, 0f, 0f, 0f), Vector2.zero, Vector2.zero, true);
             actionBand.GetComponent<Image>().raycastTarget = false;
             actionBand.anchorMin = new Vector2(0f, 0f);
             actionBand.anchorMax = new Vector2(1f, 0f);
@@ -8821,5 +9205,14 @@ namespace Gugarhythm
         static void Fill(RectTransform rect) { rect.anchorMin = Vector2.zero; rect.anchorMax = Vector2.one; rect.offsetMin = Vector2.zero; rect.offsetMax = Vector2.zero; }
         static void Outline(GameObject go, Color color, int width) { var outline = go.AddComponent<Outline>(); outline.effectColor = color; outline.effectDistance = new Vector2(width, -width); }
         struct TouchMemory { public float Lane; public Vector2 ScreenPosition; public double EventTime; public double StartTime; public double LastInputRecordTime; }
+        sealed class ResultCategoryRowView
+        {
+            public ResultNoteCategory Category;
+            public RectTransform Root;
+            public Text Name;
+            public Text Acc;
+            public Text Fast;
+            public Text Late;
+        }
     }
 }

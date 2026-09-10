@@ -11,7 +11,8 @@ namespace Gugarhythm
 {
     public static class BundledChartLibraryImporter
     {
-        public const string Version = "2026-08-22-bundled-ggr-1";
+        // Bump when StreamingAssets BundledCharts packages change (covers, audio, charts).
+        public const string Version = "2026-09-10-bundled-cover-1";
 
         const string PreferenceKey = "gugarhythm-bundled-charts-version";
         const string ManifestPath = "BundledCharts/bundled-ggr.txt";
@@ -61,9 +62,30 @@ namespace Gugarhythm
                     continue;
                 }
 
-                var groupId = LocalChartLibrary.FindMatchingGroupId(result.Chart.Title, result.Chart.Artist);
-                LocalChartLibrary.Save(name, bytes, result.Chart,
+                // Same title/artist/difficulty with a different package hash = stale bundled
+                // copy (e.g. cover refresh). Replace it so the library shows the new package.
+                var chart = result.Chart;
+                var predecessors = LocalChartLibrary.Load()
+                    .Where(entry => entry != null
+                        && SameSongKey(entry.Title, entry.Artist, chart.Title, chart.Artist)
+                        && SameDifficulty(entry.DifficultyName, chart.DifficultyName)
+                        && !string.Equals(entry.Id, id, StringComparison.OrdinalIgnoreCase))
+                    .ToList();
+                var groupId = predecessors.Select(entry => entry.GroupId)
+                    .FirstOrDefault(value => !string.IsNullOrWhiteSpace(value));
+                if (string.IsNullOrWhiteSpace(groupId))
+                    groupId = LocalChartLibrary.FindMatchingGroupId(chart.Title, chart.Artist);
+                var bestAccuracy = predecessors.Select(entry => entry.BestAccuracy).DefaultIfEmpty(-1f).Max();
+
+                foreach (var old in predecessors)
+                {
+                    LocalChartLibrary.TryDelete(old.Id);
+                    existingIds.Remove(old.Id);
+                }
+
+                var saved = LocalChartLibrary.Save(name, bytes, chart,
                     string.IsNullOrWhiteSpace(groupId) ? LocalChartLibrary.NewGroupId() : groupId);
+                if (bestAccuracy >= 0f) LocalChartLibrary.UpdateBestAccuracy(saved.Id, bestAccuracy);
                 existingIds.Add(id);
                 importedCount++;
                 yield return null;
@@ -74,6 +96,17 @@ namespace Gugarhythm
             PlayerPrefs.Save();
             Debug.Log("GUGARHYTHM_BUNDLED_CHARTS_IMPORTED count=" + importedCount);
         }
+
+        static bool SameSongKey(string titleA, string artistA, string titleB, string artistB) =>
+            string.Equals(NormalizeKey(titleA), NormalizeKey(titleB), StringComparison.Ordinal) &&
+            string.Equals(NormalizeKey(artistA), NormalizeKey(artistB), StringComparison.Ordinal);
+
+        static bool SameDifficulty(string a, string b) =>
+            string.Equals(NormalizeKey(a), NormalizeKey(b), StringComparison.Ordinal);
+
+        static string NormalizeKey(string value) =>
+            string.Join(" ", (value ?? string.Empty).Trim().Split((char[])null, StringSplitOptions.RemoveEmptyEntries))
+                .ToUpperInvariant();
 
         static string[] ParseManifest(string text) => (text ?? string.Empty)
             .Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries)

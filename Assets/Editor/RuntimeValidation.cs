@@ -5017,6 +5017,13 @@ public static class RuntimeValidation
                 Math.Abs(GameplayTiming.PlaybackDspForChartTime(400, -.4, .3, .1) - 400.2) < .0001 &&
                 Math.Abs(GameplayTiming.ScheduledDspForRecovery(400, 100, 0) - 300) < .0001,
             "Playback recovery must preserve the established device-offset sign and chart anchor");
+        var seekableEnd = GameplayTiming.SeekableClipTime(60f, 60f, 44100 * 60, 44100);
+        Require(seekableEnd < 60f && seekableEnd >= 60f - 0.03f,
+            "Seekable clip time must stop short of the inclusive FMOD end");
+        Require(GameplayTiming.SeekableClipTime(-1f, 60f, 44100 * 60, 44100) == 0f,
+            "Seekable clip time must not go before the start of a clip");
+        Require(Math.Abs(GameplayTiming.SeekableClipTime(12.7f, 60f, 44100 * 60, 44100) - 12.7f) < .0001f,
+            "In-range seekable clip time must keep the requested position");
 
         var tap = Note(540, 1, 0);
         var engine = new JudgmentEngine(new[] { tap }, new ScoreState());
