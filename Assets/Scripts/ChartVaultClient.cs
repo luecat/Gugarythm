@@ -154,7 +154,9 @@ namespace Gugarhythm
             {
                 request = UnityWebRequestTexture.GetTexture(uri, true);
                 request.timeout = timeoutSeconds;
-                request.disposeDownloadHandlerOnDispose = true;
+                // Keep DownloadHandlerTexture alive after UnityWebRequest.Dispose so the
+                // Texture2D handed to the library UI is not destroyed with the request.
+                request.disposeDownloadHandlerOnDispose = false;
                 ApplyBearer(request, sessionToken);
                 operation = request.SendWebRequest();
             }

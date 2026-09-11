@@ -817,6 +817,9 @@ namespace Gugarhythm
         string libraryListBuiltDifficultyName = string.Empty;
         readonly List<string> libraryListBuiltGroupIds = new();
         int remoteCoverGeneration;
+        string pendingRemoteCoverCacheKey;
+        int enterOnlineLibraryGeneration;
+        Coroutine enterOnlineLibraryCoroutine;
         string chartVaultSessionToken;
         string pendingChartVaultLoginState;
         string pendingChartVaultCodeVerifier;
@@ -1133,6 +1136,10 @@ namespace Gugarhythm
                 menuPanel.gameObject.SetActive(true);
                 settingsPanel.gameObject.SetActive(false);
                 RestoreLibrarySelection();
+                // Warm public catalog cache + default cover before the user taps 線上.
+                EnsurePublicRemoteCatalogCacheLoaded();
+                if (remoteCatalog != null)
+                    StartCoroutine(WarmDefaultOnlineCover());
                 RefreshLibraryUI();
                 if (!localChartPreloadStarted)
                     StartCoroutine(PreloadLocalCharts());
@@ -1308,6 +1315,7 @@ namespace Gugarhythm
             destroying = true;
             remoteOperationGeneration++;
             remoteCoverGeneration++;
+            enterOnlineLibraryGeneration++;
             libraryLoadGeneration++;
             detailCoverLoadGeneration++;
             AudioSettings.OnAudioConfigurationChanged -= HandleAudioConfigurationChanged;
@@ -6012,6 +6020,7 @@ namespace Gugarhythm
             remoteCatalog = null;
             selectedRemoteChart = null;
             remoteOperationGeneration++;
+            pendingRemoteCoverCacheKey = null;
             remoteCoverGeneration++;
             ClearRemoteCoverTexture();
             RefreshAccountSettings();
@@ -6181,6 +6190,7 @@ namespace Gugarhythm
             remoteCatalog = null;
             selectedRemoteChart = null;
             remoteOperationGeneration++;
+            pendingRemoteCoverCacheKey = null;
             remoteCoverGeneration++;
             ClearRemoteCoverTexture();
             RefreshAccountSettings();
@@ -6560,38 +6570,254 @@ namespace Gugarhythm
             if (source != ChartLibrarySource.Local && source != ChartLibrarySource.Online) return;
             if (loadStatus != null)
                 loadStatus.text = string.Empty;
-            if (librarySource == source)
-            {
-                RefreshLibraryUI();
-                return;
-            }
 
-            librarySource = source;
             if (source == ChartLibrarySource.Local)
             {
+                CancelEnterOnlineLibrary();
+                if (librarySource == ChartLibrarySource.Local)
+                {
+                    RefreshLibraryUI();
+                    return;
+                }
+
+                librarySource = ChartLibrarySource.Local;
+                pendingRemoteCoverCacheKey = null;
                 remoteCoverGeneration++;
-                ClearRemoteCoverTexture();
+                ClearRemoteCoverTexture(updateDisplay: false);
                 RefreshLibraryUI();
                 return;
             }
 
-            RefreshDetailCover(null);
-            if (remoteCatalogScope == RemoteChartCatalogScope.Public && !remoteCatalogCacheLoaded)
+            if (librarySource == ChartLibrarySource.Online)
             {
-                remoteCatalogCacheLoaded = true;
-                if (remoteCatalogCache != null && remoteCatalogCache.TryLoad(out var cachedCatalog))
-                {
-                    remoteCatalog = cachedCatalog;
-                }
-                else
-                {
-                    SetStatus("尚無線上譜面快取，正在取得公開清單。");
-                }
+                RefreshLibraryUI();
+                return;
+            }
+
+            // Stay on 本機 until Online can open with the default cover already bound.
+            if (enterOnlineLibraryCoroutine != null) return;
+            if (TryRevealOnlineLibraryReady()) return;
+            enterOnlineLibraryCoroutine = StartCoroutine(EnterOnlineLibraryWhenReady());
+        }
+
+        void CancelEnterOnlineLibrary()
+        {
+            enterOnlineLibraryGeneration++;
+            if (enterOnlineLibraryCoroutine != null)
+            {
+                StopCoroutine(enterOnlineLibraryCoroutine);
+                enterOnlineLibraryCoroutine = null;
+            }
+        }
+
+        bool TryRevealOnlineLibraryReady()
+        {
+            EnsurePublicRemoteCatalogCacheLoaded();
+            if (remoteCatalog == null) return false;
+
+            var target = ResolveDefaultRemoteChart();
+            if (target != null && !string.IsNullOrEmpty(target.CoverUrl) &&
+                !TryGetCachedRemoteCover(RemoteCoverCacheKey(target), out _))
+                return false;
+
+            RevealOnlineLibrary(target);
+            return true;
+        }
+
+        RemoteChartSummary ResolveDefaultRemoteChart()
+        {
+            var charts = BuildSortedRemoteLibraryCharts();
+            if (selectedRemoteChart != null)
+            {
+                var current = charts.FirstOrDefault(chart => SameRemoteChart(chart, selectedRemoteChart));
+                if (current != null) return current;
+            }
+            return charts.Count > 0 ? charts[0] : null;
+        }
+
+        void RevealOnlineLibrary(RemoteChartSummary target)
+        {
+            librarySource = ChartLibrarySource.Online;
+            selectedRemoteChart = target;
+            if (target != null &&
+                TryGetCachedRemoteCover(RemoteCoverCacheKey(target), out var cover))
+                ApplyRemoteCover(cover);
+            else
+            {
+                ReleaseRemoteCoverReference();
+                ShowRemoteCover(null);
             }
 
             RefreshLibraryUI();
-            if (ShouldFetchRemoteCatalogOnSourceChange(source, remoteCatalogRequested))
+            if (ShouldFetchRemoteCatalogOnSourceChange(ChartLibrarySource.Online, remoteCatalogRequested))
                 StartCoroutine(RefreshRemoteCatalog(false));
+            else if (remoteCatalog == null && !remoteCatalogLoading)
+                StartCoroutine(RefreshRemoteCatalog(false));
+        }
+
+        IEnumerator EnterOnlineLibraryWhenReady()
+        {
+            const float timeoutSeconds = 8f;
+            var generation = ++enterOnlineLibraryGeneration;
+            var deadline = Time.realtimeSinceStartup + timeoutSeconds;
+            try
+            {
+                EnsurePublicRemoteCatalogCacheLoaded();
+                if (remoteCatalog == null && !remoteCatalogLoading && !remoteCatalogRequested)
+                    StartCoroutine(RefreshRemoteCatalog(false));
+
+                var startedExtraCatalogFetch = false;
+                while (remoteCatalog == null &&
+                       Time.realtimeSinceStartup < deadline &&
+                       !destroying &&
+                       generation == enterOnlineLibraryGeneration)
+                {
+                    if (!remoteCatalogLoading)
+                    {
+                        if (!remoteCatalogRequested)
+                            StartCoroutine(RefreshRemoteCatalog(false));
+                        else if (!startedExtraCatalogFetch)
+                        {
+                            startedExtraCatalogFetch = true;
+                            StartCoroutine(RefreshRemoteCatalog(false));
+                        }
+                    }
+                    yield return null;
+                }
+
+                if (destroying || generation != enterOnlineLibraryGeneration) yield break;
+
+                var target = ResolveDefaultRemoteChart();
+                if (target != null && !string.IsNullOrEmpty(target.CoverUrl) &&
+                    !TryGetCachedRemoteCover(RemoteCoverCacheKey(target), out _))
+                {
+                    StartCoroutine(PrefetchRemoteCover(target));
+                    while (!TryGetCachedRemoteCover(RemoteCoverCacheKey(target), out _) &&
+                           Time.realtimeSinceStartup < deadline &&
+                           !destroying &&
+                           generation == enterOnlineLibraryGeneration)
+                        yield return null;
+                }
+
+                if (destroying || generation != enterOnlineLibraryGeneration) yield break;
+                RevealOnlineLibrary(ResolveDefaultRemoteChart());
+            }
+            finally
+            {
+                if (generation == enterOnlineLibraryGeneration)
+                    enterOnlineLibraryCoroutine = null;
+            }
+        }
+
+        IEnumerator WarmDefaultOnlineCover()
+        {
+            var target = ResolveDefaultRemoteChart();
+            if (target == null || string.IsNullOrEmpty(target.CoverUrl)) yield break;
+            yield return PrefetchRemoteCover(target);
+        }
+
+        IEnumerator PrefetchRemoteCover(RemoteChartSummary chart)
+        {
+            if (chart == null || string.IsNullOrEmpty(chart.CoverUrl)) yield break;
+            var cacheKey = RemoteCoverCacheKey(chart);
+            if (TryGetCachedRemoteCover(cacheKey, out _)) yield break;
+
+            Texture2D downloadedTexture = null;
+            var resultReceived = false;
+            var operationGeneration = remoteOperationGeneration;
+            IEnumerator operation = null;
+            try
+            {
+                operation = chartVaultClient?.DownloadCover(chart, (texture, _) =>
+                {
+                    if (destroying || operationGeneration != remoteOperationGeneration)
+                    {
+                        if (texture != null) Destroy(texture);
+                        return;
+                    }
+                    if (resultReceived)
+                    {
+                        if (texture != null) Destroy(texture);
+                        return;
+                    }
+                    downloadedTexture = texture;
+                    resultReceived = true;
+                    if (downloadedTexture != null)
+                        remoteCoverTextures[cacheKey] = downloadedTexture;
+                }, chartVaultSessionToken);
+            }
+            catch (Exception)
+            {
+                operation = null;
+            }
+
+            var operationFailed = operation == null;
+            var operationCompleted = false;
+            try
+            {
+                while (!operationFailed && !operationCompleted)
+                {
+                    if (!TryAdvanceRemoteOperation(operation, out var hasNext, out var current))
+                    {
+                        operationFailed = true;
+                        break;
+                    }
+                    if (!hasNext)
+                    {
+                        operationCompleted = true;
+                        break;
+                    }
+                    yield return current;
+                }
+            }
+            finally
+            {
+                DisposeRemoteOperation(operation);
+            }
+        }
+
+        void EnsurePublicRemoteCatalogCacheLoaded()
+        {
+            if (remoteCatalogScope != RemoteChartCatalogScope.Public || remoteCatalogCacheLoaded)
+                return;
+            remoteCatalogCacheLoaded = true;
+            if (remoteCatalogCache != null && remoteCatalogCache.TryLoad(out var cachedCatalog))
+                remoteCatalog = cachedCatalog;
+        }
+
+        List<RemoteChartSummary> BuildSortedRemoteLibraryCharts()
+        {
+            var charts = remoteCatalog?.Charts == null
+                ? new List<RemoteChartSummary>()
+                : remoteCatalog.Charts.Where(chart => chart != null).ToList();
+            var filter = librarySearchInput == null ? string.Empty : librarySearchInput.text.Trim();
+            if (!string.IsNullOrEmpty(filter))
+            {
+                charts = charts.Where(chart =>
+                    ContainsIgnoreCase(chart.Title, filter) ||
+                    ContainsIgnoreCase(chart.Artist, filter) ||
+                    ContainsIgnoreCase(chart.Author, filter) ||
+                    ContainsIgnoreCase(chart.Difficulty, filter)).ToList();
+            }
+
+            if (remoteLibrarySort == ChartLibrarySort.Difficulty)
+            {
+                return (remoteLibrarySortAscending
+                        ? charts.OrderBy(chart => chart.Rating)
+                            .ThenBy(chart => chart.Difficulty, StringComparer.OrdinalIgnoreCase)
+                            .ThenBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                        : charts.OrderByDescending(chart => chart.Rating)
+                            .ThenByDescending(chart => chart.Difficulty, StringComparer.OrdinalIgnoreCase)
+                            .ThenByDescending(chart => chart.Title, StringComparer.OrdinalIgnoreCase))
+                    .ToList();
+            }
+
+            return (remoteLibrarySortAscending
+                    ? charts.OrderBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                        .ThenBy(chart => chart.Rating)
+                    : charts.OrderByDescending(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                        .ThenByDescending(chart => chart.Rating))
+                .ToList();
         }
 
         void RefreshLibrarySourceControls()
@@ -6686,6 +6912,7 @@ namespace Gugarhythm
             }
             remoteCatalogScope = scope;
             remoteOperationGeneration++;
+            pendingRemoteCoverCacheKey = null;
             remoteCoverGeneration++;
             ClearRemoteCoverTexture();
             selectedRemoteChart = null;
@@ -6750,10 +6977,11 @@ namespace Gugarhythm
             finally
             {
                 DisposeRemoteOperation(operation);
+                if (generation == remoteOperationGeneration)
+                    remoteCatalogLoading = false;
             }
 
             if (destroying || generation != remoteOperationGeneration) yield break;
-            remoteCatalogLoading = false;
             RefreshLibrarySourceControls();
             if (resultReceived && result.Unauthorized)
             {
@@ -6784,6 +7012,7 @@ namespace Gugarhythm
                     cacheSaved = false;
                 }
             }
+            StartCoroutine(WarmDefaultOnlineCover());
             StartCoroutine(PreloadRemoteCovers(remoteCatalog));
             if (librarySource == ChartLibrarySource.Online)
             {
@@ -6968,48 +7197,11 @@ namespace Gugarhythm
             var libraryScroll = libraryListContent.parent == null ? null : libraryListContent.parent.GetComponent<ScrollRect>();
             var restoreScrollPosition = remoteLibraryScrollPositionInitialized && libraryScroll != null;
             var preservedScrollPosition = restoreScrollPosition ? libraryScroll.verticalNormalizedPosition : 1f;
-            var charts = remoteCatalog?.Charts == null
-                ? new List<RemoteChartSummary>()
-                : remoteCatalog.Charts.Where(chart => chart != null).ToList();
-            var filter = librarySearchInput == null ? string.Empty : librarySearchInput.text.Trim();
-            if (!string.IsNullOrEmpty(filter))
-            {
-                charts = charts.Where(chart =>
-                    ContainsIgnoreCase(chart.Title, filter) ||
-                    ContainsIgnoreCase(chart.Artist, filter) ||
-                    ContainsIgnoreCase(chart.Author, filter) ||
-                    ContainsIgnoreCase(chart.Difficulty, filter)).ToList();
-            }
-
-            if (remoteLibrarySort == ChartLibrarySort.Difficulty)
-            {
-                charts = (remoteLibrarySortAscending
-                        ? charts.OrderBy(chart => chart.Rating)
-                            .ThenBy(chart => chart.Difficulty, StringComparer.OrdinalIgnoreCase)
-                            .ThenBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
-                        : charts.OrderByDescending(chart => chart.Rating)
-                            .ThenByDescending(chart => chart.Difficulty, StringComparer.OrdinalIgnoreCase)
-                            .ThenByDescending(chart => chart.Title, StringComparer.OrdinalIgnoreCase))
-                    .ToList();
-            }
-            else
-            {
-                charts = (remoteLibrarySortAscending
-                        ? charts.OrderBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
-                            .ThenBy(chart => chart.Rating)
-                        : charts.OrderByDescending(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
-                            .ThenByDescending(chart => chart.Rating))
-                    .ToList();
-            }
+            var charts = BuildSortedRemoteLibraryCharts();
 
             if (selectedRemoteChart == null && charts.Count > 0)
-            {
                 selectedRemoteChart = charts[0];
-                remoteCoverGeneration++;
-                ClearRemoteCoverTexture();
-                if (selectedRemoteChart.CoverUrl != null)
-                    StartCoroutine(DownloadRemoteCover(selectedRemoteChart, remoteCoverGeneration));
-            }
+            EnsureSelectedRemoteCover();
 
             libraryCountLabel.text = charts.Count.ToString();
             librarySortModeLabel.text = remoteLibrarySort == ChartLibrarySort.Difficulty ? "難度" : "曲名";
@@ -7101,7 +7293,12 @@ namespace Gugarhythm
                 detailDifficultyLabel.text = FormatRemoteDifficulty(selectedRemoteChart) + " · v" +
                     selectedRemoteChart.Version + " · " + (selectedRemoteChart.IsPrivate ? "私人" : "公開");
                 detailAccuracyLabel.text = string.Empty;
-                ShowRemoteCover(remoteCoverTexture);
+                if (remoteCoverTexture != null)
+                    ShowRemoteCover(remoteCoverTexture);
+                else if (string.IsNullOrEmpty(selectedRemoteChart.CoverUrl))
+                    ShowRemoteCover(null);
+                else
+                    HideDetailCoverArtwork();
             }
             if (downloadRemoteChartButton != null)
                 downloadRemoteChartButton.interactable = selectedRemoteChart != null && !remoteChartDownloading;
@@ -7112,25 +7309,46 @@ namespace Gugarhythm
             if (librarySource != ChartLibrarySource.Online || chart == null || remoteCatalog?.Charts == null) return;
             var current = remoteCatalog.Charts.FirstOrDefault(candidate => SameRemoteChart(candidate, chart));
             if (current == null) return;
+            if (SameRemoteChart(selectedRemoteChart, current)) return;
             selectedRemoteChart = current;
+            pendingRemoteCoverCacheKey = null;
             remoteCoverGeneration++;
-            ClearRemoteCoverTexture();
             RefreshRemoteLibraryUI();
-            if (current.CoverUrl != null)
-                StartCoroutine(DownloadRemoteCover(current, remoteCoverGeneration));
+        }
+
+        void EnsureSelectedRemoteCover()
+        {
+            if (selectedRemoteChart == null || string.IsNullOrEmpty(selectedRemoteChart.CoverUrl))
+            {
+                pendingRemoteCoverCacheKey = null;
+                ReleaseRemoteCoverReference();
+                if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(null);
+                return;
+            }
+
+            var cacheKey = RemoteCoverCacheKey(selectedRemoteChart);
+            if (TryGetCachedRemoteCover(cacheKey, out var cachedTexture))
+            {
+                pendingRemoteCoverCacheKey = null;
+                ApplyRemoteCover(cachedTexture);
+                return;
+            }
+
+            ReleaseRemoteCoverReference();
+            HideDetailCoverArtwork();
+            if (pendingRemoteCoverCacheKey == cacheKey) return;
+            pendingRemoteCoverCacheKey = cacheKey;
+            StartCoroutine(DownloadRemoteCover(selectedRemoteChart, remoteCoverGeneration));
         }
 
         IEnumerator DownloadRemoteCover(RemoteChartSummary chart, int coverGeneration)
         {
             var cacheKey = RemoteCoverCacheKey(chart);
-            if (remoteCoverTextures.TryGetValue(cacheKey, out var cachedTexture) && cachedTexture != null)
+            if (TryGetCachedRemoteCover(cacheKey, out var cachedTexture))
             {
-                if (SameRemoteChart(selectedRemoteChart, chart))
-                {
-                    ClearRemoteCoverTexture();
-                    remoteCoverTexture = cachedTexture;
-                    ShowRemoteCover(remoteCoverTexture);
-                }
+                if (pendingRemoteCoverCacheKey == cacheKey) pendingRemoteCoverCacheKey = null;
+                if (coverGeneration == remoteCoverGeneration && SameRemoteChart(selectedRemoteChart, chart))
+                    ApplyRemoteCover(cachedTexture);
                 yield break;
             }
 
@@ -7185,30 +7403,120 @@ namespace Gugarhythm
             finally
             {
                 DisposeRemoteOperation(operation);
+                if (pendingRemoteCoverCacheKey == cacheKey) pendingRemoteCoverCacheKey = null;
             }
 
             if (destroying || operationGeneration != remoteOperationGeneration ||
+                coverGeneration != remoteCoverGeneration ||
                 !SameRemoteChart(selectedRemoteChart, chart))
             {
                 yield break;
             }
             if (operationFailed || !resultReceived || downloadedTexture == null) yield break;
-            ClearRemoteCoverTexture();
-            remoteCoverTexture = downloadedTexture;
-            if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(remoteCoverTexture);
+            ApplyRemoteCover(downloadedTexture);
         }
 
         IEnumerator PreloadRemoteCovers(RemoteChartCatalog catalog)
         {
             if (catalog?.Charts == null) yield break;
-            foreach (var chart in catalog.Charts)
+            foreach (var chart in OrderRemoteChartsForCoverPreload(catalog.Charts))
             {
                 if (destroying) yield break;
                 if (chart == null || string.IsNullOrEmpty(chart.CoverUrl) ||
                     remoteCoverTextures.ContainsKey(RemoteCoverCacheKey(chart)))
                     continue;
-                yield return DownloadRemoteCover(chart, ++remoteCoverGeneration);
+                // Reuse the current generation so preload never cancels the selected cover download.
+                yield return DownloadRemoteCover(chart, remoteCoverGeneration);
             }
+        }
+
+        IEnumerable<RemoteChartSummary> OrderRemoteChartsForCoverPreload(
+            IReadOnlyList<RemoteChartSummary> charts)
+        {
+            if (charts == null || charts.Count == 0) yield break;
+
+            RemoteChartSummary preferred = null;
+            if (selectedRemoteChart != null)
+            {
+                preferred = charts.FirstOrDefault(chart => SameRemoteChart(chart, selectedRemoteChart));
+            }
+            if (preferred == null || string.IsNullOrEmpty(preferred.CoverUrl))
+            {
+                preferred = charts
+                    .Where(chart => chart != null && !string.IsNullOrEmpty(chart.CoverUrl))
+                    .OrderBy(chart => chart.Title, StringComparer.OrdinalIgnoreCase)
+                    .ThenBy(chart => chart.Rating)
+                    .FirstOrDefault();
+            }
+
+            if (preferred != null) yield return preferred;
+            foreach (var chart in charts)
+            {
+                if (chart == null || SameRemoteChart(chart, preferred)) continue;
+                yield return chart;
+            }
+        }
+
+        bool TryGetCachedRemoteCover(string cacheKey, out Texture2D texture)
+        {
+            texture = null;
+            if (string.IsNullOrEmpty(cacheKey) ||
+                !remoteCoverTextures.TryGetValue(cacheKey, out var cachedTexture))
+                return false;
+            // Unity fake-null: a destroyed Texture2D compares equal to null.
+            if (cachedTexture == null)
+            {
+                remoteCoverTextures.Remove(cacheKey);
+                return false;
+            }
+            texture = cachedTexture;
+            return true;
+        }
+
+        void ApplyRemoteCover(Texture2D texture)
+        {
+            if (texture == null) return;
+            remoteCoverTexture = texture;
+            if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(remoteCoverTexture);
+        }
+
+        void ReleaseRemoteCoverReference()
+        {
+            if (remoteCoverTexture != null &&
+                !remoteCoverTextures.Values.Any(texture => ReferenceEquals(texture, remoteCoverTexture)))
+                Destroy(remoteCoverTexture);
+            remoteCoverTexture = null;
+        }
+
+        void ClearRemoteCoverTexture(bool updateDisplay = true)
+        {
+            ReleaseRemoteCoverReference();
+            if (updateDisplay && librarySource == ChartLibrarySource.Online) ShowRemoteCover(null);
+        }
+
+        void HideDetailCoverArtwork()
+        {
+            if (detailCoverImage == null || detailCoverFallback == null) return;
+            // Keep the cover frame, but show neither inherited art nor the fallback splash.
+            detailCoverEntryId = null;
+            detailCoverImage.texture = null;
+            detailCoverImage.gameObject.SetActive(false);
+            detailCoverFallback.gameObject.SetActive(false);
+        }
+
+        void ShowRemoteCover(Texture2D texture)
+        {
+            if (detailCoverImage == null || detailCoverFallback == null) return;
+            // Remote artwork replaces the shared detail RawImage; invalidate local cover
+            // identity so returning to 本機 re-applies the local texture.
+            detailCoverEntryId = null;
+            var hasCover = texture != null;
+            detailCoverImage.texture = texture;
+            detailCoverImage.uvRect = new Rect(0, 0, 1, 1);
+            detailCoverImage.gameObject.SetActive(hasCover);
+            detailCoverFallback.gameObject.SetActive(!hasCover);
+            if (hasCover && detailCoverImage.TryGetComponent<AspectRatioFitter>(out var aspect))
+                aspect.aspectRatio = Mathf.Max(.01f, (float)texture.width / texture.height);
         }
 
         IEnumerator DownloadSelectedRemoteChart()
@@ -7299,29 +7607,9 @@ namespace Gugarhythm
                 return;
             }
             selectedRemoteChart = null;
+            pendingRemoteCoverCacheKey = null;
             remoteCoverGeneration++;
             ClearRemoteCoverTexture();
-        }
-
-        void ClearRemoteCoverTexture()
-        {
-            if (remoteCoverTexture != null &&
-                !remoteCoverTextures.Values.Any(texture => ReferenceEquals(texture, remoteCoverTexture)))
-                Destroy(remoteCoverTexture);
-            remoteCoverTexture = null;
-            if (librarySource == ChartLibrarySource.Online) ShowRemoteCover(null);
-        }
-
-        void ShowRemoteCover(Texture2D texture)
-        {
-            if (detailCoverImage == null || detailCoverFallback == null) return;
-            var hasCover = texture != null;
-            detailCoverImage.texture = texture;
-            detailCoverImage.uvRect = new Rect(0, 0, 1, 1);
-            detailCoverImage.gameObject.SetActive(hasCover);
-            detailCoverFallback.gameObject.SetActive(!hasCover);
-            if (hasCover && detailCoverImage.TryGetComponent<AspectRatioFitter>(out var aspect))
-                aspect.aspectRatio = Mathf.Max(.01f, (float)texture.width / texture.height);
         }
 
         static bool SameRemoteChart(RemoteChartSummary left, RemoteChartSummary right) =>

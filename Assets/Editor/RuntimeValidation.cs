@@ -1393,6 +1393,12 @@ public static class RuntimeValidation
         Require(durationField != null, "The startup splash duration must be exposed for validation");
         Require(Math.Abs((float)durationField.GetRawConstantValue() - 1.5f) < .0001f,
             "The GUGARHYTHM startup page must remain visible for 1.5 seconds");
+        var startupSource = File.ReadAllText(Path.Combine(Application.dataPath,
+            "Scripts", "GugarhythmStartupSplash.cs"));
+        Require(startupSource.Contains("WaitForStableLandscapePresentation()", StringComparison.Ordinal),
+            "Startup splash must wait for a stable landscape presentation before revealing artwork");
+        Require(startupSource.Contains("AspectMode.EnvelopeParent", StringComparison.Ordinal),
+            "Startup splash must cover the screen without distorting the artwork aspect ratio");
         Debug.Log("GUGARHYTHM_STARTUP_SPLASH_VALIDATION_OK duration=1.5");
     }
 
@@ -1905,6 +1911,21 @@ public static class RuntimeValidation
             "Chart Vault client must reject an invalid chart ID");
         Require(!ChartVaultClient.TryPrepareDownload(null, destinationPath, out _, out error),
             "Chart Vault client must reject a null chart");
+
+        var chartVaultClientSource = File.ReadAllText(Path.Combine(Application.dataPath,
+            "Scripts", "ChartVaultClient.cs"));
+        Require(chartVaultClientSource.Contains(
+                "request.disposeDownloadHandlerOnDispose = false;", StringComparison.Ordinal),
+            "Cover downloads must keep DownloadHandlerTexture alive after UnityWebRequest.Dispose");
+
+        var librarySource = File.ReadAllText(Path.Combine(Application.dataPath,
+            "Scripts", "GugarhythmLandscapePrototype.cs"));
+        Require(librarySource.Contains("EnsureSelectedRemoteCover()", StringComparison.Ordinal),
+            "Online library UI must restore or download the selected remote cover on refresh");
+        Require(librarySource.Contains("EnterOnlineLibraryWhenReady()", StringComparison.Ordinal),
+            "Online library entry must wait off-screen for the default cover before revealing Online UI");
+        Require(librarySource.Contains("WarmDefaultOnlineCover()", StringComparison.Ordinal),
+            "Online library must warm the default cover before the user opens Online");
     }
 
     static void ValidateRemoteCatalogPersistence()
