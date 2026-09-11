@@ -621,6 +621,11 @@ namespace Gugarhythm
         const float SettingsColumnGap = 24f;
         // Header 底邊到 Main Layout 頂邊的間距。
         const float SettingsBodyBelowHeaderGap = 20f;
+        // Settings sidebar tabs: top-stacked so stretching the body never opens a large top gap.
+        const float SettingsNavTopPad = 20f;
+        const float SettingsNavButtonWidth = 220f;
+        const float SettingsNavButtonHeight = 68f;
+        const float SettingsNavButtonGap = 12f;
         Text settingsTitle;
         RectTransform settingsBackButton;
         RectTransform settingsNavigation;
@@ -5090,7 +5095,7 @@ namespace Gugarhythm
             // 依「目前作用中分頁」的實際佔用寬高決定要不要捲。
             // 不要死用 1030×760 設計框，也不要把 padding 算進「是否溢出」。
             const float ScrollOverflowEpsilon = 1f;
-            var sidebarNeededHeight = MeasureCenteredChildrenSize(settingsNavigation).y;
+            var sidebarNeededHeight = MeasureSettingsNavigationHeight();
             if (sidebarNeededHeight < 1f)
                 sidebarNeededHeight = SettingsBodyPanelHeight;
             var sidebarNeedsVerticalScroll = sidebarNeededHeight > bodyHeight + ScrollOverflowEpsilon;
@@ -5106,7 +5111,12 @@ namespace Gugarhythm
                     sidebarContent.sizeDelta = new Vector2(SettingsSidebarWidth, sidebarInnerHeight);
                     sidebarContent.anchoredPosition = Vector2.zero;
                 }
-                Fill(settingsNavigation);
+                // Top-align the tab stack; do not stretch (center-anchored Fill left a large top gap).
+                settingsNavigation.anchorMin = new Vector2(0f, 1f);
+                settingsNavigation.anchorMax = new Vector2(1f, 1f);
+                settingsNavigation.pivot = new Vector2(.5f, 1f);
+                settingsNavigation.sizeDelta = new Vector2(0f, sidebarNeededHeight);
+                settingsNavigation.anchoredPosition = Vector2.zero;
             }
             ApplyScrollAxes(settingsSidebarScroll, horizontal: false, vertical: sidebarNeedsVerticalScroll);
 
@@ -5225,6 +5235,31 @@ namespace Gugarhythm
                 found = true;
             }
             return found ? new Vector2(extentX * 2f, extentY * 2f) : Vector2.zero;
+        }
+
+        static void PlaceSettingsNavButton(Button button, int index)
+        {
+            if (button == null) return;
+            var y = -(SettingsNavTopPad + index * (SettingsNavButtonHeight + SettingsNavButtonGap));
+            PinToAnchor(button.GetComponent<RectTransform>(), new Vector2(.5f, 1f), new Vector2(.5f, 1f),
+                new Vector2(0f, y));
+        }
+
+        float MeasureSettingsNavigationHeight()
+        {
+            if (settingsNavigation == null) return SettingsBodyPanelHeight;
+            var count = 0;
+            for (var index = 0; index < settingsNavigation.childCount; index++)
+            {
+                var child = settingsNavigation.GetChild(index) as RectTransform;
+                if (child == null || !child.gameObject.activeSelf) continue;
+                if (child.GetComponent<Button>() == null) continue;
+                count++;
+            }
+            if (count <= 0) return SettingsBodyPanelHeight;
+            return SettingsNavTopPad * 2f +
+                   count * SettingsNavButtonHeight +
+                   Mathf.Max(0, count - 1) * SettingsNavButtonGap;
         }
 
         static bool IsStretchingRect(RectTransform rect)
@@ -5387,9 +5422,9 @@ namespace Gugarhythm
             AddPencilIcon(edit.GetComponent<RectTransform>());
 
             // Same composition as before: cover mid-left, copy mid-right, CTAs under copy.
-            var coverSide = compact ? 380f : 495f;
+            var coverSide = compact ? 460f : 580f;
             var cover = Panel("Cover Placeholder", detail, new Color(.19f, .30f, .42f), new Vector2(coverSide, coverSide), Vector2.zero);
-            PinToAnchor(cover, new Vector2(.24f, .5f), new Vector2(.5f, .5f), new Vector2(0, compact ? -20f : -45f));
+            PinToAnchor(cover, new Vector2(.22f, .5f), new Vector2(.5f, .5f), new Vector2(0, compact ? -20f : -45f));
             cover.gameObject.AddComponent<RectMask2D>();
             detailCoverFallback = new GameObject("Cover Fallback", typeof(RectTransform)).GetComponent<RectTransform>();
             detailCoverFallback.SetParent(cover, false);
@@ -5500,7 +5535,11 @@ namespace Gugarhythm
             settingsNavigation = Panel("Settings Navigation", sidebarContent,
                 new Color(.13f, .13f, .13f, 1f),
                 new Vector2(SettingsSidebarWidth, SettingsBodyPanelHeight), Vector2.zero);
-            Fill(settingsNavigation);
+            settingsNavigation.anchorMin = new Vector2(0f, 1f);
+            settingsNavigation.anchorMax = new Vector2(1f, 1f);
+            settingsNavigation.pivot = new Vector2(.5f, 1f);
+            settingsNavigation.sizeDelta = new Vector2(0f, SettingsBodyPanelHeight);
+            settingsNavigation.anchoredPosition = Vector2.zero;
             sidebarContent.sizeDelta = new Vector2(SettingsSidebarWidth, SettingsBodyPanelHeight);
 
             settingsContentScroll = CreateSettingsScrollArea(
@@ -5508,11 +5547,21 @@ namespace Gugarhythm
                 true, true, out settingsContentArea, out settingsContentInner);
             settingsContentInner.sizeDelta = new Vector2(SettingsContentPanelWidth, SettingsBodyPanelHeight);
 
-            settingsAudioNavigationButton = MakeFlatButton("音訊", settingsNavigation, new Vector2(0, 285), ShowSettingsAudio, new Vector2(220, 68), new Color(.08f, .28f, .42f));
-            settingsGameNavigationButton = MakeFlatButton("遊戲", settingsNavigation, new Vector2(0, 205), ShowSettingsGame, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsAdvancedNavigationButton = MakeFlatButton("進階", settingsNavigation, new Vector2(0, 125), ShowSettingsAdvanced, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsTagsNavigationButton = MakeFlatButton("標籤", settingsNavigation, new Vector2(0, 45), ShowSettingsTags, new Vector2(220, 68), new Color(.18f, .18f, .18f));
-            settingsAccountNavigationButton = MakeFlatButton("帳號", settingsNavigation, new Vector2(0, -35), ShowSettingsAccount, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsAudioNavigationButton = MakeFlatButton("音訊", settingsNavigation, Vector2.zero, ShowSettingsAudio,
+                new Vector2(SettingsNavButtonWidth, SettingsNavButtonHeight), new Color(.08f, .28f, .42f));
+            PlaceSettingsNavButton(settingsAudioNavigationButton, 0);
+            settingsGameNavigationButton = MakeFlatButton("遊戲", settingsNavigation, Vector2.zero, ShowSettingsGame,
+                new Vector2(SettingsNavButtonWidth, SettingsNavButtonHeight), new Color(.18f, .18f, .18f));
+            PlaceSettingsNavButton(settingsGameNavigationButton, 1);
+            settingsAdvancedNavigationButton = MakeFlatButton("進階", settingsNavigation, Vector2.zero, ShowSettingsAdvanced,
+                new Vector2(SettingsNavButtonWidth, SettingsNavButtonHeight), new Color(.18f, .18f, .18f));
+            PlaceSettingsNavButton(settingsAdvancedNavigationButton, 2);
+            settingsTagsNavigationButton = MakeFlatButton("標籤", settingsNavigation, Vector2.zero, ShowSettingsTags,
+                new Vector2(SettingsNavButtonWidth, SettingsNavButtonHeight), new Color(.18f, .18f, .18f));
+            PlaceSettingsNavButton(settingsTagsNavigationButton, 3);
+            settingsAccountNavigationButton = MakeFlatButton("帳號", settingsNavigation, Vector2.zero, ShowSettingsAccount,
+                new Vector2(SettingsNavButtonWidth, SettingsNavButtonHeight), new Color(.18f, .18f, .18f));
+            PlaceSettingsNavButton(settingsAccountNavigationButton, 4);
             var card = Panel("Settings Audio Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
 
             settingsAudioPanel = card;

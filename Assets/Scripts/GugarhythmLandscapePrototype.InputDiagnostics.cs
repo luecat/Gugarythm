@@ -20,8 +20,9 @@ namespace Gugarhythm
         {
             // Keep DEBUG below the player-facing account menu; the previous
             // shared position constructed DEBUG last and made 帳號 impossible to see or press.
-            settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, new Vector2(0, -115),
-                ShowSettingsDebug, new Vector2(220, 68), new Color(.18f, .18f, .18f));
+            settingsDebugNavigationButton = MakeFlatButton("DEBUG", navigation, Vector2.zero,
+                ShowSettingsDebug, new Vector2(SettingsNavButtonWidth, SettingsNavButtonHeight), new Color(.18f, .18f, .18f));
+            PlaceSettingsNavButton(settingsDebugNavigationButton, 5);
             settingsDebugPanel = Panel("Settings Debug Panel", settingsContentInner,
                 new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
             Fill(settingsDebugPanel);
