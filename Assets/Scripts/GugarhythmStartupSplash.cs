@@ -25,22 +25,32 @@ namespace Gugarhythm
             if (Screen.width > 0 && Screen.height > Screen.width)
                 Screen.orientation = ScreenOrientation.LandscapeLeft;
 
-            // Keep the first painted frames black until landscape metrics are stable,
-            // so players never see a pre-stretch portrait/wrong-aspect splash.
-            Camera.main?.gameObject.SetActive(false);
-            splashCanvas = BuildSplashCanvas(visible: false);
+            EnsureBackdropCamera();
+            splashCanvas = BuildSplashCanvas(visible: true);
+            Canvas.ForceUpdateCanvases();
         }
 
         IEnumerator Start()
         {
+            var displayStartedAt = Time.realtimeSinceStartup;
             yield return WaitForStableLandscapePresentation();
             if (splashCanvas != null)
-            {
-                splashCanvas.enabled = true;
                 Canvas.ForceUpdateCanvases();
-            }
 
-            yield return ShowThenOpenLibrary();
+            yield return ShowThenOpenLibrary(displayStartedAt);
+        }
+
+        void EnsureBackdropCamera()
+        {
+            var cameraObject = new GameObject("Startup Camera", typeof(Camera));
+            cameraObject.transform.SetParent(transform, false);
+            cameraObject.tag = "MainCamera";
+            var camera = cameraObject.GetComponent<Camera>();
+            camera.clearFlags = CameraClearFlags.SolidColor;
+            camera.backgroundColor = Color.black;
+            camera.orthographic = true;
+            camera.cullingMask = ~0;
+            camera.depth = -100;
         }
 
         Canvas BuildSplashCanvas(bool visible)
@@ -126,15 +136,17 @@ namespace Gugarhythm
             }
         }
 
-        IEnumerator ShowThenOpenLibrary()
+        IEnumerator ShowThenOpenLibrary(float displayStartedAt)
         {
-            var displayStartedAt = Time.realtimeSinceStartup;
             yield return BundledChartLibraryImporter.ImportAll();
             var remainingSeconds = displaySeconds - (Time.realtimeSinceStartup - displayStartedAt);
             if (remainingSeconds > 0f) yield return new WaitForSecondsRealtime(remainingSeconds);
             if (transitioning) yield break;
             transitioning = true;
+            DontDestroyOnLoad(gameObject);
             GugarhythmSceneRouter.OpenLibrary();
+            yield return new WaitForEndOfFrame();
+            Destroy(gameObject);
         }
 
         static float NormalizeDisplaySeconds(float seconds)

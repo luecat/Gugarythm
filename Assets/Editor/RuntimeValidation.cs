@@ -1396,7 +1396,13 @@ public static class RuntimeValidation
         var startupSource = File.ReadAllText(Path.Combine(Application.dataPath,
             "Scripts", "GugarhythmStartupSplash.cs"));
         Require(startupSource.Contains("WaitForStableLandscapePresentation()", StringComparison.Ordinal),
-            "Startup splash must wait for a stable landscape presentation before revealing artwork");
+            "Startup splash must wait for a stable landscape presentation so artwork layout can settle");
+        Require(startupSource.Contains("BuildSplashCanvas(visible: true)", StringComparison.Ordinal),
+            "Startup splash must paint immediately instead of leaving the first frames black");
+        Require(startupSource.Contains("DontDestroyOnLoad", StringComparison.Ordinal),
+            "Startup splash must cover the library scene load so the transition does not flash black");
+        Require(startupSource.Contains("EnsureBackdropCamera()", StringComparison.Ordinal),
+            "Startup splash must keep a camera presenting so Unity 6 does not show a blank view");
         Require(startupSource.Contains("AspectMode.EnvelopeParent", StringComparison.Ordinal),
             "Startup splash must cover the screen without distorting the artwork aspect ratio");
         Debug.Log("GUGARHYTHM_STARTUP_SPLASH_VALIDATION_OK duration=1.5");
