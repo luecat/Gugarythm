@@ -353,7 +353,11 @@ namespace Gugarhythm
         const float LibraryRowBottomPad = 14f;
         const float LibraryRowStackGap = 4f;
         const float LibraryRowTextLeftPad = 24f;
-        const float LibraryRowTextRightPad = 78f;
+        // Level badge is 62 wide, pinned 18 from the row's right edge → occupies
+        // the last ~80px. Keep text clear of that column on narrow phone sidebars.
+        const float LibraryRowTextRightPad = 96f;
+        const float LibraryRowLevelWidth = 62f;
+        const float LibraryRowLevelRightPad = 18f;
         const float PersistentGrayDividerThickness = 2f;
         const float LaneTextureWidth = 1280f;
         const float LaneTextureHeight = 732f;
@@ -427,6 +431,7 @@ namespace Gugarhythm
         public const float FastLateDisplayWidth = SettingsSliderWidth * .5f - 24f;
         const string FastLateDisplayPreferenceKey = "gugarhythm-fast-late-display";
         const string AutoPlayPreferenceKey = "gugarhythm-auto-play";
+        const string ChartMirrorPreferenceKey = "gugarhythm-chart-mirror";
         const string HitParticleEffectPreferenceKey = "gugarhythm-hit-particle-effect";
         const string HapticFeedbackPreferenceKey = "gugarhythm-haptic-feedback";
         const float HoldLoopVolume = .55f;
@@ -567,6 +572,9 @@ namespace Gugarhythm
         readonly AudioSource[] calibrationTickSources = new AudioSource[CalibrationTickCount];
         RectTransform canvasRoot;
         RectTransform backgroundLayer;
+        RectTransform fullBleedChrome;
+        Image fullBleedChromeImage;
+        Image baseChromeImage;
         RectTransform stage;
         Canvas gameplayStageCanvas;
         RectTransform safeAreaRoot;
@@ -657,6 +665,7 @@ namespace Gugarhythm
         RectTransform difficultyTagConfirmationPanel;
         RectTransform chartEditorPanel;
         RectTransform deleteChartConfirmationPanel;
+        RectTransform importDecisionBackdrop;
         RectTransform importDecisionPanel;
         RectTransform detailCoverFallback;
         RectTransform chartPreviewBackdrop;
@@ -698,6 +707,7 @@ namespace Gugarhythm
         int detailTitleMaxFontSize;
         Text detailArtistLabel;
         Text detailDifficultyLabel;
+        Text detailAccuracyTitleLabel;
         Text detailAccuracyLabel;
         RawImage detailCoverImage;
         Texture2D detailCoverTexture;
@@ -852,6 +862,7 @@ namespace Gugarhythm
         readonly RectTransform[] calibrationProgressDots = new RectTransform[CalibrationRoundCount];
         readonly bool[] calibrationRoundSucceeded = new bool[CalibrationRoundCount];
         Toggle autoPlayToggle;
+        Toggle chartMirrorToggle;
         Toggle fastLateDisplayToggle;
         Toggle performanceHudToggle;
         readonly Button[] hitParticleEffectButtons = new Button[4];
@@ -864,6 +875,7 @@ namespace Gugarhythm
         Slider pauseSeekSlider;
         Text pauseSeekTimeLabel;
         bool seekUsedThisRun;
+        bool modifiedPlaybackRateUsedThisRun;
         Material laneMaterial;
         Material missedHoldMaterial;
         bool running;
@@ -896,6 +908,9 @@ namespace Gugarhythm
         bool calibrationFourthBeatTapRegistered;
         float scrollSpeed = DefaultScrollSpeed;
         float playbackRate = DefaultPlaybackRate;
+        bool chartMirrorEnabled;
+        bool chartLanesMirrored;
+        RuntimeChart chartMirrorAppliedTo;
         float upperHiddenBarPercent;
         bool fastLateDisplayEnabled;
         bool autoPlayEnabled;
@@ -1089,6 +1104,7 @@ namespace Gugarhythm
                 PlayerPrefs.GetFloat("gugarhythm-upper-hidden-bar-percent", 0f));
             fastLateDisplayEnabled = PlayerPrefs.GetInt(FastLateDisplayPreferenceKey, 1) != 0;
             autoPlayEnabled = PlayerPrefs.GetInt(AutoPlayPreferenceKey, 0) != 0;
+            chartMirrorEnabled = PlayerPrefs.GetInt(ChartMirrorPreferenceKey, 0) != 0;
             hitParticleEffectMode = NormalizeHitParticleEffectMode(
                 PlayerPrefs.GetInt(HitParticleEffectPreferenceKey, (int)HitParticleEffectMode.ParticleScatter));
             hapticFeedbackMode = NormalizeHapticFeedbackMode(
@@ -1148,6 +1164,7 @@ namespace Gugarhythm
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(true);
                 settingsPanel.gameObject.SetActive(false);
+                SyncFullBleedChrome();
                 RestoreLibrarySelection();
                 // Warm public catalog cache + default cover before the user taps 線上.
                 EnsurePublicRemoteCatalogCacheLoaded();
@@ -1168,6 +1185,7 @@ namespace Gugarhythm
                 SetMenuHudVisible(false);
                 menuPanel.gameObject.SetActive(false);
                 settingsPanel.gameObject.SetActive(true);
+                SyncFullBleedChrome();
                 yield break;
             }
 
@@ -1178,6 +1196,7 @@ namespace Gugarhythm
                 menuPanel.gameObject.SetActive(false);
                 settingsPanel.gameObject.SetActive(false);
                 chartEditorPanel.gameObject.SetActive(true);
+                SyncFullBleedChrome();
                 PopulateChartEditor();
                 yield break;
             }
@@ -1214,12 +1233,15 @@ namespace Gugarhythm
             if (backgroundLayer != null) backgroundLayer.gameObject.SetActive(false);
             if (stage != null) stage.gameObject.SetActive(visible);
             if (performanceHudPanel != null) performanceHudPanel.gameObject.SetActive(visible && performanceDiagnosticsEnabled);
+            SyncFullBleedChrome();
         }
 
         void SetGameplayLoadingVisible(bool visible, string message = null)
         {
             if (gameplayLoadingLabel != null && message != null) gameplayLoadingLabel.text = message;
-            if (gameplayLoadingOverlay != null) gameplayLoadingOverlay.gameObject.SetActive(visible);
+            if (gameplayLoadingOverlay == null) return;
+            gameplayLoadingOverlay.gameObject.SetActive(visible);
+            if (visible) gameplayLoadingOverlay.SetAsLastSibling();
         }
 
         bool RestoreLibrarySelection()
@@ -1582,10 +1604,15 @@ namespace Gugarhythm
 
         public float PlaybackRate => playbackRate;
 
+        public static bool IsDefaultPlaybackRate(float rate) =>
+            Mathf.Approximately(GameplayTiming.ClampPlaybackRate(rate), DefaultPlaybackRate);
+
         void SetOverallSpeed(float value)
         {
             value = Mathf.Round(GameplayTiming.ClampPlaybackRate(value) * 100f) / 100f;
             playbackRate = value;
+            if (running && !IsDefaultPlaybackRate(value))
+                modifiedPlaybackRateUsedThisRun = true;
             if (overallSpeedSlider != null && !Mathf.Approximately(overallSpeedSlider.value, value))
                 overallSpeedSlider.SetValueWithoutNotify(value);
             if (overallSpeedLabel != null)
@@ -1697,6 +1724,33 @@ namespace Gugarhythm
             autoPlayToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
             PlayerPrefs.SetInt(AutoPlayPreferenceKey, enabled ? 1 : 0);
             PlayerPrefs.Save();
+        }
+
+        void SetChartMirrorEnabled(bool enabled)
+        {
+            chartMirrorEnabled = enabled;
+            if (chartMirrorToggle != null && chartMirrorToggle.isOn != enabled)
+                chartMirrorToggle.SetIsOnWithoutNotify(enabled);
+            chartMirrorToggle?.GetComponent<FigmaSlidingToggleVisual>()?.SetState(enabled, true);
+            PlayerPrefs.SetInt(ChartMirrorPreferenceKey, enabled ? 1 : 0);
+            PlayerPrefs.Save();
+        }
+
+        void EnsureChartLaneMirrorState()
+        {
+            if (chart == null) return;
+            if (!ReferenceEquals(chart, chartMirrorAppliedTo))
+            {
+                chartMirrorAppliedTo = chart;
+                chartLanesMirrored = false;
+            }
+
+            if (chartLanesMirrored == chartMirrorEnabled) return;
+            ChartLaneMirror.Apply(chart);
+            chartLanesMirrored = chartMirrorEnabled;
+            cachedGuideChart = null;
+            gpuRibbonRenderer?.Dispose();
+            gpuRibbonRenderer = null;
         }
 
         void SetPerformanceHudEnabled(bool enabled)
@@ -1867,8 +1921,8 @@ namespace Gugarhythm
             HideAllSettingsContentPanels();
             settingsAudioPanel.gameObject.SetActive(true);
             SetSettingsNavigationSelection(settingsAudioNavigationButton);
-            ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
+            ResetSettingsTabScrollPositions();
         }
 
         void ShowSettingsGame()
@@ -1877,8 +1931,8 @@ namespace Gugarhythm
             HideAllSettingsContentPanels();
             settingsGamePanel.gameObject.SetActive(true);
             SetSettingsNavigationSelection(settingsGameNavigationButton);
-            ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
+            ResetSettingsTabScrollPositions();
         }
 
         void ShowSettingsAdvanced()
@@ -1887,8 +1941,8 @@ namespace Gugarhythm
             HideAllSettingsContentPanels();
             settingsAdvancedPanel.gameObject.SetActive(true);
             SetSettingsNavigationSelection(settingsAdvancedNavigationButton);
-            ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
+            ResetSettingsTabScrollPositions();
         }
 
         void ShowSettingsTags()
@@ -1897,8 +1951,8 @@ namespace Gugarhythm
             HideAllSettingsContentPanels();
             settingsTagsPanel.gameObject.SetActive(true);
             SetSettingsNavigationSelection(settingsTagsNavigationButton);
-            ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
+            ResetSettingsTabScrollPositions();
         }
 
         void ShowSettingsAccount()
@@ -1908,8 +1962,8 @@ namespace Gugarhythm
             settingsAccountPanel.gameObject.SetActive(true);
             SetSettingsNavigationSelection(settingsAccountNavigationButton);
             RefreshAccountSettings();
-            ResetSettingsTabScrollPositions();
             RefreshSettingsOverflowFromCurrentShell();
+            ResetSettingsTabScrollPositions();
         }
 
         void OpenAutoAdjustPanel()
@@ -1928,8 +1982,13 @@ namespace Gugarhythm
             calibrationStartDsp = GameplayTiming.ChartAnchorDspForDeviceOffset(AudioSettings.dspTime + .8d, audioOffsetSeconds);
             ScheduleCalibrationTicks();
             calibrationActive = true;
-            calibrationBackdrop?.gameObject.SetActive(true);
+            if (calibrationBackdrop != null)
+            {
+                calibrationBackdrop.gameObject.SetActive(true);
+                calibrationBackdrop.SetAsLastSibling();
+            }
             calibrationPanel.gameObject.SetActive(true);
+            calibrationPanel.SetAsLastSibling();
             RefreshManualAudioOffsetControls();
             calibrationLabel.text = "第 1 / 4 輪 · 請在重拍按 TAP";
             calibrationTapButton.interactable = true;
@@ -2377,9 +2436,11 @@ namespace Gugarhythm
             if (loading || chart == null || music.clip == null) return;
             CancelResumeCountdown();
             presentationClock.Invalidate();
+            EnsureChartLaneMirrorState();
             BeginInputDiagnosticsRunIfNeeded();
             autoPlayUsedThisRun = false;
             seekUsedThisRun = false;
+            modifiedPlaybackRateUsedThisRun = !IsDefaultPlaybackRate(playbackRate);
             ResetRuntime();
             performanceSamples.Reset();
             gameplayTimingSamples.Reset();
@@ -4047,7 +4108,8 @@ namespace Gugarhythm
             RefreshHud();
             var wasInputDiagnostics = InputDiagnosticsSession.IsDebugEntry(currentLibraryEntry);
             EndInputDiagnosticsRun("chart-completed", true);
-            if (currentLibraryEntry != null && !wasInputDiagnostics && !autoPlayUsedThisRun && !seekUsedThisRun)
+            if (currentLibraryEntry != null && !wasInputDiagnostics && !autoPlayUsedThisRun &&
+                !seekUsedThisRun && !modifiedPlaybackRateUsedThisRun)
                 LocalChartLibrary.UpdateBestAccuracy(currentLibraryEntry.Id, (float)scoreState.AccuracyPercent(chart.PlayableCount));
 
             resultRunStatistics.Build(judgmentEvents);
@@ -4093,6 +4155,8 @@ namespace Gugarhythm
                 resultHintLabel.text = "AUTO PLAY，成績不計入最佳紀錄";
             else if (!wasInputDiagnostics && seekUsedThisRun)
                 resultHintLabel.text = "已調整播放進度，成績不計入最佳紀錄";
+            else if (!wasInputDiagnostics && modifiedPlaybackRateUsedThisRun)
+                resultHintLabel.text = "已調整整體速度，成績不計入最佳紀錄";
             else
                 resultHintLabel.text = string.Empty;
         }
@@ -4170,6 +4234,7 @@ namespace Gugarhythm
             }
             ApplySafeAreaInsets(resultSafeRoot);
             LayoutResultMainPage();
+            SyncFullBleedChrome();
         }
 
         void ShowResultDetail()
@@ -4185,6 +4250,7 @@ namespace Gugarhythm
             ApplySafeAreaInsets(resultDetailSafeRoot);
             LayoutResultMainPage();
             RefreshResultHistogram();
+            SyncFullBleedChrome();
         }
 
         void HideResultOverlays()
@@ -4336,7 +4402,15 @@ namespace Gugarhythm
             scaler.matchWidthOrHeight = 0f;
             canvasRoot = canvasObject.GetComponent<RectTransform>();
             var root = canvasRoot;
-            Panel("Base", root, new Color(.015f, .02f, .06f), Vector2.zero, Vector2.zero, true);
+            var basePanel = Panel("Base", root, new Color(.11f, .11f, .11f), Vector2.zero, Vector2.zero, true);
+            baseChromeImage = basePanel.GetComponent<Image>();
+            baseChromeImage.raycastTarget = false;
+            // Full-bleed chrome fills the physical display (including iPhone
+            // landscape left/right unsafe insets) so library/settings never
+            // show black pillar boxes around the safe-area content.
+            fullBleedChrome = Panel("Full Bleed Chrome", root, new Color(.11f, .11f, .11f), Vector2.zero, Vector2.zero, true);
+            fullBleedChromeImage = fullBleedChrome.GetComponent<Image>();
+            fullBleedChromeImage.raycastTarget = false;
             backgroundLayer = RawPanel("Background", root, backgroundTexture, new Color(1, 1, 1, .72f), Vector2.zero, Vector2.zero, true);
             backgroundLayer.gameObject.SetActive(false);
             stage = Panel("Rhythm Stage", root, new Color(0, 0, 0, .05f), Vector2.zero, Vector2.zero, true);
@@ -4441,14 +4515,16 @@ namespace Gugarhythm
             BuildPerformanceHud(safeAreaRoot);
             BuildMenu(safeAreaRoot);
             BuildSettings(safeAreaRoot);
-            BuildLatencyCalibration(safeAreaRoot);
+            // Modal dialogs stay in the safe area; their dimmers must cover the
+            // full physical display so notch/home-indicator bands are not exposed.
+            BuildLatencyCalibration(safeAreaRoot, root);
             BuildChartEditor(safeAreaRoot);
-            BuildImportDecision(safeAreaRoot);
+            BuildImportDecision(safeAreaRoot, root);
             BuildPauseOverlay(root);
             // Result pages own a full-bleed background so cutout/notch insets stay
             // the same ResultBg color; interactive content stays in resultSafeRoot.
             BuildResult(root);
-            BuildChartPreview(safeAreaRoot);
+            BuildChartPreview(safeAreaRoot, root);
             // The dim blue loading veil must cover the physical display,
             // including Android cutout insets, and remain above menu UI.
             BuildGameplayLoadingOverlay(root);
@@ -4768,11 +4844,13 @@ namespace Gugarhythm
                 Fill(settingsPanel);
                 settingsPanel.localScale = Vector3.one;
             }
-            // Re-anchoring：殼是設定頁頂部元件唯一的對齊基準，尺寸 cap 在設計尺寸內
-            // 且永遠置中，不同螢幕比例之間相對位置固定。
-            var settingsShellSize = new Vector2(
-                Mathf.Min(logicalSafeSize.x, SettingsShellMaxWidth),
-                Mathf.Min(logicalSafeSize.y, SettingsShellMaxHeight));
+            // Re-anchoring：殼是設定頁頂部元件唯一的對齊基準。
+            // 手機橫向直接吃滿安全區，避免再被 1500 cap 縮成中間一塊、兩側露黑邊。
+            var settingsShellSize = UseCompactMobileChrome
+                ? logicalSafeSize
+                : new Vector2(
+                    Mathf.Min(logicalSafeSize.x, SettingsShellMaxWidth),
+                    Mathf.Min(logicalSafeSize.y, SettingsShellMaxHeight));
             if (settingsShell != null)
             {
                 settingsShell.anchorMin = settingsShell.anchorMax = new Vector2(.5f, .5f);
@@ -4805,6 +4883,58 @@ namespace Gugarhythm
             ApplySafeAreaInsets(resultSafeRoot);
             ApplySafeAreaInsets(resultDetailSafeRoot);
             LayoutResultMainPage();
+            SyncFullBleedChrome();
+        }
+
+        void SyncFullBleedChrome()
+        {
+            if (fullBleedChromeImage != null || baseChromeImage != null)
+            {
+                Color chrome;
+                if (settingsPanel != null && settingsPanel.gameObject.activeSelf)
+                    chrome = new Color(.10f, .10f, .10f, 1f);
+                else if (chartEditorPanel != null && chartEditorPanel.gameObject.activeSelf)
+                    chrome = new Color(.10f, .10f, .10f, 1f);
+                else if (menuPanel != null && menuPanel.gameObject.activeSelf)
+                    // Match the detail pane so right/bottom cutouts read as one continuous surface.
+                    chrome = new Color(.10f, .10f, .10f, 1f);
+                else if (resultPanel != null && resultPanel.gameObject.activeSelf)
+                    chrome = ResultBg;
+                else if (resultDetailPanel != null && resultDetailPanel.gameObject.activeSelf)
+                    chrome = ResultBg;
+                else if (stage != null && stage.gameObject.activeSelf)
+                    chrome = new Color(.015f, .02f, .06f, 1f);
+                else
+                    chrome = new Color(.11f, .11f, .11f, 1f);
+                if (fullBleedChromeImage != null) fullBleedChromeImage.color = chrome;
+                if (baseChromeImage != null) baseChromeImage.color = chrome;
+                if (fullBleedChrome != null) fullBleedChrome.gameObject.SetActive(true);
+            }
+            SyncLibraryLeftCutout();
+        }
+
+        // Paint the full left column (notch cutout + library pane width) with
+        // library-pane gray, including the bottom home-indicator band under the
+        // list. Everything to the right — detail pane, right cutout, bottom under
+        // detail — stays on fullBleedChrome at the detail color.
+        void SyncLibraryLeftCutout()
+        {
+            if (libraryBackdrop == null) return;
+            var showLibrary = menuPanel != null && menuPanel.gameObject.activeSelf;
+            libraryBackdrop.gameObject.SetActive(showLibrary);
+            if (!showLibrary || Screen.width <= 0 || Screen.height <= 0) return;
+
+            var safe = Screen.safeArea;
+            // Library pane is the left 24.4% of the safe area; extend that column
+            // to the physical left edge so cutouts match the pane.
+            const float libraryPaneFraction = .244f;
+            var columnRight = safe.xMin + safe.width * libraryPaneFraction;
+            var rightFraction = Mathf.Clamp01(columnRight / Screen.width);
+            libraryBackdrop.anchorMin = Vector2.zero;
+            libraryBackdrop.anchorMax = new Vector2(rightFraction, 1f);
+            libraryBackdrop.offsetMin = Vector2.zero;
+            libraryBackdrop.offsetMax = Vector2.zero;
+            libraryBackdrop.localScale = Vector3.one;
         }
 
         void LayoutResultMainPage()
@@ -5316,13 +5446,14 @@ namespace Gugarhythm
 
         void BuildMenu(RectTransform root)
         {
-            // The safe-area container intentionally stops at a device cutout.
-            // Keep the library's left-column color behind it so the excluded
-            // strip never reveals the gameplay stage underneath.
+            // Safe-area UI stops at the cutout. Paint only the LEFT unsafe strip
+            // with the library-pane gray; right/bottom use fullBleedChrome at the
+            // detail-pane color so the right side fills the physical display.
             var fullScreenRoot = root.parent as RectTransform;
-            libraryBackdrop = Panel("Library Cutout Backdrop", fullScreenRoot, new Color(.16f, .16f, .16f, 1f), Vector2.zero, Vector2.zero, true);
+            libraryBackdrop = Panel("Library Left Cutout", fullScreenRoot, new Color(.16f, .16f, .16f, 1f), Vector2.zero, Vector2.zero, true);
             libraryBackdrop.SetSiblingIndex(root.GetSiblingIndex());
-            libraryBackdrop.gameObject.SetActive(GugarhythmSceneRouter.IsLibrary);
+            libraryBackdrop.GetComponent<Image>().raycastTarget = false;
+            libraryBackdrop.gameObject.SetActive(false);
             menuPanel = Panel("Chart Library", root, new Color(.11f, .11f, .11f, 1f), new Vector2(1500, 820), Vector2.zero);
             Fill(menuPanel);
             menuPanel.localScale = Vector3.one;
@@ -5473,12 +5604,24 @@ namespace Gugarhythm
             difficultyButtonContent.pivot = new Vector2(0f, .5f);
             difficultyButtonContent.sizeDelta = new Vector2(450, compact ? 72f : 76f);
             difficultyButtonContent.anchoredPosition = new Vector2(copyLeft, compact ? -36f : -26f);
-            detailAccuracyLabel = Label("BEST ACCURACY\n<size=52>—</size>", detail, 18); detailAccuracyLabel.supportRichText = true; detailAccuracyLabel.alignment = TextAnchor.UpperLeft; detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(460, 100); PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(0f, .5f), new Vector2(0f, .5f), new Vector2(copyLeft, compact ? -120f : -134f));
+            detailAccuracyTitleLabel = Label("BEST ACCURACY", detail, 15);
+            detailAccuracyTitleLabel.color = new Color(.62f, .62f, .62f);
+            detailAccuracyTitleLabel.alignment = TextAnchor.MiddleLeft;
+            detailAccuracyTitleLabel.rectTransform.sizeDelta = new Vector2(460, 28);
+            PinToAnchor(detailAccuracyTitleLabel.rectTransform, new Vector2(0f, .5f), new Vector2(0f, .5f),
+                new Vector2(copyLeft, compact ? -102f : -114f));
+            detailAccuracyLabel = Label("尚無紀錄", detail, compact ? 28 : 32);
+            detailAccuracyLabel.alignment = TextAnchor.MiddleLeft;
+            detailAccuracyLabel.rectTransform.sizeDelta = new Vector2(460, 44);
+            PinToAnchor(detailAccuracyLabel.rectTransform, new Vector2(0f, .5f), new Vector2(0f, .5f),
+                new Vector2(copyLeft, compact ? -138f : -152f));
+            SetDetailBestAccuracy(-1f);
             loadStatus = Label(string.Empty, detail, 15);
-            loadStatus.color = new Color(.68f, .68f, .68f);
+            loadStatus.color = new Color(.62f, .62f, .62f);
             loadStatus.alignment = TextAnchor.MiddleLeft;
-            var statusRect = loadStatus.rectTransform; statusRect.anchorMin = new Vector2(0f, .5f); statusRect.anchorMax = new Vector2(.94f, .5f); statusRect.pivot = new Vector2(.5f, .5f);
-            statusRect.offsetMin = new Vector2(copyLeft, compact ? -190f : -211f); statusRect.offsetMax = new Vector2(0f, compact ? -166f : -187f);
+            loadStatus.rectTransform.sizeDelta = new Vector2(460, 28);
+            PinToAnchor(loadStatus.rectTransform, new Vector2(0f, .5f), new Vector2(0f, .5f),
+                new Vector2(copyLeft, compact ? -176f : -192f));
 
             var ctaHeight = compact ? 72f : 82f;
             var previewHeight = compact ? 64f : 52f;
@@ -5785,7 +5928,7 @@ namespace Gugarhythm
             const float AdvancedSliderWidth = 650f;
             var overallSpeedTitle = Label("整體速度", settingsAdvancedPanel, 24);
             overallSpeedTitle.alignment = TextAnchor.MiddleLeft;
-            overallSpeedTitle.rectTransform.sizeDelta = new Vector2(760f, 42);
+            overallSpeedTitle.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 42);
             overallSpeedTitle.rectTransform.anchoredPosition = new Vector2(0, 280);
             overallSpeedSlider = MakeSlider(settingsAdvancedPanel, new Vector2(-25f, 215),
                 GameplayTiming.MinimumPlaybackRate, GameplayTiming.MaximumPlaybackRate, playbackRate,
@@ -5797,9 +5940,27 @@ namespace Gugarhythm
             var overallSpeedHint = Label("調整整局游玩與音樂／按鍵音的播放倍率。", settingsAdvancedPanel, 18);
             overallSpeedHint.alignment = TextAnchor.MiddleLeft;
             overallSpeedHint.color = new Color(.66f, .66f, .66f);
-            overallSpeedHint.rectTransform.sizeDelta = new Vector2(900f, 36);
+            overallSpeedHint.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 36);
             overallSpeedHint.rectTransform.anchoredPosition = new Vector2(0, 95);
             SetOverallSpeed(playbackRate);
+
+            const float AdvancedToggleWidth = 280f;
+            var mirrorTitle = Label("譜面鏡像", settingsAdvancedPanel, 24);
+            mirrorTitle.alignment = TextAnchor.MiddleLeft;
+            mirrorTitle.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 42);
+            mirrorTitle.rectTransform.anchoredPosition = new Vector2(0, 20);
+            // 與上方標題左緣對齊，避免置中後在窄螢幕被水平裁成只剩「用」。
+            var advancedToggleX = -SettingsSliderWidth * .5f + AdvancedToggleWidth * .5f;
+            chartMirrorToggle = MakeFigmaSlidingToggle("啟用", settingsAdvancedPanel,
+                new Vector2(advancedToggleX, -35), AdvancedToggleWidth, chartMirrorEnabled);
+            chartMirrorToggle.onValueChanged.AddListener(SetChartMirrorEnabled);
+            SetChartMirrorEnabled(chartMirrorEnabled);
+            var mirrorHint = Label("左右翻轉譜面與 Flick 方向，下次開始遊玩時生效。", settingsAdvancedPanel, 18);
+            mirrorHint.alignment = TextAnchor.MiddleLeft;
+            mirrorHint.color = new Color(.66f, .66f, .66f);
+            mirrorHint.rectTransform.sizeDelta = new Vector2(SettingsSliderWidth, 52);
+            mirrorHint.rectTransform.anchoredPosition = new Vector2(0, -100);
+
             settingsAdvancedPanel.gameObject.SetActive(false);
 
             settingsTagsPanel = Panel("Settings Tags Panel", settingsContentInner, new Color(.15f, .15f, .15f, 1f), new Vector2(1030, 760), Vector2.zero);
@@ -7339,8 +7500,9 @@ namespace Gugarhythm
             row.offsetMax = new Vector2(-rowHorizontalInset, -packedTop);
             var level = Label(chart.Rating.ToString("0.##"), row, 20);
             level.color = new Color(.78f, .78f, .78f);
-            level.rectTransform.sizeDelta = new Vector2(62, 50);
-            PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-18, 0));
+            level.rectTransform.sizeDelta = new Vector2(LibraryRowLevelWidth, 50);
+            PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f),
+                new Vector2(-LibraryRowLevelRightPad, 0));
             MakeInvisibleButton(row, () => SelectRemoteChart(chart));
             return rowHeight;
         }
@@ -7354,7 +7516,7 @@ namespace Gugarhythm
                 SetDetailTitle("選擇一份線上譜面");
                 detailArtistLabel.text = string.Empty;
                 detailDifficultyLabel.text = "選擇後可下載到本機";
-                detailAccuracyLabel.text = string.Empty;
+                ClearDetailBestAccuracy();
                 ShowRemoteCover(null);
             }
             else
@@ -7364,7 +7526,7 @@ namespace Gugarhythm
                     RemoteText(selectedRemoteChart.Author);
                 detailDifficultyLabel.text = FormatRemoteDifficulty(selectedRemoteChart) + " · v" +
                     selectedRemoteChart.Version + " · " + (selectedRemoteChart.IsPrivate ? "私人" : "公開");
-                detailAccuracyLabel.text = string.Empty;
+                ClearDetailBestAccuracy();
                 if (remoteCoverTexture != null)
                     ShowRemoteCover(remoteCoverTexture);
                 else if (string.IsNullOrEmpty(selectedRemoteChart.CoverUrl))
@@ -7727,7 +7889,11 @@ namespace Gugarhythm
             row.offsetMax = new Vector2(-rowHorizontalInset, -packedTop);
             if (hasSelectedDifficulty != null)
             {
-                var level = Label(hasSelectedDifficulty.DifficultyLevel, row, 20); level.color = new Color(.78f, .78f, .78f); level.rectTransform.sizeDelta = new Vector2(62, 50); PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f), new Vector2(-18, 0));
+                var level = Label(hasSelectedDifficulty.DifficultyLevel, row, 20);
+                level.color = new Color(.78f, .78f, .78f);
+                level.rectTransform.sizeDelta = new Vector2(LibraryRowLevelWidth, 50);
+                PinToAnchor(level.rectTransform, new Vector2(1, .5f), new Vector2(1, .5f),
+                    new Vector2(-LibraryRowLevelRightPad, 0));
             }
             MakeInvisibleButton(row, () => SelectLibraryEntry(hasSelectedDifficulty ?? group.Difficulties[0], true));
             return rowHeight;
@@ -8010,7 +8176,7 @@ namespace Gugarhythm
                 SetDetailTitle("選擇一份譜面");
                 detailArtistLabel.text = string.Empty;
                 detailDifficultyLabel.text = "選擇難度";
-                detailAccuracyLabel.text = "BEST ACCURACY\n<size=52>—</size>";
+                SetDetailBestAccuracy(-1f);
                 RefreshDetailCover(null);
                 return;
             }
@@ -8036,7 +8202,41 @@ namespace Gugarhythm
                 Outline(button.gameObject, active ? new Color(.08f, .62f, 1f) : new Color(.34f, .34f, .34f), active ? 3 : 1);
                 button.GetComponentInChildren<Text>().color = active ? new Color(.22f, .68f, 1f) : new Color(.78f, .78f, .78f);
             }
-            detailAccuracyLabel.text = current.BestAccuracy < 0 ? "BEST ACCURACY\n<size=52>—</size>" : $"BEST ACCURACY\n<size=52>{current.BestAccuracy:F2}%</size>";
+            SetDetailBestAccuracy(current.BestAccuracy);
+        }
+
+        void SetDetailBestAccuracy(float bestAccuracy)
+        {
+            if (detailAccuracyTitleLabel != null)
+            {
+                detailAccuracyTitleLabel.text = "BEST ACCURACY";
+                detailAccuracyTitleLabel.gameObject.SetActive(true);
+            }
+            if (detailAccuracyLabel == null) return;
+            detailAccuracyLabel.gameObject.SetActive(true);
+            var mobileScale = Application.isMobilePlatform || (Screen.width > 0 && Screen.width <= 1440) ? 1.18f : 1f;
+            if (bestAccuracy < 0f)
+            {
+                detailAccuracyLabel.text = "尚無紀錄";
+                detailAccuracyLabel.color = new Color(.72f, .72f, .72f);
+                detailAccuracyLabel.fontSize = Mathf.RoundToInt((UseCompactMobileChrome ? 26 : 28) * mobileScale);
+            }
+            else
+            {
+                detailAccuracyLabel.text = $"{bestAccuracy:F2}%";
+                detailAccuracyLabel.color = Color.white;
+                detailAccuracyLabel.fontSize = Mathf.RoundToInt((UseCompactMobileChrome ? 34 : 40) * mobileScale);
+            }
+        }
+
+        void ClearDetailBestAccuracy()
+        {
+            if (detailAccuracyTitleLabel != null) detailAccuracyTitleLabel.gameObject.SetActive(false);
+            if (detailAccuracyLabel != null)
+            {
+                detailAccuracyLabel.text = string.Empty;
+                detailAccuracyLabel.gameObject.SetActive(false);
+            }
         }
 
         void SetDetailTitle(string title)
@@ -8102,8 +8302,9 @@ namespace Gugarhythm
 
         static string SoftWrapLibraryText(string text, Font font, int fontSize, float width, int maxLines)
         {
-            if (string.IsNullOrEmpty(text) || maxLines <= 1 || width <= 8f || fontSize <= 0)
+            if (string.IsNullOrEmpty(text) || width <= 8f || fontSize <= 0)
                 return text ?? string.Empty;
+            maxLines = Mathf.Max(1, maxLines);
             // Allow a second layout pass to re-wrap from the flat string.
             text = text.Replace("\n", string.Empty);
             if (font != null)
@@ -8115,27 +8316,17 @@ namespace Gugarhythm
             for (var index = 0; index < text.Length; index++)
             {
                 var ch = text[index];
-                if (ch == '\n')
-                {
-                    lines.Add(current.ToString());
-                    current.Clear();
-                    lineWidth = 0f;
-                    if (lines.Count >= maxLines)
-                        return string.Join("\n", lines);
-                    continue;
-                }
-
-                // Last allowed line keeps the remainder so long CJK titles are not dropped.
-                if (lines.Count == maxLines - 1)
-                {
-                    current.Append(text, index, text.Length - index);
-                    lines.Add(current.ToString());
-                    return string.Join("\n", lines);
-                }
-
                 var advance = EstimateLibraryGlyphWidth(font, ch, fontSize);
+                var onLastLine = lines.Count >= maxLines - 1;
                 if (current.Length > 0 && lineWidth + advance > width)
                 {
+                    if (onLastLine)
+                    {
+                        // Final line must stay inside the text column so it never
+                        // paints under the right-side difficulty / rating badge.
+                        lines.Add(FitLibraryLineWithEllipsis(current, font, fontSize, width));
+                        return string.Join("\n", lines);
+                    }
                     lines.Add(current.ToString());
                     current.Clear();
                     lineWidth = 0f;
@@ -8150,12 +8341,35 @@ namespace Gugarhythm
             return string.Join("\n", lines);
         }
 
+        static string FitLibraryLineWithEllipsis(System.Text.StringBuilder source, Font font, int fontSize, float width)
+        {
+            if (source == null || source.Length == 0) return "…";
+            const char ellipsis = '…';
+            var ellipsisWidth = EstimateLibraryGlyphWidth(font, ellipsis, fontSize);
+            if (ellipsisWidth >= width) return ellipsis.ToString();
+
+            var fitted = new System.Text.StringBuilder(source.Length);
+            var lineWidth = 0f;
+            for (var index = 0; index < source.Length; index++)
+            {
+                var ch = source[index];
+                var advance = EstimateLibraryGlyphWidth(font, ch, fontSize);
+                if (lineWidth + advance + ellipsisWidth > width)
+                    break;
+                fitted.Append(ch);
+                lineWidth += advance;
+            }
+            fitted.Append(ellipsis);
+            return fitted.ToString();
+        }
+
         static float EstimateLibraryGlyphWidth(Font font, char ch, int fontSize)
         {
             if (font != null && font.GetCharacterInfo(ch, out var info, fontSize, FontStyle.Normal))
                 return Mathf.Max(1f, info.advance);
-            // CJK / fullwidth roughly matches fontSize; ASCII is narrower.
-            return fontSize * (ch <= 0x7f ? .55f : 1.05f);
+            // Prefer a slightly wide ASCII guess so Latin artist credits do not
+            // under-measure and paint under the difficulty badge on phones.
+            return fontSize * (ch <= 0x7f ? .62f : 1.05f);
         }
 
         static void FitLabelToAvailableWidth(Text label, float availableWidth, int minimumSize)
@@ -8263,9 +8477,13 @@ namespace Gugarhythm
             for (var index = parent.childCount - 1; index >= 0; index--) Destroy(parent.GetChild(index).gameObject);
         }
 
-        void BuildImportDecision(RectTransform root)
+        void BuildImportDecision(RectTransform safeRoot, RectTransform fullRoot)
         {
-            importDecisionPanel = Panel("Import Storage Decision", root, new Color(.04f, .06f, .14f, .98f), new Vector2(620, 420), Vector2.zero);
+            importDecisionBackdrop = Panel("Import Decision Backdrop", fullRoot, new Color(0f, 0f, 0f, .56f),
+                Vector2.zero, Vector2.zero, true);
+            MakeInvisibleButton(importDecisionBackdrop, CancelPendingImport);
+            importDecisionPanel = Panel("Import Storage Decision", safeRoot, new Color(.04f, .06f, .14f, .98f),
+                new Vector2(620, 420), Vector2.zero);
             Outline(importDecisionPanel.gameObject, new Color(.4f, .8f, 1f, .85f), 3);
             var title = Label("偵測到相同曲名", importDecisionPanel, 36);
             title.rectTransform.sizeDelta = new Vector2(560, 70);
@@ -8276,6 +8494,7 @@ namespace Gugarhythm
             MakeButton("合併儲存", importDecisionPanel, new Vector2(120, -70), () => CommitPendingImport(true), new Vector2(210, 62));
             MakeButton("單獨儲存", importDecisionPanel, new Vector2(-120, -70), () => CommitPendingImport(false), new Vector2(210, 62));
             MakeButton("取消", importDecisionPanel, new Vector2(0, -150), CancelPendingImport, new Vector2(180, 52));
+            importDecisionBackdrop.gameObject.SetActive(false);
             importDecisionPanel.gameObject.SetActive(false);
         }
 
@@ -8292,7 +8511,13 @@ namespace Gugarhythm
             pendingImportBytes = bytes;
             pendingImportChart = importedChart;
             importDecisionText.text = $"「{importedChart.Title}」已存在。\n要將 {DisplayDifficulty(importedChart)} 合併到同一首歌嗎？";
+            if (importDecisionBackdrop != null)
+            {
+                importDecisionBackdrop.gameObject.SetActive(true);
+                importDecisionBackdrop.SetAsLastSibling();
+            }
             importDecisionPanel.gameObject.SetActive(true);
+            importDecisionPanel.SetAsLastSibling();
         }
 
         static string DisplayDifficulty(RuntimeChart importedChart) =>
@@ -8330,6 +8555,7 @@ namespace Gugarhythm
             pendingImportFileName = null;
             pendingImportBytes = null;
             pendingImportChart = null;
+            if (importDecisionBackdrop != null) importDecisionBackdrop.gameObject.SetActive(false);
             if (importDecisionPanel != null) importDecisionPanel.gameObject.SetActive(false);
         }
 
@@ -8348,11 +8574,11 @@ namespace Gugarhythm
             else GugarhythmSceneRouter.OpenLibrary();
         }
 
-        void BuildLatencyCalibration(RectTransform root)
+        void BuildLatencyCalibration(RectTransform safeRoot, RectTransform fullRoot)
         {
-            calibrationBackdrop = Panel("Latency Calibration Backdrop", root, new Color(0, 0, 0, .56f), Vector2.zero, Vector2.zero, true);
+            calibrationBackdrop = Panel("Latency Calibration Backdrop", fullRoot, new Color(0, 0, 0, .56f), Vector2.zero, Vector2.zero, true);
             MakeInvisibleButton(calibrationBackdrop, ReturnFromLatencyCalibration);
-            calibrationPanel = Panel("Latency Calibration Dialog", root, new Color(.12f, .12f, .13f, .99f), new Vector2(560, 440), Vector2.zero);
+            calibrationPanel = Panel("Latency Calibration Dialog", safeRoot, new Color(.12f, .12f, .13f, .99f), new Vector2(560, 440), Vector2.zero);
             Outline(calibrationPanel.gameObject, new Color(.34f, .35f, .38f, .95f), 1);
             var title = Label("自動調整延遲", calibrationPanel, 28);
             title.alignment = TextAnchor.MiddleLeft;
@@ -8776,12 +9002,12 @@ namespace Gugarhythm
             resultDetailPanel.gameObject.SetActive(false);
         }
 
-        void BuildChartPreview(RectTransform root)
+        void BuildChartPreview(RectTransform safeRoot, RectTransform fullRoot)
         {
             const float previewInset = 32f;
-            chartPreviewBackdrop = Panel("Chart Preview Backdrop", root, new Color(0, 0, 0, .68f), Vector2.zero, Vector2.zero, true);
+            chartPreviewBackdrop = Panel("Chart Preview Backdrop", fullRoot, new Color(0, 0, 0, .68f), Vector2.zero, Vector2.zero, true);
             MakeInvisibleButton(chartPreviewBackdrop, CloseChartPreview);
-            chartPreviewPanel = Panel("Chart Preview Dialog", root, new Color(.11f, .12f, .15f, .99f), new Vector2(1120, 820), Vector2.zero);
+            chartPreviewPanel = Panel("Chart Preview Dialog", safeRoot, new Color(.11f, .12f, .15f, .99f), new Vector2(1120, 820), Vector2.zero);
             Outline(chartPreviewPanel.gameObject, new Color(.30f, .65f, .94f, .9f), 2);
             chartPreviewTitle = Label("譜面預覽", chartPreviewPanel, 30);
             chartPreviewTitle.alignment = TextAnchor.MiddleLeft;
@@ -8836,7 +9062,9 @@ namespace Gugarhythm
                 return;
             }
             chartPreviewBackdrop.gameObject.SetActive(true);
+            chartPreviewBackdrop.SetAsLastSibling();
             chartPreviewPanel.gameObject.SetActive(true);
+            chartPreviewPanel.SetAsLastSibling();
             chartPreviewTitle.text = string.IsNullOrWhiteSpace(result.Chart.Title) ? selectedLibraryEntry.Title : result.Chart.Title;
             chartPreviewGraphic.SetChart(result.Chart);
             Canvas.ForceUpdateCanvases();
@@ -9530,10 +9758,10 @@ namespace Gugarhythm
             scroll.inertia = true;
             scroll.decelerationRate = .135f;
             scroll.scrollSensitivity = 28;
-            var track = Panel("Scroll Track", root, new Color(.35f, .35f, .35f, .34f), new Vector2(6, 0), Vector2.zero);
+            var track = Panel("Scroll Track", root, new Color(.35f, .35f, .35f, .22f), new Vector2(4, 0), Vector2.zero);
             track.anchorMin = new Vector2(1, 0); track.anchorMax = new Vector2(1, 1); track.pivot = new Vector2(1, .5f);
             track.offsetMin = new Vector2(-10, 8); track.offsetMax = new Vector2(-4, -8);
-            var handle = Panel("Scroll Handle", track, new Color(1f, 1f, 1f, .9f), new Vector2(6, 40), Vector2.zero);
+            var handle = Panel("Scroll Handle", track, new Color(.72f, .72f, .72f, .55f), new Vector2(4, 40), Vector2.zero);
             handle.anchorMin = new Vector2(0, 1); handle.anchorMax = new Vector2(1, 1); handle.pivot = new Vector2(.5f, 1);
             handle.offsetMin = new Vector2(0, -40); handle.offsetMax = Vector2.zero;
             var scrollbar = track.gameObject.AddComponent<Scrollbar>();
@@ -9542,11 +9770,11 @@ namespace Gugarhythm
             scrollbar.targetGraphic = handle.GetComponent<Image>();
             scrollbar.colors = new ColorBlock
             {
-                normalColor = new Color(1f, 1f, 1f, .9f),
-                highlightedColor = Color.white,
-                pressedColor = Color.white,
-                selectedColor = Color.white,
-                disabledColor = new Color(1f, 1f, 1f, .4f),
+                normalColor = new Color(.72f, .72f, .72f, .55f),
+                highlightedColor = new Color(.86f, .86f, .86f, .75f),
+                pressedColor = new Color(.92f, .92f, .92f, .85f),
+                selectedColor = new Color(.86f, .86f, .86f, .75f),
+                disabledColor = new Color(.5f, .5f, .5f, .25f),
                 colorMultiplier = 1,
                 fadeDuration = .1f,
             };
@@ -9640,17 +9868,26 @@ namespace Gugarhythm
             background.Configure(new Color(.11f, .13f, .17f, 1f), 14f);
             var label = Label(labelText, root, 20);
             label.alignment = TextAnchor.MiddleLeft;
+            label.horizontalOverflow = HorizontalWrapMode.Overflow;
+            label.verticalOverflow = VerticalWrapMode.Overflow;
             label.rectTransform.anchorMin = new Vector2(0f, .5f);
             label.rectTransform.anchorMax = new Vector2(0f, .5f);
             label.rectTransform.pivot = new Vector2(0f, .5f);
-            label.rectTransform.sizeDelta = new Vector2(width - 118f, 44f);
-            label.rectTransform.anchoredPosition = new Vector2(20f, 0f);
+            const float TrackWidth = 88f;
+            const float TrackRightPad = 12f;
+            const float LabelLeftPad = 20f;
+            const float LabelTrackGap = 12f;
+            var labelWidth = Mathf.Max(72f, width - LabelLeftPad - TrackWidth - TrackRightPad - LabelTrackGap);
+            label.rectTransform.sizeDelta = new Vector2(labelWidth, 44f);
+            label.rectTransform.anchoredPosition = new Vector2(LabelLeftPad, 0f);
 
             var trackObject = new GameObject("Sliding Track", typeof(RectTransform), typeof(CanvasRenderer), typeof(FigmaRoundedRectangleGraphic));
             var trackRect = trackObject.GetComponent<RectTransform>();
             trackRect.SetParent(root, false);
-            trackRect.sizeDelta = new Vector2(88f, 44f);
-            trackRect.anchoredPosition = new Vector2(width * .5f - 64f, 0f);
+            trackRect.anchorMin = trackRect.anchorMax = new Vector2(1f, .5f);
+            trackRect.pivot = new Vector2(1f, .5f);
+            trackRect.sizeDelta = new Vector2(TrackWidth, 44f);
+            trackRect.anchoredPosition = new Vector2(-TrackRightPad, 0f);
             var track = trackObject.GetComponent<FigmaRoundedRectangleGraphic>();
             track.raycastTarget = false;
 
@@ -9742,6 +9979,11 @@ namespace Gugarhythm
             // so screen width alone must not decide whether mobile text is scaled.
             var mobileScale = Application.isMobilePlatform || (Screen.width > 0 && Screen.width <= 1440) ? 1.18f : 1f;
             text.text = content; text.font = Resources.GetBuiltinResource<Font>("LegacyRuntime.ttf"); text.fontSize = Mathf.RoundToInt(size * mobileScale); text.fontStyle = FontStyle.Normal; text.alignment = TextAnchor.MiddleCenter; text.color = Color.white;
+            // CJK labels must not wrap: LegacyRuntime often measures glyphs wide
+            // enough that "啟用"/"開啟" become one character per line and get
+            // clipped to "用"/"開" inside short buttons and toggles.
+            text.horizontalOverflow = HorizontalWrapMode.Overflow;
+            text.verticalOverflow = VerticalWrapMode.Overflow;
             // Labels sit above their buttons visually but must not intercept the
             // pointer raycast intended for the clickable parent graphic.
             text.raycastTarget = false;
