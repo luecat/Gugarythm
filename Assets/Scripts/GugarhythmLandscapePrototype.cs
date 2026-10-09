@@ -1071,6 +1071,7 @@ namespace Gugarhythm
         void Awake()
         {
             GugarhythmPreferenceMigration.Migrate();
+            StorageMaintenance.RunOnce();
             holdPointProjector = ProjectHoldPoint;
             guideSampleProjector = ProjectGuideSample;
             AudioSettings.OnAudioConfigurationChanged += HandleAudioConfigurationChanged;
@@ -2194,6 +2195,7 @@ namespace Gugarhythm
                 var hash = LocalChartLibrary.Sha256(bytes);
                 var path = Path.Combine(cache, hash + (string.IsNullOrEmpty(extension) ? ".mp3" : extension));
                 if (!File.Exists(path)) File.WriteAllBytes(path, bytes);
+                else StorageMaintenance.Touch(path);
                 return path;
             }
             catch (Exception)
@@ -2296,6 +2298,7 @@ namespace Gugarhythm
             var bakedPath = SilenceBakedCachePath(path, leadingSilenceSeconds);
             if (!string.IsNullOrEmpty(bakedPath) && File.Exists(bakedPath))
             {
+                StorageMaintenance.Touch(bakedPath);
                 using (var bakedRequest = UnityWebRequestMultimedia.GetAudioClip(new Uri(bakedPath).AbsoluteUri, AudioType.WAV))
                 {
                     if (bakedRequest.downloadHandler is DownloadHandlerAudioClip bakedHandler) bakedHandler.streamAudio = false;
@@ -9154,6 +9157,7 @@ namespace Gugarhythm
             for (var index = 0; index < paths.Count; index++)
             {
                 yield return ImportPath(paths[index]);
+                StorageMaintenance.DeleteImportedCopy(paths[index]);
                 if (importDecisionPanel != null && importDecisionPanel.gameObject.activeSelf)
                     yield return new WaitUntil(() => importDecisionPanel == null || !importDecisionPanel.gameObject.activeSelf);
             }

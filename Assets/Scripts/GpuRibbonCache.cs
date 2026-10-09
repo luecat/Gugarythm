@@ -129,6 +129,7 @@ namespace Gugarhythm
             var path = Path.Combine(directory, key + ".bin");
             if (TryRead(path, key, out var diskResult))
             {
+                StorageMaintenance.Touch(path);
                 Memory[key] = new WeakReference<GpuRibbonBuildResult>(diskResult);
                 cacheHit = true;
                 return diskResult;
@@ -161,6 +162,14 @@ namespace Gugarhythm
                 }
             }
             return result;
+        }
+
+        /// <summary>True when the file header matches this build's Magic/FormatVersion.</summary>
+        public static bool HasCurrentFormat(string path)
+        {
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read);
+            using var reader = new BinaryReader(stream, Encoding.UTF8, false);
+            return stream.Length >= 8 && reader.ReadInt32() == Magic && reader.ReadInt32() == FormatVersion;
         }
 
         public static void Write(string path, string key, GpuRibbonBuildResult result)
