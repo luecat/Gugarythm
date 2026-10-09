@@ -1274,7 +1274,7 @@ namespace Gugarhythm
             musicLoadSucceeded = false;
             selection ??= ChartSelectionSession.Ensure();
             if (selection.TryTakePreparedAssets(out var preparedChart, out var preparedMusic,
-                    out var preparedCachePath, out var preparedExtension, out var preparedSilence))
+                    out var preparedCachePath, out var preparedExtension, out _))
             {
                 chart = preparedChart;
                 if (preparedMusic != null)
@@ -1287,12 +1287,12 @@ namespace Gugarhythm
                 else if (!string.IsNullOrEmpty(preparedCachePath))
                 {
                     SetGameplayLoadingVisible(true, "正在準備音訊…");
-                    yield return LoadMusicFromCachePath(preparedCachePath, preparedExtension, preparedSilence);
+                    yield return LoadMusicFromCachePath(preparedCachePath, preparedExtension);
                 }
                 else if (chart.BgmBytes != null)
                 {
                     SetGameplayLoadingVisible(true, "正在準備音訊…");
-                    yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                    yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
                 }
             }
             else
@@ -1323,7 +1323,7 @@ namespace Gugarhythm
                 if (chart.BgmBytes != null)
                 {
                     SetGameplayLoadingVisible(true, "正在準備音訊…");
-                    yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                    yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
                 }
             }
 
@@ -1557,7 +1557,7 @@ namespace Gugarhythm
             if (chart.BgmBytes != null)
             {
                 musicLoadSucceeded = false;
-                yield return LoadMusic(chart.BgmBytes, chart.BgmExtension, chart.BgmStartDelaySeconds);
+                yield return LoadMusic(chart.BgmBytes, chart.BgmExtension);
                 if (!musicLoadSucceeded) { SetStatus("GGR 音樂格式不支援或無法解碼。"); loading = false; yield break; }
             }
             else SetStatus("GGR 缺少 USC 譜面或音樂。");
@@ -2151,36 +2151,13 @@ namespace Gugarhythm
                 if (source != null) source.Stop();
         }
 
-        static AudioClip PrependLeadingSilence(AudioClip source, double leadingSilenceSeconds)
-        {
-            if (source == null || !double.IsFinite(leadingSilenceSeconds) || leadingSilenceSeconds <= 1e-9 ||
-                source.samples <= 0 || source.channels <= 0 || source.frequency <= 0)
-                return source;
-
-            var silenceSamples = (int)Math.Round(leadingSilenceSeconds * source.frequency);
-            if (silenceSamples <= 0) return source;
-            var sourceData = new float[source.samples * source.channels];
-            if (!source.GetData(sourceData, 0)) return source;
-
-            var paddedSamples = checked(source.samples + silenceSamples);
-            var paddedData = new float[paddedSamples * source.channels];
-            Array.Copy(sourceData, 0, paddedData, silenceSamples * source.channels, sourceData.Length);
-            var padded = AudioClip.Create(source.name + " (leading silence)", paddedSamples, source.channels, source.frequency, false);
-            if (!padded.SetData(paddedData, 0))
-            {
-                Destroy(padded);
-                return source;
-            }
-            return padded;
-        }
-
-        IEnumerator LoadMusic(byte[] bytes, string extension, double leadingSilenceSeconds = 0,
+        IEnumerator LoadMusic(byte[] bytes, string extension,
             int requiredGeneration = -1, LocalChartEntry stashEntry = null)
         {
             // Application.persistentDataPath 屬 Unity API，只能在主執行緒讀；
             // 讀完立刻交給純 .NET 的備檔 helper，之後的解碼流程完全不變。
             var cachePath = PrepareAudioCacheFile(bytes, extension, Application.persistentDataPath);
-            yield return LoadMusicFromCachePath(cachePath, extension, leadingSilenceSeconds, requiredGeneration, stashEntry);
+            yield return LoadMusicFromCachePath(cachePath, extension, requiredGeneration, stashEntry);
         }
 
         // 純 .NET：把 BGM 位元組寫進 persistentDataPath/AudioCache 並回傳完整路徑，失敗回 null。
@@ -2204,66 +2181,6 @@ namespace Gugarhythm
             }
         }
 
-        // Silence-baked WAV beside the raw cache. Keyed by source hash + silence ms so
-        // a later LoadMusicFromCachePath can skip GetData/SetData PrependLeadingSilence.
-        static string SilenceBakedCachePath(string rawCachePath, double leadingSilenceSeconds)
-        {
-            if (string.IsNullOrEmpty(rawCachePath) || !double.IsFinite(leadingSilenceSeconds) ||
-                leadingSilenceSeconds <= 1e-9)
-                return null;
-            var silenceMs = (int)Math.Round(leadingSilenceSeconds * 1000.0);
-            if (silenceMs <= 0) return null;
-            return rawCachePath + ".lead" + silenceMs + ".wav";
-        }
-
-        static bool TryWriteSilenceBakedWav(AudioClip padded, string path)
-        {
-            if (padded == null || string.IsNullOrEmpty(path) || padded.samples <= 0 ||
-                padded.channels <= 0 || padded.frequency <= 0)
-                return false;
-            try
-            {
-                var samples = new float[padded.samples * padded.channels];
-                if (!padded.GetData(samples, 0)) return false;
-                var directory = Path.GetDirectoryName(path);
-                if (!string.IsNullOrEmpty(directory)) Directory.CreateDirectory(directory);
-                var temporary = path + ".tmp-" + Guid.NewGuid().ToString("N");
-                WritePcm16Wav(temporary, samples, padded.channels, padded.frequency);
-                if (File.Exists(path)) File.Delete(path);
-                File.Move(temporary, path);
-                return true;
-            }
-            catch (Exception)
-            {
-                return false;
-            }
-        }
-
-        static void WritePcm16Wav(string path, float[] samples, int channels, int frequency)
-        {
-            var dataLength = samples.Length * sizeof(short);
-            using var stream = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None);
-            using var writer = new BinaryWriter(stream);
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("RIFF"));
-            writer.Write(36 + dataLength);
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("WAVE"));
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("fmt "));
-            writer.Write(16);
-            writer.Write((short)1);
-            writer.Write((short)channels);
-            writer.Write(frequency);
-            writer.Write(frequency * channels * sizeof(short));
-            writer.Write((short)(channels * sizeof(short)));
-            writer.Write((short)16);
-            writer.Write(System.Text.Encoding.ASCII.GetBytes("data"));
-            writer.Write(dataLength);
-            for (var index = 0; index < samples.Length; index++)
-            {
-                var clamped = Mathf.Clamp(samples[index], -1f, 1f);
-                writer.Write((short)Mathf.RoundToInt(clamped * short.MaxValue));
-            }
-        }
-
         // 副檔名對映從原本 LoadMusic 內的 switch 逐字搬過來；
         // AudioType.ACC 是專案既有寫法，不要順手「修正」成别的常數名。
         static AudioType AudioTypeForExtension(string extension) => extension?.ToLowerInvariant() switch
@@ -2275,12 +2192,11 @@ namespace Gugarhythm
             _ => AudioType.MPEG,
         };
 
-        // 解碼段：必須主執行緒。streamAudio = false 與 PrependLeadingSilence 是音訊時間軸行為，
-        // 動了就會改變首播偏移與譜面判定基準，所以這裡完全沿用原有邏輯，只是來源改成已備好的快取路徑。
-        // 若已有 silence-baked WAV，直接解那份並跳過整段 PCM copy。
+        // 解碼段：必須主執行緒。BGM 不再前置靜音；譜面的 BgmStartDelaySeconds 改由
+        // MusicLeadSeconds 在播放排程與 clip 時間換算時補上，所以 clip 就是原始音檔。
         // requiredGeneration >= 0 時：曲庫連點選歌用。解碼結果先放區域變數，
         // 世代過期就不寫入 music.clip（可選擇 stash 進 LRU），避免舊請求蓋掉新選取。
-        IEnumerator LoadMusicFromCachePath(string path, string extension, double leadingSilenceSeconds = 0,
+        IEnumerator LoadMusicFromCachePath(string path, string extension,
             int requiredGeneration = -1, LocalChartEntry stashEntry = null)
         {
             musicLoadSucceeded = false;
@@ -2295,42 +2211,14 @@ namespace Gugarhythm
             if (string.IsNullOrEmpty(path) || !File.Exists(path)) yield break;
 
             AudioClip loadedClip = null;
-            var bakedPath = SilenceBakedCachePath(path, leadingSilenceSeconds);
-            if (!string.IsNullOrEmpty(bakedPath) && File.Exists(bakedPath))
+            using (var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, AudioTypeForExtension(extension)))
             {
-                StorageMaintenance.Touch(bakedPath);
-                using (var bakedRequest = UnityWebRequestMultimedia.GetAudioClip(new Uri(bakedPath).AbsoluteUri, AudioType.WAV))
-                {
-                    if (bakedRequest.downloadHandler is DownloadHandlerAudioClip bakedHandler) bakedHandler.streamAudio = false;
-                    yield return bakedRequest.SendWebRequest();
-                    if (bakedRequest.result == UnityWebRequest.Result.Success)
-                    {
-                        try
-                        {
-                            loadedClip = DownloadHandlerAudioClip.GetContent(bakedRequest);
-                        }
-                        catch (Exception)
-                        {
-                            loadedClip = null;
-                        }
-                    }
-                }
-            }
-
-            if (loadedClip == null)
-            {
-                using var request = UnityWebRequestMultimedia.GetAudioClip(new Uri(path).AbsoluteUri, AudioTypeForExtension(extension));
                 if (request.downloadHandler is DownloadHandlerAudioClip audioHandler) audioHandler.streamAudio = false;
                 yield return request.SendWebRequest();
                 if (request.result != UnityWebRequest.Result.Success) yield break;
                 try
                 {
-                    var decodedClip = DownloadHandlerAudioClip.GetContent(request);
-                    loadedClip = PrependLeadingSilence(decodedClip, leadingSilenceSeconds);
-                    var prepended = !ReferenceEquals(loadedClip, decodedClip);
-                    if (prepended && decodedClip != null) Destroy(decodedClip);
-                    if (loadedClip != null && prepended && !string.IsNullOrEmpty(bakedPath))
-                        TryWriteSilenceBakedWav(loadedClip, bakedPath);
+                    loadedClip = DownloadHandlerAudioClip.GetContent(request);
                 }
                 catch (Exception)
                 {
@@ -2494,10 +2382,25 @@ namespace Gugarhythm
             SetGameplayStageVisible(true);
             UpdateVisuals(lastObservedSongTime + visualOffsetSeconds);
             SetGameplayLoadingVisible(false);
-            music.PlayScheduled(GameplayTiming.PlaybackDspForSchedule(scheduledDsp, audioOffsetSeconds));
+            music.PlayScheduled(GameplayTiming.PlaybackDspForSchedule(scheduledDsp, audioOffsetSeconds) +
+                MusicLeadSeconds / GameplayTiming.NormalizePlaybackRate(playbackRate));
             if (stageSound != null) effects.PlayOneShot(stageSound, .72f);
             ClearJudgment();
         }
+
+        // The chart's BgmStartDelaySeconds used to be baked into the clip as leading
+        // silence. The clip is now the raw BGM, so the lead is applied by delaying
+        // PlayScheduled and by shifting every chart-time <-> clip-time conversion.
+        // Pause-menu progress keeps the old lead-inclusive timeline.
+        double MusicLeadSeconds =>
+            chart != null && double.IsFinite(chart.BgmStartDelaySeconds) && chart.BgmStartDelaySeconds > 1e-9
+                ? chart.BgmStartDelaySeconds
+                : 0d;
+
+        double MusicClipBgmOffset => (chart?.BgmOffset ?? 0d) - MusicLeadSeconds;
+
+        float MusicTimelineLength =>
+            music == null || music.clip == null || music.clip.length <= 0f ? 0f : music.clip.length + (float)MusicLeadSeconds;
 
         void PauseGame()
         {
@@ -2506,6 +2409,15 @@ namespace Gugarhythm
             pauseDsp = AudioSettings.dspTime;
             presentationClock.Invalidate();
             music.Pause();
+            if (MusicLeadSeconds > 0 && !resumeNeedsAudioReschedule &&
+                lastObservedSongTime + MusicClipBgmOffset - audioOffsetSeconds < 0)
+            {
+                // The BGM is still waiting on its PlayScheduled lead. Resume through
+                // the reschedule path so the delayed start is recomputed exactly.
+                music.Stop();
+                interruptedSongTime = lastObservedSongTime;
+                resumeNeedsAudioReschedule = true;
+            }
             effects.Pause();
             holdEffects.Pause();
             touches.Clear();
@@ -2524,9 +2436,10 @@ namespace Gugarhythm
 
         void SyncPauseSeekSlider()
         {
-            if (pauseSeekSlider == null || chart == null || music.clip == null || music.clip.length <= 0f) return;
-            var clipTime = GameplayTiming.ClipTimeForChartTime(lastObservedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
-            var normalized = Mathf.Clamp01(clipTime / music.clip.length);
+            var timelineLength = MusicTimelineLength;
+            if (pauseSeekSlider == null || chart == null || timelineLength <= 0f) return;
+            var clipTime = GameplayTiming.ClipTimeForChartTime(lastObservedSongTime, chart.BgmOffset, audioOffsetSeconds, timelineLength);
+            var normalized = Mathf.Clamp01(clipTime / timelineLength);
             pauseSeekSlider.SetValueWithoutNotify(normalized);
             UpdatePauseSeekLabel(normalized);
         }
@@ -2534,7 +2447,7 @@ namespace Gugarhythm
         void UpdatePauseSeekLabel(float normalized)
         {
             if (pauseSeekTimeLabel == null || music.clip == null) return;
-            var total = music.clip.length;
+            var total = MusicTimelineLength;
             pauseSeekTimeLabel.text = $"{FormatSeekTime(Mathf.Clamp01(normalized) * total)} / {FormatSeekTime(total)}";
         }
 
@@ -2552,9 +2465,9 @@ namespace Gugarhythm
         // notes -- seeking always disqualifies the run from best-record saving.
         void SeekToProgress(float normalized)
         {
-            if (!running || !paused || chart == null || music.clip == null || music.clip.length <= 0f) return;
+            if (!running || !paused || chart == null || MusicTimelineLength <= 0f) return;
             normalized = Mathf.Clamp01(normalized);
-            var targetSongTime = normalized * music.clip.length - chart.BgmOffset + audioOffsetSeconds;
+            var targetSongTime = normalized * MusicTimelineLength - chart.BgmOffset + audioOffsetSeconds;
             seekUsedThisRun = true;
             ResetRuntime();
             ClearJudgment();
@@ -2621,9 +2534,9 @@ namespace Gugarhythm
             if (AudioDeviceRecovery.ShouldRescheduleAfterAudioInterruption(resumeNeedsAudioReschedule))
             {
                 var nextDsp = AudioSettings.dspTime + .25;
-                var clipTime = GameplayTiming.ClipTimeForChartTime(interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, music.clip.length);
+                var clipTime = GameplayTiming.ClipTimeForChartTime(interruptedSongTime, MusicClipBgmOffset, audioOffsetSeconds, music.clip.length);
                 var playbackDsp = GameplayTiming.PlaybackDspForChartTime(
-                    nextDsp, interruptedSongTime, chart.BgmOffset, audioOffsetSeconds, playbackRate);
+                    nextDsp, interruptedSongTime, MusicClipBgmOffset, audioOffsetSeconds, playbackRate);
                 music.Stop();
                 GameplayTiming.ApplyClipTime(music, clipTime);
                 ApplyPlaybackRateToAudioSources();
@@ -8008,8 +7921,7 @@ namespace Gugarhythm
         }
 
         // ── 預載入背景化的設計原則（因為無法實機驗證，一律採保守做法）─────────────
-        // 1. 音訊時間軸行為完全不變：保留 streamAudio = false 與 PrependLeadingSilence，
-        //    避免譜面/音樂同步偏移這種離線無法確認的風險。
+        // 1. 音訊時間軸：保留 streamAudio = false；前置靜音已改為播放排程偏移（MusicLeadSeconds）。
         // 2. 只把純 .NET、執行緒安全的工作移到背景：讀檔、ZIP 解壓、譜面解析、SHA256、快取寫檔。
         // 3. Unity API（Texture2D / ImageConversion / UnityWebRequest / AudioClip / Application.*）
         //    一律留主執行緒，所以 persistentDataPath 要先在主執行緒取好再傳進背景。
@@ -8019,9 +7931,7 @@ namespace Gugarhythm
         //    若 PreloadAudioUpFront / 既有 LRU 已有 Music，開始可直接移交免再解。
         //
         // Phase 2（本次刻意不做）：BGM 改 streamAudio = true 串流解碼。
-        //    前置靜音得改成播放排程偏移併入既有 GameplayTiming（BgmOffset / audioOffsetSeconds），
-        //    而且串流下 PrependLeadingSilence 依賴的 GetData/SetData 不可用，
-        //    seek/pause 也多處依賴 music.clip.length，必須實機驗證後才能動。
+        //    前置靜音已改成播放排程偏移，剩下要實機驗證串流下的 seek/pause 精度。
         //
         // 上機後必做檢查清單：
         //    (1) Profiler 錄啟動，確認主執行緒不再有 File.ReadAllBytes / ZipArchive /
@@ -8077,7 +7987,7 @@ namespace Gugarhythm
                     };
                     if (PreloadAudioUpFront) // 預設 false，正常不會進這裡。
                     {
-                        yield return LoadMusicFromCachePath(prepared.AudioCachePath, prepared.Chart.BgmExtension, prepared.Chart.BgmStartDelaySeconds);
+                        yield return LoadMusicFromCachePath(prepared.AudioCachePath, prepared.Chart.BgmExtension);
                         if (musicLoadSucceeded && music.clip != null)
                         {
                             cached.Music = music.clip;

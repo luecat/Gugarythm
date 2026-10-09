@@ -37,6 +37,7 @@ namespace Gugarhythm
                 var audio = Path.Combine(persistent, "AudioCache");
                 var ribbon = Path.Combine(persistent, "GpuRibbonCache");
                 DeleteStaleTemporaryFiles(audio, now);
+                DeleteLegacySilenceBakedWavs(audio);
                 DeleteStaleTemporaryFiles(ribbon, now);
                 DeleteStaleRibbonFormats(ribbon);
                 TrimToBudget(new[] { audio, ribbon }, DerivedCacheBudgetBytes, now);
@@ -123,6 +124,18 @@ namespace Gugarhythm
             foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*.tmp-*"))
             {
                 try { if (now - file.LastWriteTimeUtc >= StagingGrace) file.Delete(); }
+                catch (Exception) { /* Retry next launch. */ }
+            }
+        }
+
+        // Older builds padded BGM with leading silence and cached it as raw PCM WAV
+        // ("<hash>.<ext>.lead<ms>.wav"). Playback now delays PlayScheduled instead.
+        static void DeleteLegacySilenceBakedWavs(string directory)
+        {
+            if (!Directory.Exists(directory)) return;
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*.lead*.wav"))
+            {
+                try { file.Delete(); }
                 catch (Exception) { /* Retry next launch. */ }
             }
         }
