@@ -129,6 +129,7 @@ namespace Gugarhythm
                 noteIndex = -1,
                 detail = $"mode={mode};chart_id={entry.Id};chart_title={entry.Title};" +
                     $"judgment_protection={protection};protection_mode=source_aware_shared_lane;" +
+                    "protection_clock=before_input_delay;" +
                     $"audio_delay_ms={audioDelayMilliseconds:0.###};input_delay_ms={inputDelayMilliseconds:0.###}",
             });
         }

@@ -206,6 +206,17 @@ namespace Gugarhythm
         const double StackedTimeTolerance = 1e-9;
         public bool JudgmentProtectionEnabled { get; set; } = true;
 
+        // ApplyInputOffset has already moved token times so FAST/LATE follows
+        // the input-delay setting. Pair ownership stays on the pre-shift clock:
+        // otherwise that constant slides a hit across the midpoint and the
+        // other note of the pair takes it.
+        double inputCalibrationOffset;
+        public double InputCalibrationOffset
+        {
+            get => inputCalibrationOffset;
+            set => inputCalibrationOffset = double.IsFinite(value) ? value : 0d;
+        }
+
         // Diagnostics only (Phantom Crisis bar 85~97 frame-drop investigation):
         // how many (input, candidate note) edges were considered last frame.
         // A spike here during real play but not auto-play would confirm the
@@ -521,20 +532,26 @@ namespace Gugarhythm
                 ? FlickIntersectionTime(input, note, out protectionLane)
                 : input.Time;
             if (!eventTime.HasValue) return false;
-            var grade = GradeFor(note, eventTime.Value - note.Time);
-            if (grade == JudgmentGrade.Pending) return false;
+            var calibratedDelta = eventTime.Value - note.Time;
+            var awardGrade = GradeFor(note, calibratedDelta);
+            if (awardGrade == JudgmentGrade.Pending) return false;
+            var ownershipTime = eventTime.Value - inputCalibrationOffset;
             if (JudgmentProtectionEnabled && input.Source != InputTokenSource.DirectPress &&
-                IsProtectedCandidate(note, eventTime.Value, protectionLane))
+                IsProtectedCandidate(note, ownershipTime, calibratedDelta, protectionLane))
             {
                 blockedNote = note;
-                blockedGrade = grade;
+                blockedGrade = awardGrade;
                 blockedEventTime = eventTime.Value;
                 return false;
             }
             var hitLane = input.Kind == RuntimeNoteKind.Flick ? protectionLane : input.ContactLane;
             var spatial = Math.Abs(input.Lane - note.Lane);
-            edge = new Edge(inputIndex, note, eventTime.Value, grade,
-                Math.Abs(eventTime.Value - note.Time), spatial, hitLane);
+            // Rank by where the finger was. The awarded grade still uses the
+            // delay-shifted delta, so a better calibrated grade on the other
+            // note cannot take the hit away from the note under the hand.
+            var selectionGrade = GradeFor(note, ownershipTime - note.Time);
+            edge = new Edge(inputIndex, note, eventTime.Value, awardGrade, selectionGrade,
+                Math.Abs(ownershipTime - note.Time), spatial, hitLane);
             return true;
         }
 
@@ -750,7 +767,7 @@ namespace Gugarhythm
 
         static int CompareEdges(Edge a, Edge b)
         {
-            var grade = GradeRank(a.Grade).CompareTo(GradeRank(b.Grade));
+            var grade = GradeRank(a.SelectionGrade).CompareTo(GradeRank(b.SelectionGrade));
             if (grade != 0) return grade;
             var time = a.TimeError.CompareTo(b.TimeError);
             if (time != 0) return time;
@@ -969,18 +986,17 @@ namespace Gugarhythm
             pairs.Add(pair);
         }
 
-        bool IsProtectedCandidate(RuntimeNote note, double eventTime, float inputLane)
+        bool IsProtectedCandidate(RuntimeNote note, double ownershipTime, double calibratedDelta, float inputLane)
         {
             if (!IsTapProtectionKind(note.Kind) ||
                 !tapProtectionPairs.TryGetValue(note.Index, out var pairs)) return false;
 
-            var band = ProtectionBandFor(eventTime - note.Time);
-            if (band == ProtectionBand.Outside) return false;
+            if (ProtectionBandFor(calibratedDelta) == ProtectionBand.Outside) return false;
             foreach (var pair in pairs)
             {
                 var wrongHalf = ReferenceEquals(note, pair.Earlier)
-                    ? eventTime > pair.Boundary
-                    : eventTime < pair.Boundary;
+                    ? ownershipTime > pair.Boundary
+                    : ownershipTime < pair.Boundary;
                 if (wrongHalf && pair.ContainsSharedLane(inputLane)) return true;
             }
 
@@ -1037,14 +1053,16 @@ namespace Gugarhythm
             public readonly RuntimeNote Note;
             public readonly double EventTime;
             public readonly JudgmentGrade Grade;
+            public readonly JudgmentGrade SelectionGrade;
             public readonly double TimeError;
             public readonly double SpaceError;
             public readonly float HitLane;
 
             public Edge(int inputIndex, RuntimeNote note, double eventTime, JudgmentGrade grade,
-                double timeError, double spaceError, float hitLane)
+                JudgmentGrade selectionGrade, double timeError, double spaceError, float hitLane)
             {
                 InputIndex = inputIndex; Note = note; EventTime = eventTime; Grade = grade;
+                SelectionGrade = selectionGrade;
                 TimeError = timeError; SpaceError = spaceError; HitLane = hitLane;
             }
         }

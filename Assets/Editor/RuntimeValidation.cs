@@ -4265,6 +4265,7 @@ public static class RuntimeValidation
         ValidateChunithmJudgmentWindows();
         ValidateTapJackProtection();
         Validate225BpmEighthProtection();
+        ValidateInputDelayKeepsProtectionOwnership();
         ValidateLatencyCalibration();
 
         var score = new ScoreState();
@@ -5938,6 +5939,84 @@ public static class RuntimeValidation
             Array.Empty<ActiveContact>());
         Require(multiFingerA.Grade == JudgmentGrade.Perfect && multiFingerB.Grade == JudgmentGrade.Perfect,
             "An authored candidate from one finger must not remove another finger's forgiveness candidate");
+    }
+
+    static void ValidateInputDelayKeepsProtectionOwnership()
+    {
+        const double offset = .06d;
+        var first = Note(790, 1.000, 0);
+        var second = Note(791, 1.100, 0);
+        var engine = new JudgmentEngine(new[] { first, second }, new ScoreState())
+        {
+            InputCalibrationOffset = offset,
+        };
+        var events = engine.Process(1.160,
+            new[]
+            {
+                new InputToken(1, RuntimeNoteKind.Tap, 1.000 + offset, 0),
+                new InputToken(2, RuntimeNoteKind.Tap, 1.100 + offset, 0),
+            },
+            Array.Empty<ActiveContact>());
+        Require(first.Grade == JudgmentGrade.Great && second.Grade == JudgmentGrade.Great &&
+                events.Count == 2 &&
+                Math.Abs(events.Single(item => item.Note == first).Delta - offset) < 1e-9 &&
+                Math.Abs(events.Single(item => item.Note == second).Delta - offset) < 1e-9,
+            "Input delay must shift FAST/LATE without moving either note of a protected pair");
+
+        var directFirst = Note(792, 2.000, 0);
+        var directSecond = Note(793, 2.100, 0);
+        const double directOffset = .08d;
+        engine = new JudgmentEngine(new[] { directFirst, directSecond }, new ScoreState())
+        {
+            InputCalibrationOffset = directOffset,
+        };
+        events = engine.Process(2.080,
+            new[]
+            {
+                new InputToken(3, RuntimeNoteKind.Tap, 2.000 + directOffset, 0,
+                    source: InputTokenSource.DirectPress),
+            },
+            Array.Empty<ActiveContact>());
+        Require(events.Count == 1 && events[0].Note == directFirst &&
+                events[0].Grade == JudgmentGrade.Good &&
+                Math.Abs(events[0].Delta - directOffset) < 1e-9 &&
+                directSecond.Grade == JudgmentGrade.Pending,
+            "A direct press kept on its note by input delay must not be stolen by the later overlapping note");
+
+        var early = Note(794, 3.000, 0);
+        var late = Note(795, 3.100, 0);
+        const double pulledBack = -.04d;
+        engine = new JudgmentEngine(new[] { early, late }, new ScoreState())
+        {
+            InputCalibrationOffset = pulledBack,
+        };
+        events = engine.Process(3.060,
+            new[] { new InputToken(4, RuntimeNoteKind.Tap, 3.060 + pulledBack, 0) },
+            Array.Empty<ActiveContact>());
+        Require(early.Grade == JudgmentGrade.Pending && late.Grade == JudgmentGrade.Good &&
+                events.Count == 1 && events[0].Note == late &&
+                Math.Abs(events[0].Delta - (3.060 + pulledBack - 3.100)) < 1e-9,
+            "Input delay must not pull a hit from the later half of a protected pair back onto the earlier note");
+
+        var flickEarly = Note(796, 4.000, 0);
+        flickEarly.Kind = RuntimeNoteKind.Flick;
+        var flickLate = Note(797, 4.120, 0);
+        flickLate.Kind = RuntimeNoteKind.Flick;
+        const double flickOffset = .06d;
+        engine = new JudgmentEngine(new[] { flickEarly, flickLate }, new ScoreState())
+        {
+            InputCalibrationOffset = flickOffset,
+        };
+        events = engine.Process(4.110,
+            new[]
+            {
+                new InputToken(5, RuntimeNoteKind.Flick, 4.050 + flickOffset, 0f, 1.2f, 4.020 + flickOffset),
+            },
+            Array.Empty<ActiveContact>());
+        Require(flickEarly.Grade == JudgmentGrade.Good && flickLate.Grade == JudgmentGrade.Pending &&
+                events.Count == 1 && events[0].Note == flickEarly &&
+                Math.Abs(events[0].Delta - .08d) < 1e-8,
+            "Input delay must not move a Flick across the protection midpoint");
     }
 
     static void Validate225BpmEighthProtection()
