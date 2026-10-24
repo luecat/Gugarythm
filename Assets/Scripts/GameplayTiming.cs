@@ -99,6 +99,9 @@ namespace Gugarhythm
         public static double ReplaceInputOffset(double replacementOffset) =>
             double.IsFinite(replacementOffset) ? Math.Clamp(replacementOffset, -.3, .3) : 0;
 
+        // Grade windows follow this shift. JudgmentEngine ownership subtracts
+        // the same offset before the protection midpoint test, so the setting
+        // changes FAST/LATE without moving which note of a close pair is hit.
         public static double ApplyInputOffset(double rawSongTime, double inputOffset) =>
             rawSongTime + ReplaceInputOffset(inputOffset);
     }

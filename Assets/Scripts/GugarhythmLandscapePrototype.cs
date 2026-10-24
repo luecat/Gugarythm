@@ -1489,6 +1489,7 @@ namespace Gugarhythm
             // beneath the button rather than input feedback.
             if (autoPlayEnabled) autoPlayUsedThisRun = true;
             var judgmentTimingStart = measurePerformance ? System.Diagnostics.Stopwatch.GetTimestamp() : 0;
+            judgmentEngine.InputCalibrationOffset = inputOffsetSeconds;
             judgmentEngine.ProcessInto(authoritativeSongTime, inputBatch, contacts, contactPaths,
                 autoPlayEnabled, judgmentEvents,
                 InputDiagnosticsSession.CaptureActive ? inputDiagnosticsDecisions : null);
@@ -2706,7 +2707,10 @@ namespace Gugarhythm
             scoreState.Reset();
             judgmentTimingStatistics.Reset();
             resultRunStatistics.Reset();
-            judgmentEngine = new JudgmentEngine(chart.Notes, scoreState);
+            judgmentEngine = new JudgmentEngine(chart.Notes, scoreState)
+            {
+                InputCalibrationOffset = inputOffsetSeconds,
+            };
             ConfigureInputDiagnosticsJudgmentEngine();
             judgmentEvents.Clear();
             contactCleanupBuffers.BeginFrame();
